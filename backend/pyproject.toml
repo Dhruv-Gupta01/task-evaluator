@@ -1,0 +1,19 @@
+[project]
+name = "task-evaluator-backend"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
+    "docker>=7.1",
+    "pydantic-settings>=2.6",
+    "python-multipart>=0.0.12",
+    "anthropic>=0.40",
+    "openai>=1.57",
+    "google-genai>=0.3",
+]
+
+[tool.uv]
+package = false
