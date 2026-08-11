@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: taskeval-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: taskeval
+      POSTGRES_PASSWORD: taskeval
+      POSTGRES_DB: taskeval
+    ports:
+      - "5433:5432"
+    volumes:
+      - taskeval-pg-data:/var/lib/postgresql/data
+
+volumes:
+  taskeval-pg-data:

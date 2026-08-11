@@ -1,6 +1,6 @@
 import json
 
-from openai import AsyncOpenAI, BadRequestError, RateLimitError
+from openai import AsyncOpenAI, BadRequestError, InternalServerError, RateLimitError
 
 from app.services.llm.base import LLMClient, LLMResponse, Message, ToolCall, ToolSpec
 from app.services.llm.rate_limiter import (
@@ -52,7 +52,12 @@ class OpenAIClient(LLMClient):
 
         try:
             resp = await with_backoff(
-                _call, retryable_exceptions=(RateLimitError, *CONNECTION_RETRYABLE_EXCEPTIONS)
+                _call,
+                retryable_exceptions=(
+                    RateLimitError,
+                    InternalServerError,
+                    *CONNECTION_RETRYABLE_EXCEPTIONS,
+                ),
             )
         except BadRequestError as e:
             # Some providers (observed on Groq) hard-reject a malformed tool-

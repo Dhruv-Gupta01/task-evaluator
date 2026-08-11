@@ -67,7 +67,13 @@ def validate_zip(zip_path: Path, extract_dir: Path) -> ValidationResult:
             ok=False, errors=[f"invalid task.toml config values: {e}"], task_root=task_root
         )
 
-    task_name = data.get("metadata", {}).get("name") or task_root.name
+    # Per the v2.0 schema, [metadata].name shouldn't be present (it's a
+    # forbidden field, flagged by the static checks) — when it's absent,
+    # return None rather than falling back to task_root.name, which is just
+    # the literal extraction-directory folder name ("extracted"). task_runner
+    # only overwrites Submission.task_name when this is truthy, so None
+    # preserves the real name already derived from the uploaded filename.
+    task_name = data.get("metadata", {}).get("name")
 
     return ValidationResult(
         ok=True, errors=[], task_root=task_root, config=config, task_name=task_name

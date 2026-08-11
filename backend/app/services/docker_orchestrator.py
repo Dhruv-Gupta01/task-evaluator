@@ -31,7 +31,15 @@ class DockerBuildError(Exception):
 def get_client() -> DockerClient:
     global _client
     if _client is None:
-        _client = docker.from_env()
+        # docker-py's default HTTP client timeout is 60s, applied to every
+        # Docker Engine API call (including plain container creation) —
+        # entirely separate from our own timeout_sec params, which only
+        # bound how long we wait for a container to finish *running*.
+        # Creating a container from an unusually large image (e.g. a full
+        # compiled C++ toolchain with multiple binaries) can itself exceed
+        # 60s, raising a raw requests.exceptions.ReadTimeout with no
+        # relation to the task's actual execution timeout.
+        _client = docker.from_env(timeout=300)
     return _client
 
 
@@ -42,6 +50,23 @@ def _truncate(log_text: str) -> str:
 
 
 DEFAULT_BUILD_TIMEOUT_SEC = 600
+
+# network_disabled=True (containers.run's NetworkMode: none) replaces the
+# container's /etc/hosts entirely — both the image's own baked-in entries
+# and docker-py's `extra_hosts` param are silently dropped, verified by
+# direct reproduction against this exact base-image/network combo. A task
+# with a self-contained mock server the oracle/agent talks to over loopback
+# (no real internet needed) is a legitimate pattern, so a plain bind-mounted
+# static hosts file is used instead — a filesystem mount, not tied to
+# Docker's network-config subsystem, so it isn't skipped the same way.
+_LOOPBACK_HOSTS_FILE = _BACKEND_ROOT / "storage" / "loopback_hosts"
+
+
+def _ensure_loopback_hosts_file() -> Path:
+    if not _LOOPBACK_HOSTS_FILE.exists():
+        _LOOPBACK_HOSTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _LOOPBACK_HOSTS_FILE.write_text("127.0.0.1 localhost\n::1 localhost\n")
+    return _LOOPBACK_HOSTS_FILE
 
 
 def _run_docker_build_cli(
@@ -77,7 +102,15 @@ def _run_docker_build_cli(
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout_sec)
     except subprocess.TimeoutExpired as e:
-        partial = (e.stdout or "") + (e.stderr or "")
+        # On timeout, CPython's subprocess module returns the partial
+        # stdout/stderr it had buffered as raw bytes even though text=True
+        # was requested — decoding only happens on the normal return path.
+        def _decode(chunk: bytes | str | None) -> str:
+            if chunk is None:
+                return ""
+            return chunk.decode(errors="replace") if isinstance(chunk, bytes) else chunk
+
+        partial = _decode(e.stdout) + _decode(e.stderr)
         raise DockerBuildError(
             _truncate(partial) + f"\n\n[build timed out after {timeout_sec}s]"
         )
@@ -231,6 +264,12 @@ def run_phase(
         kwargs["nano_cpus"] = nano_cpus
     if environment:
         kwargs["environment"] = environment
+    if network_disabled:
+        # See _ensure_loopback_hosts_file's comment: extra_hosts is silently
+        # dropped by Docker for a network-disabled container, so a real bind
+        # mount is used instead — verified by direct reproduction to work
+        # where extra_hosts did not.
+        volumes[str(_ensure_loopback_hosts_file())] = {"bind": "/etc/hosts", "mode": "ro"}
 
     container = None
     try:

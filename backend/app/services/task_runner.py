@@ -83,7 +83,14 @@ def _resolve_reward(verify_exit: int, verifier_logs_dir: Path) -> int:
     reward_file = verifier_logs_dir / "reward.txt"
     if reward_file.is_file():
         try:
-            return int(reward_file.read_text().strip())
+            # Accept float-formatted rewards too (e.g. "1.0", "0.0") — a
+            # natural, common way to write this that plain int() rejects
+            # outright. Falling through to the exit-code fallback on that
+            # ValueError silently produced a WRONG reward for any test.sh
+            # following the documented "always exit 0, real signal is the
+            # file" convention, since that convention makes verify_exit
+            # always 0 regardless of pass/fail.
+            return int(float(reward_file.read_text().strip()))
         except (ValueError, OSError):
             pass
     return 1 if verify_exit == 0 else 0
