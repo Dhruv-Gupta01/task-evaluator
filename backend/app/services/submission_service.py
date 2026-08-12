@@ -2,6 +2,8 @@ from app.models import Run, Submission
 from app.schemas import (
     AgentTrialsResult,
     BuildResult,
+    LeakageScanResult,
+    ReviewReportResult,
     StageResult,
     StageStatus,
     SubmissionListItem,
@@ -74,10 +76,24 @@ def _sufficiency_result(run: Run | None) -> SufficiencyResult:
     return SufficiencyResult(status=run.status, passed=(run.reward == 1) if run.reward is not None else None, logs=run.logs)  # type: ignore[arg-type]
 
 
+def _leakage_scan_result(run: Run | None) -> LeakageScanResult:
+    if run is None:
+        return LeakageScanResult(status="not-run", passed=None, logs=None)
+    return LeakageScanResult(status=run.status, passed=(run.reward == 1) if run.reward is not None else None, logs=run.logs)  # type: ignore[arg-type]
+
+
+def _review_report_result(run: Run | None) -> ReviewReportResult:
+    if run is None:
+        return ReviewReportResult(status="not-run", passed=None, logs=None)
+    return ReviewReportResult(status=run.status, passed=(run.reward == 1) if run.reward is not None else None, logs=run.logs)  # type: ignore[arg-type]
+
+
 def to_schema(submission: Submission) -> SubmissionSchema:
     oracle_run = _get_run(submission, "oracle")
     nop_run = _get_run(submission, "nop")
     sufficiency_run = _get_run(submission, "sufficiency")
+    leakage_scan_run = _get_run(submission, "leakage_scan")
+    review_report_run = _get_run(submission, "review_report")
     return SubmissionSchema(
         id=submission.id,
         task_name=submission.task_name,
@@ -91,6 +107,8 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         nop=_nop_stage_result(nop_run),
         agent_trials=_agent_trials_result(submission),
         sufficiency=_sufficiency_result(sufficiency_run),
+        leakage_scan=_leakage_scan_result(leakage_scan_run),
+        review_report=_review_report_result(review_report_run),
     )
 
 
@@ -98,6 +116,8 @@ def to_list_item(submission: Submission) -> SubmissionListItem:
     oracle_run = _get_run(submission, "oracle")
     nop_run = _get_run(submission, "nop")
     sufficiency_run = _get_run(submission, "sufficiency")
+    leakage_scan_run = _get_run(submission, "leakage_scan")
+    review_report_run = _get_run(submission, "review_report")
     agent_trials = _agent_trials_result(submission)
     return SubmissionListItem(
         id=submission.id,
@@ -108,4 +128,6 @@ def to_list_item(submission: Submission) -> SubmissionListItem:
         nop_status=_nop_stage_result(nop_run).status,
         agent_status=agent_trials.status,
         sufficiency_status=(sufficiency_run.status if sufficiency_run else "not-run"),  # type: ignore[arg-type]
+        leakage_scan_status=(leakage_scan_run.status if leakage_scan_run else "not-run"),  # type: ignore[arg-type]
+        review_report_status=(review_report_run.status if review_report_run else "not-run"),  # type: ignore[arg-type]
     )

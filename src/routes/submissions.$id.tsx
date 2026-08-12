@@ -94,6 +94,22 @@ function SubmissionDetail() {
     },
     onError: (e: Error) => toast.error(e.message),
   });
+  const mLeakageScan = useMutation({
+    mutationFn: () => api.leakageScan(id),
+    onSuccess: () => {
+      toast.success("Leakage scan started");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const mReviewReport = useMutation({
+    mutationFn: () => api.reviewReport(id),
+    onSuccess: () => {
+      toast.success("Review report generation started");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
 
   if (isLoading) {
     return (
@@ -116,6 +132,16 @@ function SubmissionDetail() {
   const validated = data.build.status !== "not-run";
   const oracleNopPassed =
     data.oracle.status === "passed" && data.nop.status === "passed";
+
+  const TERMINAL: StageStatus[] = ["passed", "failed"];
+  const reviewReportMissingGates = [
+    TERMINAL.includes(data.build.status) ? null : "build",
+    TERMINAL.includes(data.oracle.status) ? null : "oracle",
+    TERMINAL.includes(data.nop.status) ? null : "nop",
+    TERMINAL.includes(data.sufficiency.status) ? null : "sufficiency",
+    TERMINAL.includes(data.agent_trials.status) ? null : "agent trials",
+  ].filter((g): g is string => g !== null);
+  const reviewReportReady = reviewReportMissingGates.length === 0;
 
   return (
     <PageShell>
@@ -302,6 +328,67 @@ function SubmissionDetail() {
             </div>
           )}
           <LogPanel logs={data.sufficiency.logs} title="Sufficiency verdict" />
+        </StageCard>
+
+        {/* Leakage Scan */}
+        <StageCard
+          title="Leakage Scan"
+          description="Advisory only — flags unedited LLM chat artifacts (disclaimers, unfilled placeholders). Not a pass/fail gate."
+          status={data.leakage_scan.status}
+        >
+          <RunButton
+            label="Run Leakage Scan"
+            runningLabel="Scanning…"
+            onClick={() => mLeakageScan.mutate()}
+            running={
+              data.leakage_scan.status === "running" || data.leakage_scan.status === "pending"
+            }
+            pending={mLeakageScan.isPending}
+            disabled={!validated}
+            disabledReason="Validate the submission first"
+          />
+          {data.leakage_scan.passed != null && (
+            <div
+              className={`rounded-md border p-2.5 text-xs ${
+                data.leakage_scan.passed
+                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                  : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+              }`}
+            >
+              {data.leakage_scan.passed
+                ? "Clean — no leakage artifacts found."
+                : "Artifacts found — worth a human look, not proof of misconduct."}
+            </div>
+          )}
+          <LogPanel logs={data.leakage_scan.logs} title="Leakage scan findings" />
+        </StageCard>
+
+        {/* Review Report */}
+        <StageCard
+          title="Review Report"
+          description="Synthesizes the full platform report + static checks into a candidate-facing diagnostic. Draft for human review — not an auto-issued verdict."
+          status={data.review_report.status}
+        >
+          <RunButton
+            label="Generate Review Report"
+            runningLabel="Generating…"
+            onClick={() => mReviewReport.mutate()}
+            running={
+              data.review_report.status === "running" || data.review_report.status === "pending"
+            }
+            pending={mReviewReport.isPending}
+            disabled={!reviewReportReady}
+            disabledReason={
+              reviewReportReady
+                ? undefined
+                : `Finish these first: ${reviewReportMissingGates.join(", ")}`
+            }
+          />
+          {data.review_report.logs && (
+            <div className="rounded-md border bg-muted/30 p-3 text-xs whitespace-pre-wrap max-h-[32rem] overflow-y-auto">
+              {data.review_report.logs}
+            </div>
+          )}
         </StageCard>
       </div>
     </PageShell>

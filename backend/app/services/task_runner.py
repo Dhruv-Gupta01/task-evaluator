@@ -9,7 +9,13 @@ from pathlib import Path
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models import Run, Submission
-from app.services import docker_orchestrator, sufficiency_judge, validation_service
+from app.services import (
+    docker_orchestrator,
+    leakage_scan,
+    review_report,
+    sufficiency_judge,
+    validation_service,
+)
 from app.services.task_config import TaskConfig
 
 settings = get_settings()
@@ -493,6 +499,131 @@ async def run_sufficiency_check(submission_id: str) -> None:
     except Exception:
         run = db.query(Run).filter_by(
             submission_id=submission_id, kind="sufficiency", run_index=0
+        ).one_or_none()
+        if run is not None:
+            run.status = "failed"
+            run.reward = None
+            run.logs = traceback.format_exc()
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+    finally:
+        db.close()
+
+
+async def run_leakage_scan(submission_id: str) -> None:
+    """Advisory-only regex scan for LLM-chat-leakage artifacts (assistant
+    self-references, disclaimers, unfilled template placeholders) across
+    every text file in the submission. No LLM call, no Docker — just file
+    reads, so like sufficiency it only needs extracted_path to be set.
+    A "failed" status here means artifacts were found, NOT that the
+    submission is disqualified — never wire this into any pass/fail gate
+    that blocks other stages; it's a flag for human review only."""
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+
+        run = _get_or_create_run(db, submission_id, "leakage_scan", 0)
+        run.status = "running"
+        run.reward = None
+        run.logs = None
+        run.started_at = datetime.now(UTC)
+        db.commit()
+
+        task_root = Path(submission.extracted_path)
+
+        try:
+            result = leakage_scan.run_leakage_scan(task_root)
+        except Exception:
+            run.status = "failed"
+            run.reward = None
+            run.logs = traceback.format_exc()
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+            return
+
+        reward = 1 if result.get("passed") else 0
+        findings = result.get("findings") or []
+        logs_text = result.get("verdict", "")
+        if findings:
+            logs_text += "\n\nFindings:\n" + "\n".join(f"- {f}" for f in findings)
+
+        run.status = "passed" if reward == 1 else "failed"
+        run.reward = reward
+        run.logs = logs_text
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    except Exception:
+        run = db.query(Run).filter_by(
+            submission_id=submission_id, kind="leakage_scan", run_index=0
+        ).one_or_none()
+        if run is not None:
+            run.status = "failed"
+            run.reward = None
+            run.logs = traceback.format_exc()
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+    finally:
+        db.close()
+
+
+async def run_review_report(submission_id: str) -> None:
+    """Final synthesis report: reads the already-completed platform report
+    (Build/Oracle/Nop/Sufficiency/Agent Trials) plus mechanical static
+    checks and an infra-marker scan, and asks the LLM to reason only over
+    what's left — genuine vs. platform-noise failures, and what a candidate
+    should change. Requires every prerequisite gate to be terminal
+    (passed/failed); the router enforces this before enqueuing, this is a
+    defensive second check in case the stage is ever invoked directly.
+    "status: passed" here means the report was generated successfully — it
+    is NOT a judgment on the submission itself; the actual verdict is in the
+    report text (run.logs)."""
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+
+        run = _get_or_create_run(db, submission_id, "review_report", 0)
+        run.status = "running"
+        run.reward = None
+        run.logs = None
+        run.started_at = datetime.now(UTC)
+        db.commit()
+
+        ready, missing = review_report.all_gates_terminal(submission)
+        if not ready:
+            run.status = "failed"
+            run.reward = None
+            run.logs = (
+                "Cannot generate a review report yet — the following gates "
+                f"haven't finished: {', '.join(missing)}."
+            )
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+            return
+
+        task_root = Path(submission.extracted_path)
+
+        try:
+            result = await review_report.run_review_report(submission, task_root)
+        except Exception:
+            run.status = "failed"
+            run.reward = None
+            run.logs = traceback.format_exc()
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+            return
+
+        run.status = "passed"
+        run.reward = 1
+        run.logs = result["report_markdown"]
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    except Exception:
+        run = db.query(Run).filter_by(
+            submission_id=submission_id, kind="review_report", run_index=0
         ).one_or_none()
         if run is not None:
             run.status = "failed"

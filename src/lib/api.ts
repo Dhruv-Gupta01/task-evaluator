@@ -35,6 +35,22 @@ export interface SufficiencyResult {
   logs?: string;
 }
 
+// Advisory only — passed: false means leakage artifacts were found, NOT
+// that the submission is disqualified. Never treat this as a pass/fail gate.
+export interface LeakageScanResult {
+  status: StageStatus;
+  passed: boolean | null;
+  logs?: string;
+}
+
+// "passed" means the report generated successfully — NOT a judgment on the
+// submission. The actual verdict is markdown text in `logs`.
+export interface ReviewReportResult {
+  status: StageStatus;
+  passed: boolean | null;
+  logs?: string;
+}
+
 export interface Submission {
   id: string;
   task_name: string;
@@ -44,6 +60,8 @@ export interface Submission {
   nop: StageResult;
   agent_trials: AgentTrialsResult;
   sufficiency: SufficiencyResult;
+  leakage_scan: LeakageScanResult;
+  review_report: ReviewReportResult;
 }
 
 export interface SubmissionListItem {
@@ -55,6 +73,8 @@ export interface SubmissionListItem {
   nop_status: StageStatus;
   agent_status: StageStatus;
   sufficiency_status: StageStatus;
+  leakage_scan_status: StageStatus;
+  review_report_status: StageStatus;
 }
 
 async function handle<T>(res: Response): Promise<T> {
@@ -95,6 +115,14 @@ export const api = {
     }).then(handle<unknown>),
   sufficiency: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/sufficiency`, { method: "POST" }).then(
+      handle<unknown>,
+    ),
+  leakageScan: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/leakage-scan`, { method: "POST" }).then(
+      handle<unknown>,
+    ),
+  reviewReport: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/review-report`, { method: "POST" }).then(
       handle<unknown>,
     ),
 };

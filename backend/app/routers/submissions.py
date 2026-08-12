@@ -140,3 +140,74 @@ async def trigger_sufficiency(submission_id: str, db: Session = Depends(get_db))
         f"{submission_id}:sufficiency", task_runner.run_sufficiency_check(submission_id)
     )
     return {"status": "started"}
+
+
+@router.post("/submissions/{submission_id}/leakage-scan", status_code=202)
+async def trigger_leakage_scan(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    submission = db.get(Submission, submission_id)
+    if submission is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if submission.extracted_path is None:
+        raise HTTPException(
+            status_code=400, detail="validate the submission first (files must be extracted)"
+        )
+
+    run = (
+        db.query(Run).filter_by(submission_id=submission_id, kind="leakage_scan", run_index=0).one_or_none()
+    )
+    if run is None:
+        run = Run(submission_id=submission_id, kind="leakage_scan", run_index=0)
+        db.add(run)
+    run.status = "pending"
+    db.commit()
+
+    await task_queue.submit(
+        f"{submission_id}:leakage_scan", task_runner.run_leakage_scan(submission_id)
+    )
+    return {"status": "started"}
+
+
+_REVIEW_REPORT_TERMINAL = {"passed", "failed"}
+
+
+@router.post("/submissions/{submission_id}/review-report", status_code=202)
+async def trigger_review_report(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    submission = db.get(Submission, submission_id)
+    if submission is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if submission.extracted_path is None:
+        raise HTTPException(
+            status_code=400, detail="validate the submission first (files must be extracted)"
+        )
+
+    schema = submission_service.to_schema(submission)
+    missing = []
+    if schema.build.status not in _REVIEW_REPORT_TERMINAL:
+        missing.append("build")
+    if schema.oracle.status not in _REVIEW_REPORT_TERMINAL:
+        missing.append("oracle")
+    if schema.nop.status not in _REVIEW_REPORT_TERMINAL:
+        missing.append("nop")
+    if schema.sufficiency.status not in _REVIEW_REPORT_TERMINAL:
+        missing.append("sufficiency")
+    if schema.agent_trials.status not in _REVIEW_REPORT_TERMINAL:
+        missing.append("agent_trials")
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"run these gates to completion first: {', '.join(missing)}",
+        )
+
+    run = (
+        db.query(Run).filter_by(submission_id=submission_id, kind="review_report", run_index=0).one_or_none()
+    )
+    if run is None:
+        run = Run(submission_id=submission_id, kind="review_report", run_index=0)
+        db.add(run)
+    run.status = "pending"
+    db.commit()
+
+    await task_queue.submit(
+        f"{submission_id}:review_report", task_runner.run_review_report(submission_id)
+    )
+    return {"status": "started"}
