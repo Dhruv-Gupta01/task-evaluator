@@ -160,6 +160,7 @@ function SubmissionRow({ s }: { s: SubmissionListItem }) {
         <StatusBadge status={s.agent_status} label="agent" />
         <StatusBadge status={s.sufficiency_status} label="sufficiency" />
         <StatusBadge status={s.leakage_scan_status} label="leakage" />
+        <StatusBadge status={s.code_smell_status} label="code-smell" />
         <StatusBadge status={s.review_report_status} label="report" />
       </div>
     </Link>

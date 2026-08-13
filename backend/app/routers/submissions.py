@@ -167,6 +167,31 @@ async def trigger_leakage_scan(submission_id: str, db: Session = Depends(get_db)
     return {"status": "started"}
 
 
+@router.post("/submissions/{submission_id}/code-smell", status_code=202)
+async def trigger_code_smell(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    submission = db.get(Submission, submission_id)
+    if submission is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if submission.extracted_path is None:
+        raise HTTPException(
+            status_code=400, detail="validate the submission first (files must be extracted)"
+        )
+
+    run = (
+        db.query(Run).filter_by(submission_id=submission_id, kind="code_smell", run_index=0).one_or_none()
+    )
+    if run is None:
+        run = Run(submission_id=submission_id, kind="code_smell", run_index=0)
+        db.add(run)
+    run.status = "pending"
+    db.commit()
+
+    await task_queue.submit(
+        f"{submission_id}:code_smell", task_runner.run_code_smell_check(submission_id)
+    )
+    return {"status": "started"}
+
+
 _REVIEW_REPORT_TERMINAL = {"passed", "failed"}
 
 

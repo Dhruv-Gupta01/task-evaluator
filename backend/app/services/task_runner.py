@@ -10,6 +10,7 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.models import Run, Submission
 from app.services import (
+    code_smell_judge,
     docker_orchestrator,
     leakage_scan,
     review_report,
@@ -557,6 +558,66 @@ async def run_leakage_scan(submission_id: str) -> None:
     except Exception:
         run = db.query(Run).filter_by(
             submission_id=submission_id, kind="leakage_scan", run_index=0
+        ).one_or_none()
+        if run is not None:
+            run.status = "failed"
+            run.reward = None
+            run.logs = traceback.format_exc()
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+    finally:
+        db.close()
+
+
+async def run_code_smell_check(submission_id: str) -> None:
+    """LLM judgment on whether the solution code reads as AI-generated and
+    unedited — a fuzzier, lower-confidence cousin of leakage_scan. False
+    positives are expected and accepted here; keep this stage's result
+    clearly separate from leakage_scan's, never merged, since one is a
+    verified fact and this one is a model's opinion. Only needs
+    extracted_path, same minimal prerequisite as leakage_scan and
+    sufficiency — runs independently of the rest of the pipeline."""
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+
+        run = _get_or_create_run(db, submission_id, "code_smell", 0)
+        run.status = "running"
+        run.reward = None
+        run.logs = None
+        run.started_at = datetime.now(UTC)
+        db.commit()
+
+        task_root = Path(submission.extracted_path)
+
+        try:
+            verdict = await code_smell_judge.run_code_smell_judge(task_root)
+        except Exception:
+            run.status = "failed"
+            run.reward = None
+            run.logs = traceback.format_exc()
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+            return
+
+        flagged = bool(verdict.get("likely_ai_generated"))
+        reward = 0 if flagged else 1
+        confidence = verdict.get("confidence", "low")
+        reasoning = verdict.get("reasoning") or []
+        logs_text = f"Likely AI-generated: {flagged} (confidence: {confidence})"
+        if reasoning:
+            logs_text += "\n\nReasoning:\n" + "\n".join(f"- {r}" for r in reasoning)
+
+        run.status = "passed" if reward == 1 else "failed"
+        run.reward = reward
+        run.logs = logs_text
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    except Exception:
+        run = db.query(Run).filter_by(
+            submission_id=submission_id, kind="code_smell", run_index=0
         ).one_or_none()
         if run is not None:
             run.status = "failed"

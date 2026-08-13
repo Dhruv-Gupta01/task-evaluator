@@ -45,6 +45,17 @@ class LeakageScanResult(BaseModel):
     logs: str | None = None
 
 
+class CodeSmellResult(BaseModel):
+    """A model's judgment call, not a fact — unlike LeakageScanResult, false
+    positives are expected and accepted. "passed": false means the judge
+    thinks the code likely reads as AI-generated; treat as a lower-confidence
+    signal worth a look, never as proof, and never merge with the leakage
+    scan's verified findings."""
+    status: StageStatus
+    passed: bool | None = None
+    logs: str | None = None
+
+
 class ReviewReportResult(BaseModel):
     """"passed" means the report generated successfully — it is NOT a
     judgment on the submission. The actual verdict is markdown text in
@@ -66,6 +77,7 @@ class SubmissionSchema(BaseModel):
     agent_trials: AgentTrialsResult
     sufficiency: SufficiencyResult
     leakage_scan: LeakageScanResult
+    code_smell: CodeSmellResult
     review_report: ReviewReportResult
 
 
@@ -79,6 +91,7 @@ class SubmissionListItem(BaseModel):
     agent_status: StageStatus
     sufficiency_status: StageStatus
     leakage_scan_status: StageStatus
+    code_smell_status: StageStatus
     review_report_status: StageStatus
 
 

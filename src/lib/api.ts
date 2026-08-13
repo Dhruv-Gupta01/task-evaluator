@@ -51,6 +51,14 @@ export interface ReviewReportResult {
   logs?: string;
 }
 
+// A model's judgment call, not a fact — unlike LeakageScanResult, false
+// positives are expected and accepted. Never merge with leakage_scan.
+export interface CodeSmellResult {
+  status: StageStatus;
+  passed: boolean | null;
+  logs?: string;
+}
+
 export interface Submission {
   id: string;
   task_name: string;
@@ -61,6 +69,7 @@ export interface Submission {
   agent_trials: AgentTrialsResult;
   sufficiency: SufficiencyResult;
   leakage_scan: LeakageScanResult;
+  code_smell: CodeSmellResult;
   review_report: ReviewReportResult;
 }
 
@@ -74,6 +83,7 @@ export interface SubmissionListItem {
   agent_status: StageStatus;
   sufficiency_status: StageStatus;
   leakage_scan_status: StageStatus;
+  code_smell_status: StageStatus;
   review_report_status: StageStatus;
 }
 
@@ -123,6 +133,10 @@ export const api = {
     ),
   reviewReport: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/review-report`, { method: "POST" }).then(
+      handle<unknown>,
+    ),
+  codeSmell: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/code-smell`, { method: "POST" }).then(
       handle<unknown>,
     ),
 };

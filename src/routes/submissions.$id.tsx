@@ -102,6 +102,14 @@ function SubmissionDetail() {
     },
     onError: (e: Error) => toast.error(e.message),
   });
+  const mCodeSmell = useMutation({
+    mutationFn: () => api.codeSmell(id),
+    onSuccess: () => {
+      toast.success("Code smell check started");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
   const mReviewReport = useMutation({
     mutationFn: () => api.reviewReport(id),
     onSuccess: () => {
@@ -361,6 +369,39 @@ function SubmissionDetail() {
             </div>
           )}
           <LogPanel logs={data.leakage_scan.logs} title="Leakage scan findings" />
+        </StageCard>
+
+        {/* Code Smell */}
+        <StageCard
+          title="Code Smell (AI-generated?)"
+          description="LLM judgment call, not a fact — false positives expected and accepted. A careful human can still read as AI-like. Separate from Leakage Scan's verified findings."
+          status={data.code_smell.status}
+        >
+          <RunButton
+            label="Run Code Smell Check"
+            runningLabel="Reading code…"
+            onClick={() => mCodeSmell.mutate()}
+            running={
+              data.code_smell.status === "running" || data.code_smell.status === "pending"
+            }
+            pending={mCodeSmell.isPending}
+            disabled={!validated}
+            disabledReason="Validate the submission first"
+          />
+          {data.code_smell.passed != null && (
+            <div
+              className={`rounded-md border p-2.5 text-xs ${
+                data.code_smell.passed
+                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                  : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+              }`}
+            >
+              {data.code_smell.passed
+                ? "Reads as human-iterated — no strong AI-style signal."
+                : "Reads as possibly AI-generated — a judgment call, not proof."}
+            </div>
+          )}
+          <LogPanel logs={data.code_smell.logs} title="Code smell reasoning" />
         </StageCard>
 
         {/* Review Report */}
