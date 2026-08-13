@@ -3,7 +3,7 @@ import json
 import random
 import time
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypeVar
 
@@ -92,7 +92,7 @@ class DailyQuota:
         self.path = storage_dir / f"{provider}.json"
 
     def _today(self) -> str:
-        return datetime.now(UTC).date().isoformat()
+        return datetime.now(timezone.utc).date().isoformat()
 
     def _load(self) -> dict:
         if self.path.exists():
