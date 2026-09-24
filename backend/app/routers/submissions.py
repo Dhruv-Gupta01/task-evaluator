@@ -9,7 +9,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.models import Run, Submission
 from app.schemas import SubmissionListItem, SubmissionSchema, UploadResponse
-from app.services import submission_service, task_runner
+from app.services import budget, submission_service, task_runner
 from app.workers import task_queue
 
 router = APIRouter()
@@ -104,6 +104,9 @@ async def trigger_agent_trials(
             status_code=400, detail=f"n must be between 1 and {settings.max_agent_trials}"
         )
     _require_built_submission(submission_id, db)
+    budget_reason = budget.exceeded_message(db)
+    if budget_reason:
+        raise HTTPException(status_code=400, detail=budget_reason)
 
     # re-run overwrites prior agent trial results
     db.query(Run).filter_by(submission_id=submission_id, kind="agent").delete()
@@ -236,3 +239,12 @@ async def trigger_review_report(submission_id: str, db: Session = Depends(get_db
         f"{submission_id}:review_report", task_runner.run_review_report(submission_id)
     )
     return {"status": "started"}
+
+
+@router.get("/budget")
+def get_budget(db: Session = Depends(get_db)) -> dict[str, float]:
+    """This calendar month's agent-trial spend against AGENT_BUDGET_USD (0 = no cap)."""
+    return {
+        "spent_usd": round(budget.spent_this_month(db), 4),
+        "limit_usd": settings.agent_budget_usd,
+    }

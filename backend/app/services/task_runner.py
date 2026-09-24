@@ -10,8 +10,10 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.models import Run, Submission
 from app.services import (
+    budget,
     code_smell_judge,
     docker_orchestrator,
+    harbor_runner,
     leakage_scan,
     review_report,
     sufficiency_judge,
@@ -28,27 +30,21 @@ def _get_task_config(submission: Submission) -> TaskConfig:
     return TaskConfig()
 
 
-def _llm_env_vars() -> dict[str, str]:
-    env = {
-        "LLM_PROVIDER": settings.llm_provider,
-        "LLM_MODEL": settings.llm_model,
-        "LLM_RPM": str(settings.llm_rpm),
-        "LLM_MAX_ITERS": str(settings.llm_max_iters),
-    }
-    if settings.llm_tpm:
-        env["LLM_TPM"] = str(settings.llm_tpm)
+# LiteLLM provider prefixes for deriving the agent model from LLM_PROVIDER.
+_LITELLM_PREFIX = {
+    "anthropic": "anthropic",
+    "openai": "openai",
+    "gemini": "gemini",
+    "groq": "groq",
+    "fireworks": "fireworks_ai",
+}
 
-    key_map = {
-        "anthropic": ("ANTHROPIC_API_KEY", settings.anthropic_api_key),
-        "openai": ("OPENAI_API_KEY", settings.openai_api_key),
-        "groq": ("GROQ_API_KEY", settings.groq_api_key),
-        "gemini": ("GEMINI_API_KEY", settings.gemini_api_key),
-        "fireworks": ("FIREWORKS_API_KEY", settings.fireworks_api_key),
-    }
-    key_name, key_value = key_map.get(settings.llm_provider, (None, None))
-    if key_name and key_value:
-        env[key_name] = key_value
-    return env
+
+def _agent_model() -> str:
+    if settings.agent_model:
+        return settings.agent_model
+    prefix = _LITELLM_PREFIX.get(settings.llm_provider, settings.llm_provider)
+    return f"{prefix}/{settings.llm_model}"
 
 
 _STUCK_STATUSES = ("pending", "running")
@@ -78,29 +74,6 @@ def reset_stuck_rows() -> None:
         db.commit()
     finally:
         db.close()
-
-
-def _resolve_reward(verify_exit: int, verifier_logs_dir: Path) -> int:
-    """The canonical test.sh shape (mkdir /logs/verifier, run pytest, always
-    `echo N > /logs/verifier/reward.txt` as the LAST command) makes the
-    verify container's own exit code always 0 regardless of pass/fail — the
-    real signal is the reward file's content. Prefer that; fall back to the
-    process exit code only for scripts that don't write the file at all
-    (e.g. a bare `exit 0`/`exit 1` test.sh)."""
-    reward_file = verifier_logs_dir / "reward.txt"
-    if reward_file.is_file():
-        try:
-            # Accept float-formatted rewards too (e.g. "1.0", "0.0") — a
-            # natural, common way to write this that plain int() rejects
-            # outright. Falling through to the exit-code fallback on that
-            # ValueError silently produced a WRONG reward for any test.sh
-            # following the documented "always exit 0, real signal is the
-            # file" convention, since that convention makes verify_exit
-            # always 0 regardless of pass/fail.
-            return int(float(reward_file.read_text().strip()))
-        except (ValueError, OSError):
-            pass
-    return 1 if verify_exit == 0 else 0
 
 
 def _get_or_create_run(db, submission_id: str, kind: str, run_index: int = 0) -> Run:
@@ -176,26 +149,29 @@ async def run_validate(submission_id: str) -> None:
 
 
 async def run_oracle(submission_id: str) -> None:
-    await _run_solve_and_verify(submission_id, kind="oracle", run_index=0)
+    await _run_harbor_gate(submission_id, kind="oracle")
 
 
 async def run_nop(submission_id: str) -> None:
-    await _run_solve_and_verify(submission_id, kind="nop", run_index=0)
+    await _run_harbor_gate(submission_id, kind="nop")
 
 
-async def _run_solve_and_verify(submission_id: str, kind: str, run_index: int) -> None:
-    """Shared oracle/nop flow: a 'doing' phase (oracle solves, nop does
-    nothing) followed by a SEPARATE verifier-phase container that mounts
-    tests/ only now. tests/ and solution/ are never both visible in the same
-    container — this is the isolation property the whole design depends on.
-    """
+# Headroom over the task's own build + agent + verifier timeouts, which Harbor
+# enforces itself; this outer limit only catches a hung harbor process.
+_HARBOR_TIMEOUT_BUFFER_SEC = 600
+
+
+async def _run_harbor_gate(submission_id: str, kind: str) -> None:
+    """Oracle/nop via `harbor run -a oracle|nop`, so these gates give the same
+    verdict as the real grading pipeline. Harbor builds the image, runs the
+    agent phase and the verifier in its own isolated containers."""
     db = SessionLocal()
     try:
         submission = db.get(Submission, submission_id)
-        if submission is None or submission.image_tag is None:
+        if submission is None or submission.extracted_path is None:
             return
 
-        run = _get_or_create_run(db, submission_id, kind, run_index)
+        run = _get_or_create_run(db, submission_id, kind)
         run.status = "running"
         run.reward = None
         run.logs = None
@@ -203,93 +179,38 @@ async def _run_solve_and_verify(submission_id: str, kind: str, run_index: int) -
         db.commit()
 
         config = _get_task_config(submission)
-        task_root = Path(submission.extracted_path)
-
-        # attempt-unique suffix: guards against container-name collisions if a
-        # cancelled prior attempt's blocking docker call is still unwinding in
-        # its thread (asyncio.Task.cancel() does not stop a to_thread call in
-        # flight, so the old container may still exist briefly)
-        attempt = uuid.uuid4().hex[:8]
-
-        workdir = (
-            settings.storage_dir
-            / "submissions"
-            / submission_id
-            / "runs"
-            / kind
-            / str(run_index)
-            / "workdir"
-        )
-        if workdir.exists():
-            shutil.rmtree(workdir)  # clean slate — no stale files from a prior attempt
-        workdir.mkdir(parents=True, exist_ok=True)
-
-        container_workdir_path = await asyncio.to_thread(
-            docker_orchestrator.get_image_workdir, submission.image_tag
-        )
-        await asyncio.to_thread(
-            docker_orchestrator.seed_workdir_from_image,
-            submission.image_tag,
-            workdir,
-            container_workdir_path,
-            submission_id,
+        timeout_sec = (
+            config.environment.build_timeout_sec
+            + config.agent.timeout_sec
+            + config.verifier.timeout_sec
+            + _HARBOR_TIMEOUT_BUFFER_SEC
         )
 
-        if kind == "oracle":
-            solution_dir = task_root / "solution"
-            solve_exit, solve_logs = await asyncio.to_thread(
-                docker_orchestrator.run_phase,
-                submission.image_tag,
-                {
-                    str(workdir): (container_workdir_path, "rw"),
-                    str(solution_dir): ("/solution", "ro"),
-                },
-                ["bash", "/solution/solve.sh"],
-                not config.environment.allow_internet,
-                config.agent.timeout_sec,
-                f"taskeval-{submission_id}-{kind}-{run_index}-{attempt}-solve",
-                submission_id,
-                config.environment.memory_mb,
-                int(config.environment.cpus * 1e9),
-            )
-        else:  # nop: no doing-phase container at all; workdir stays empty
-            solve_exit, solve_logs = 0, "(nop: no action taken)"
+        jobs_dir = settings.storage_dir / "submissions" / submission_id / "runs" / kind / "harbor"
+        if jobs_dir.exists():
+            shutil.rmtree(jobs_dir)  # keep only the latest attempt's output
 
-        tests_dir = task_root / "tests"
-        verifier_logs_dir = workdir.parent / "verifier_logs"
-        if verifier_logs_dir.exists():
-            shutil.rmtree(verifier_logs_dir)
-        verifier_logs_dir.mkdir(parents=True, exist_ok=True)
-
-        verify_exit, verify_logs = await asyncio.to_thread(
-            docker_orchestrator.run_phase,
-            submission.image_tag,
-            {
-                str(workdir): (container_workdir_path, "rw"),
-                str(tests_dir): ("/tests", "ro"),
-                str(verifier_logs_dir): ("/logs/verifier", "rw"),
-            },
-            ["bash", "/tests/test.sh"],
-            True,  # verifier never needs network
-            config.verifier.timeout_sec,
-            f"taskeval-{submission_id}-{kind}-{run_index}-{attempt}-verify",
-            submission_id,
-            config.environment.memory_mb,
-            int(config.environment.cpus * 1e9),
+        result = await harbor_runner.run_single(
+            Path(submission.extracted_path),
+            kind,
+            jobs_dir,
+            f"{kind}-{uuid.uuid4().hex[:8]}",
+            timeout_sec,
         )
 
-        reward = _resolve_reward(verify_exit, verifier_logs_dir)
-        run.status = "passed" if reward == 1 else "failed"
-        run.reward = reward
-        run.logs = (
-            f"=== SOLVE PHASE (exit {solve_exit}) ===\n{solve_logs}\n\n"
-            f"=== VERIFY PHASE (exit {verify_exit}) ===\n{verify_logs}"
-        )
+        # The gate needs a perfect 1.0; any partial reward counts as 0.
+        if result.reward is None:
+            run.status = "failed"
+            run.reward = None
+        else:
+            run.reward = 1 if result.reward >= 1.0 else 0
+            run.status = "passed" if run.reward == 1 else "failed"
+        run.logs = result.logs
         run.finished_at = datetime.now(UTC)
         db.commit()
     except Exception:
         run = db.query(Run).filter_by(
-            submission_id=submission_id, kind=kind, run_index=run_index
+            submission_id=submission_id, kind=kind, run_index=0
         ).one_or_none()
         if run is not None:
             run.status = "failed"
@@ -302,154 +223,105 @@ async def _run_solve_and_verify(submission_id: str, kind: str, run_index: int) -
 
 
 async def run_agent_trials(submission_id: str, n: int) -> None:
-    """Build the agent wrapper image once (reused across all N trials), then
-    run trials SEQUENTIALLY (not parallel) — easier on rate limits and matches
-    the isolation contract: the agent's own container never has tests/ or
-    solution/ present, only afterward does a separate verifier-phase
-    container (from the task's original image, not the wrapper) mount
-    tests/ against the resulting workdir."""
+    """n trials of an LLM agent via one `harbor run` job. Harbor runs the
+    agent inside the task container and only copies tests/ in afterwards to
+    verify, so the agent never sees the tests. Each Run row is filled in as
+    its trial finishes (completion order), with tokens and cost in its logs."""
     db = SessionLocal()
     try:
         submission = db.get(Submission, submission_id)
-        if submission is None or submission.image_tag is None:
+        if submission is None or submission.extracted_path is None:
             return
 
-        if submission.agent_wrapper_image_tag is None:
-            try:
-                wrapper_tag, _wrapper_logs = await asyncio.to_thread(
-                    docker_orchestrator.build_agent_wrapper_image,
-                    submission.image_tag,
-                    submission_id,
-                )
-            except docker_orchestrator.DockerBuildError as e:
-                runs = db.query(Run).filter_by(submission_id=submission_id, kind="agent").all()
-                for r in runs:
-                    r.status = "failed"
-                    r.reward = None
-                    r.logs = f"agent wrapper image build failed:\n{e.log_text}"
-                    r.finished_at = datetime.now(UTC)
-                db.commit()
-                return
-            submission.agent_wrapper_image_tag = wrapper_tag
-            db.commit()
+        runs = (
+            db.query(Run)
+            .filter_by(submission_id=submission_id, kind="agent")
+            .order_by(Run.run_index)
+            .all()
+        )  # the router pre-creates all n rows
+        now = datetime.now(UTC)
+        for r in runs:
+            r.status = "running"
+            r.reward = None
+            r.logs = None
+            r.started_at = now
+        db.commit()
 
         config = _get_task_config(submission)
-        task_root = Path(submission.extracted_path)
-        instruction_path = task_root / "instruction.md"
-        tests_dir = task_root / "tests"
-        env_vars = _llm_env_vars()
-
-        container_workdir_path = await asyncio.to_thread(
-            docker_orchestrator.get_image_workdir, submission.image_tag
+        concurrency = max(1, min(settings.agent_trials_concurrency, n))
+        rounds = -(-n // concurrency)  # ceil
+        timeout_sec = (
+            config.environment.build_timeout_sec
+            + rounds * (config.agent.timeout_sec + config.verifier.timeout_sec)
+            + _HARBOR_TIMEOUT_BUFFER_SEC
         )
 
-        for run_index in range(n):
-            attempt = uuid.uuid4().hex[:8]
-            run = (
-                db.query(Run)
-                .filter_by(submission_id=submission_id, kind="agent", run_index=run_index)
-                .one_or_none()
-            )
-            if run is None:
-                continue  # router should have pre-created all n rows
+        agent_kwargs = {"max_turns": str(settings.llm_max_iters)}
+        if settings.agent_reasoning_effort:
+            agent_kwargs["reasoning_effort"] = settings.agent_reasoning_effort
 
-            run.status = "running"
-            run.reward = None
-            run.logs = None
-            run.started_at = datetime.now(UTC)
+        jobs_dir = settings.storage_dir / "submissions" / submission_id / "runs" / "agent" / "harbor"
+        if jobs_dir.exists():
+            shutil.rmtree(jobs_dir)  # keep only the latest attempt's output
+
+        pending = list(runs)
+        model = _agent_model()
+
+        async def on_trial(outcome: harbor_runner.TrialOutcome) -> str | None:
+            if outcome.cost_usd is not None:
+                budget.record(
+                    db,
+                    submission_id,
+                    "agent_trials",
+                    model,
+                    outcome.cost_usd,
+                    outcome.n_input_tokens,
+                    outcome.n_cache_tokens,
+                    outcome.n_output_tokens,
+                )
+            if pending:
+                run = pending.pop(0)
+                if outcome.reward is None:
+                    run.status = "failed"
+                    run.reward = None
+                else:
+                    run.reward = 1 if outcome.reward >= 1.0 else 0
+                    run.status = "passed" if run.reward == 1 else "failed"
+                run.logs = outcome.logs
+                run.finished_at = datetime.now(UTC)
             db.commit()
+            # Stop the rest of the job once the monthly cap is crossed.
+            reason = budget.exceeded_message(db)
+            return f"skipped: {reason}" if reason and pending else None
 
-            try:
-                workdir = (
-                    settings.storage_dir
-                    / "submissions"
-                    / submission_id
-                    / "runs"
-                    / "agent"
-                    / str(run_index)
-                    / "workdir"
-                )
-                if workdir.exists():
-                    shutil.rmtree(workdir)
-                workdir.mkdir(parents=True, exist_ok=True)
-                await asyncio.to_thread(
-                    docker_orchestrator.seed_workdir_from_image,
-                    submission.image_tag,
-                    workdir,
-                    container_workdir_path,
-                    submission_id,
-                )
+        result = await harbor_runner.run_job(
+            Path(submission.extracted_path),
+            settings.harbor_agent,
+            jobs_dir,
+            f"agent-{uuid.uuid4().hex[:8]}",
+            timeout_sec,
+            model=model,
+            agent_kwargs=agent_kwargs,
+            n_attempts=n,
+            n_concurrent=concurrency,
+            on_trial=on_trial,
+        )
 
-                agent_env = dict(env_vars)
-                agent_env["AGENT_WORKDIR"] = container_workdir_path
-                agent_env["INSTRUCTION_PATH"] = "/task/instruction.md"
-                agent_env["AGENT_TIMEOUT_SEC"] = str(config.agent.timeout_sec)
-
-                solve_exit, solve_logs = await asyncio.to_thread(
-                    docker_orchestrator.run_phase,
-                    submission.agent_wrapper_image_tag,
-                    {
-                        str(workdir): (container_workdir_path, "rw"),
-                        str(instruction_path): ("/task/instruction.md", "ro"),
-                    },
-                    None,  # rely on the wrapper image's ENTRYPOINT
-                    False,  # agent needs real internet to reach the LLM API (documented MVP limitation)
-                    config.agent.timeout_sec + 30,  # buffer over the loop's own internal timeout
-                    f"taskeval-{submission_id}-agent-{run_index}-{attempt}-solve",
-                    submission_id,
-                    config.environment.memory_mb,
-                    int(config.environment.cpus * 1e9),
-                    agent_env,
-                )
-
-                agent_result_path = workdir / ".agent_result.json"
-                agent_result_summary = (
-                    agent_result_path.read_text()[:5000]
-                    if agent_result_path.is_file()
-                    else "(no .agent_result.json produced)"
-                )
-
-                verifier_logs_dir = workdir.parent / "verifier_logs"
-                if verifier_logs_dir.exists():
-                    shutil.rmtree(verifier_logs_dir)
-                verifier_logs_dir.mkdir(parents=True, exist_ok=True)
-
-                verify_exit, verify_logs = await asyncio.to_thread(
-                    docker_orchestrator.run_phase,
-                    submission.image_tag,
-                    {
-                        str(workdir): (container_workdir_path, "rw"),
-                        str(tests_dir): ("/tests", "ro"),
-                        str(verifier_logs_dir): ("/logs/verifier", "rw"),
-                    },
-                    ["bash", "/tests/test.sh"],
-                    True,
-                    config.verifier.timeout_sec,
-                    f"taskeval-{submission_id}-agent-{run_index}-{attempt}-verify",
-                    submission_id,
-                    config.environment.memory_mb,
-                    int(config.environment.cpus * 1e9),
-                )
-
-                reward = _resolve_reward(verify_exit, verifier_logs_dir)
-                run.status = "passed" if reward == 1 else "failed"
-                run.reward = reward
-                run.logs = (
-                    f"=== AGENT SOLVE PHASE (exit {solve_exit}) ===\n{solve_logs}\n\n"
-                    f"=== AGENT RESULT ===\n{agent_result_summary}\n\n"
-                    f"=== VERIFY PHASE (exit {verify_exit}) ===\n{verify_logs}"
-                )
-                run.finished_at = datetime.now(UTC)
-                db.commit()
-            except Exception:
-                run.status = "failed"
-                run.reward = None
-                run.logs = traceback.format_exc()
-                run.finished_at = datetime.now(UTC)
-                db.commit()
-                # continue to the next trial rather than aborting the whole batch
+        for run in pending:  # trials that never produced a result
+            run.status = "failed"
+            run.reward = None
+            run.logs = result.error or "harbor produced no result for this trial"
+            run.finished_at = datetime.now(UTC)
+        db.commit()
     except Exception:
-        traceback.print_exc()
+        runs = db.query(Run).filter_by(submission_id=submission_id, kind="agent").all()
+        for r in runs:
+            if r.status in _STUCK_STATUSES:
+                r.status = "failed"
+                r.reward = None
+                r.logs = traceback.format_exc()
+                r.finished_at = datetime.now(UTC)
+        db.commit()
     finally:
         db.close()
 

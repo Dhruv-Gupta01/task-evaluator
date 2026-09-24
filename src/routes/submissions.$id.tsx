@@ -77,7 +77,8 @@ function SubmissionDetail() {
     },
     onError: (e: Error) => toast.error(e.message),
   });
-  const [n, setN] = useState(5);
+  // Each trial is a paid LLM run, so default to one; the backend caps n at 50.
+  const [n, setN] = useState(1);
   const mAgent = useMutation({
     mutationFn: () => api.agentTrials(id, n),
     onSuccess: () => {
@@ -251,9 +252,9 @@ function SubmissionDetail() {
             <Input
               type="number"
               min={1}
-              max={100}
+              max={50}
               value={n}
-              onChange={(e) => setN(Math.max(1, Number(e.target.value) || 1))}
+              onChange={(e) => setN(Math.min(50, Math.max(1, Number(e.target.value) || 1)))}
               className="w-20"
             />
             <RunButton

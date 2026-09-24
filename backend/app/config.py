@@ -32,6 +32,25 @@ class Settings(BaseSettings):
     default_verifier_timeout_sec: int = 120
     max_agent_trials: int = 50
 
+    # One architecture for every build and container run (Build, Harbor
+    # Oracle/Nop, agent trials). arm64 runs natively on Apple Silicon;
+    # linux/amd64 works too but is emulated there and much slower.
+    docker_platform: str = "linux/arm64"
+
+    # Oracle/Nop and agent trials run through the Harbor CLI
+    # (`uv tool install harbor`).
+    harbor_bin: str = "harbor"
+
+    # Agent trials: Harbor agent plus a LiteLLM model string. When
+    # agent_model is empty it's derived from llm_provider/llm_model, so the
+    # agent and the LLM judges use the same model unless overridden.
+    harbor_agent: str = "terminus-2"
+    agent_model: str = ""
+    agent_reasoning_effort: str = ""  # e.g. low | medium | high; empty = model default
+    agent_trials_concurrency: int = 1
+    # Spending cap for agent trials per calendar month (UTC); 0 disables it.
+    agent_budget_usd: float = 50.0
+
 
 @lru_cache
 def get_settings() -> Settings:

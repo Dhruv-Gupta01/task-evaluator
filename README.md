@@ -5,12 +5,12 @@ uploads a task zip (environment + solution + tests), and the platform runs it th
 gates against real Docker containers:
 
 1. **Build** — builds the task's `environment/Dockerfile`.
-2. **Oracle** — applies the reference solution, confirms the verifier gives reward `1`.
-3. **Nop** — runs the verifier against an unsolved workdir, confirms reward `0`.
+2. **Oracle** — runs `harbor run -a oracle`, confirms the reference solution scores reward `1`.
+3. **Nop** — runs `harbor run -a nop`, confirms a do-nothing agent scores reward `0`.
 4. **Sufficiency** — an LLM judge checks whether the hidden test requirements are inferable
    from the visible instructions and files.
-5. **Agent Trials** — runs an LLM-driven coding agent against the task N times, reporting the
-   pass rate.
+5. **Agent Trials** — runs `harbor run` with the Terminus-2 agent N times, reporting the pass
+   rate and each trial's token usage and cost.
 
 Everything runs locally: FastAPI backend, React/Vite frontend, Postgres, and Docker.
 
@@ -18,6 +18,8 @@ Everything runs locally: FastAPI backend, React/Vite frontend, Postgres, and Doc
 
 - **Docker Desktop** (or another local Docker daemon) — running, before you start the backend.
 - **Python 3.13+** and [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
+- **[Harbor](https://github.com/laude-institute/harbor)** CLI — runs the Oracle, Nop and Agent
+  Trials stages with the same harness as the real grading pipeline: `uv tool install harbor` (tested with 0.8.0)
 - **Node.js** and [`bun`](https://bun.sh) (this repo is bun-lockfile-managed; `npm` will also
   work off `package-lock.json` if you don't have bun, but bun is what's actually been tested)
 - An API key for at least one LLM provider (Anthropic, OpenAI, Gemini, Groq, or
@@ -71,15 +73,18 @@ backend at the URL passed via `VITE_API_BASE_URL`.
 
 Open the frontend, upload a task zip, and run it through the gates in order (Validate & Build →
 Oracle → Nop → Sufficiency → Agent Trials) from the UI. Submission files and per-run logs land
-under `backend/storage/submissions/{id}/`.
+under `backend/storage/submissions/{id}/` (Harbor's full job output is in
+`runs/{oracle,nop,agent}/harbor/`).
 
 ## Notes
 
-- **Docker platform**: builds and container runs are pinned to `linux/amd64` to match the real
-  grading environment. On Apple Silicon this runs under QEMU emulation and is noticeably slower
-  than on a native amd64 Linux host — expected, not a bug.
+- **Docker platform**: every build and container run (Build, and Oracle/Nop/Agent Trials via
+  Harbor) uses one architecture, set by `DOCKER_PLATFORM` in `backend/.env` (default
+  `linux/arm64`, native on Apple Silicon). `linux/amd64` also works on a Mac but runs under
+  QEMU emulation and is much slower.
+- **Agent spending cap**: agent trials stop once this calendar month's recorded spend reaches
+  `AGENT_BUDGET_USD` (default $50; `0` disables it). `GET /budget` shows spend so far.
 - **Resetting local state**: submission data lives in `backend/storage/submissions/` (safe to
   delete) and in the `taskeval-pg-data` Docker volume (`docker compose down -v` wipes it).
-- **Docker image buildup**: each submission builds 1–2 tagged images (`taskeval/{id}:build`,
-  `:agent`). These accumulate over time — `docker image prune -a` reclaims space from ones no
+- **Docker image buildup**: each submission builds a tagged image (`taskeval/{id}:build`). These accumulate over time — `docker image prune -a` reclaims space from ones no
   longer referenced by a submission you care about.

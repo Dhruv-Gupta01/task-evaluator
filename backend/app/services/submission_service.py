@@ -43,6 +43,10 @@ def _invert_status(status: StageStatus) -> StageStatus:
 
 def _nop_stage_result(run: Run | None) -> StageResult:
     result = _stage_result(run)
+    if result.status == "failed" and result.reward is None:
+        # No reward at all means the run itself errored (build failure,
+        # crash, timeout) — that must not display as a nop pass.
+        return result
     return result.model_copy(update={"status": _invert_status(result.status)})
 
 
