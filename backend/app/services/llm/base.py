@@ -20,10 +20,17 @@ class ToolCall(BaseModel):
     arguments: dict
 
 
+class Usage(BaseModel):
+    input_tokens: int = 0  # includes cached_tokens
+    cached_tokens: int = 0
+    output_tokens: int = 0  # includes reasoning tokens
+
+
 class LLMResponse(BaseModel):
     text: str
     tool_call: ToolCall | None = None
     raw: dict = {}
+    usage: Usage | None = None
 
 
 class LLMClient(ABC):

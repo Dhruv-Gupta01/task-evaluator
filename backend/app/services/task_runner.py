@@ -3,6 +3,7 @@ import json
 import shutil
 import traceback
 import uuid
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from app.services import (
     sufficiency_judge,
     validation_service,
 )
+from app.services.llm import usage as llm_usage
 from app.services.task_config import TaskConfig
 
 settings = get_settings()
@@ -74,6 +76,18 @@ def reset_stuck_rows() -> None:
         db.commit()
     finally:
         db.close()
+
+
+@contextmanager
+def _track_llm_spend(db, submission_id: str, stage: str):
+    """Record the token usage of every LLM call made inside the block, even
+    if the stage then fails. Rows are only added to the session here; the
+    caller's next commit persists them."""
+    calls = llm_usage.start()
+    try:
+        yield
+    finally:
+        budget.record_calls(db, submission_id, stage, calls)
 
 
 def _get_or_create_run(db, submission_id: str, kind: str, run_index: int = 0) -> Run:
@@ -349,7 +363,8 @@ async def run_sufficiency_check(submission_id: str) -> None:
         task_root = Path(submission.extracted_path)
 
         try:
-            verdict = await sufficiency_judge.run_sufficiency_judge(task_root)
+            with _track_llm_spend(db, submission_id, "sufficiency"):
+                verdict = await sufficiency_judge.run_sufficiency_judge(task_root)
         except Exception:
             run.status = "failed"
             run.reward = None
@@ -465,7 +480,8 @@ async def run_code_smell_check(submission_id: str) -> None:
         task_root = Path(submission.extracted_path)
 
         try:
-            verdict = await code_smell_judge.run_code_smell_judge(task_root)
+            with _track_llm_spend(db, submission_id, "code_smell"):
+                verdict = await code_smell_judge.run_code_smell_judge(task_root)
         except Exception:
             run.status = "failed"
             run.reward = None
@@ -540,7 +556,8 @@ async def run_review_report(submission_id: str) -> None:
         task_root = Path(submission.extracted_path)
 
         try:
-            result = await review_report.run_review_report(submission, task_root)
+            with _track_llm_spend(db, submission_id, "review_report"):
+                result = await review_report.run_review_report(submission, task_root)
         except Exception:
             run.status = "failed"
             run.reward = None

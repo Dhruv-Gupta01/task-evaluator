@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     llm_rpm: int = 60
     llm_tpm: int | None = None
     llm_max_iters: int = 30
+    # Judge calls on the real OpenAI API only (ignored for other providers).
+    # max output tokens includes reasoning tokens; 0 = no cap.
+    llm_reasoning_effort: str = "low"  # low | medium | high | ...; empty = model default
+    llm_max_output_tokens: int = 16000
 
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
@@ -48,8 +52,9 @@ class Settings(BaseSettings):
     agent_model: str = ""
     agent_reasoning_effort: str = ""  # e.g. low | medium | high; empty = model default
     agent_trials_concurrency: int = 1
-    # Spending cap for agent trials per calendar month (UTC); 0 disables it.
-    agent_budget_usd: float = 50.0
+    # Spending cap for all priced LLM use (agent trials and OpenAI judge
+    # calls) per calendar month (UTC); 0 disables it.
+    llm_budget_usd: float = 50.0
 
 
 @lru_cache

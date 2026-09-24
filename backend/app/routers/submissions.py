@@ -16,6 +16,11 @@ router = APIRouter()
 settings = get_settings()
 
 
+def _raise_if_over_budget(db: Session, reason: str | None) -> None:
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+
+
 @router.get("/submissions", response_model=list[SubmissionListItem])
 def list_submissions(db: Session = Depends(get_db)) -> list[SubmissionListItem]:
     rows = db.execute(
@@ -104,9 +109,7 @@ async def trigger_agent_trials(
             status_code=400, detail=f"n must be between 1 and {settings.max_agent_trials}"
         )
     _require_built_submission(submission_id, db)
-    budget_reason = budget.exceeded_message(db)
-    if budget_reason:
-        raise HTTPException(status_code=400, detail=budget_reason)
+    _raise_if_over_budget(db, budget.exceeded_message(db))
 
     # re-run overwrites prior agent trial results
     db.query(Run).filter_by(submission_id=submission_id, kind="agent").delete()
@@ -122,6 +125,7 @@ async def trigger_agent_trials(
 
 @router.post("/submissions/{submission_id}/sufficiency", status_code=202)
 async def trigger_sufficiency(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    _raise_if_over_budget(db, budget.judge_exceeded_message(db))
     submission = db.get(Submission, submission_id)
     if submission is None:
         raise HTTPException(status_code=404, detail="submission not found")
@@ -172,6 +176,7 @@ async def trigger_leakage_scan(submission_id: str, db: Session = Depends(get_db)
 
 @router.post("/submissions/{submission_id}/code-smell", status_code=202)
 async def trigger_code_smell(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    _raise_if_over_budget(db, budget.judge_exceeded_message(db))
     submission = db.get(Submission, submission_id)
     if submission is None:
         raise HTTPException(status_code=404, detail="submission not found")
@@ -200,6 +205,7 @@ _REVIEW_REPORT_TERMINAL = {"passed", "failed"}
 
 @router.post("/submissions/{submission_id}/review-report", status_code=202)
 async def trigger_review_report(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    _raise_if_over_budget(db, budget.judge_exceeded_message(db))
     submission = db.get(Submission, submission_id)
     if submission is None:
         raise HTTPException(status_code=404, detail="submission not found")
@@ -243,8 +249,8 @@ async def trigger_review_report(submission_id: str, db: Session = Depends(get_db
 
 @router.get("/budget")
 def get_budget(db: Session = Depends(get_db)) -> dict[str, float]:
-    """This calendar month's agent-trial spend against AGENT_BUDGET_USD (0 = no cap)."""
+    """This calendar month's tracked LLM spend against LLM_BUDGET_USD (0 = no cap)."""
     return {
         "spent_usd": round(budget.spent_this_month(db), 4),
-        "limit_usd": settings.agent_budget_usd,
+        "limit_usd": settings.llm_budget_usd,
     }

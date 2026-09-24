@@ -82,8 +82,9 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
   Harbor) uses one architecture, set by `DOCKER_PLATFORM` in `backend/.env` (default
   `linux/arm64`, native on Apple Silicon). `linux/amd64` also works on a Mac but runs under
   QEMU emulation and is much slower.
-- **Agent spending cap**: agent trials stop once this calendar month's recorded spend reaches
-  `AGENT_BUDGET_USD` (default $50; `0` disables it). `GET /budget` shows spend so far.
+- **LLM spending cap**: agent trials and OpenAI judge calls stop once this calendar month's
+  recorded spend reaches `LLM_BUDGET_USD` (default $50; `0` disables it). `GET /budget` shows
+  spend so far. Only models with a known price (currently `gpt-6-astra`) are tracked.
 - **Resetting local state**: submission data lives in `backend/storage/submissions/` (safe to
   delete) and in the `taskeval-pg-data` Docker volume (`docker compose down -v` wipes it).
 - **Docker image buildup**: each submission builds a tagged image (`taskeval/{id}:build`). These accumulate over time — `docker image prune -a` reclaims space from ones no

@@ -27,7 +27,11 @@ def get_llm_client() -> LLMClient:
         if not settings.openai_api_key:
             raise ValueError("OPENAI_API_KEY not set")
         return OpenAIClient(
-            model=settings.llm_model, api_key=settings.openai_api_key, rate_limiter=rate_limiter
+            model=settings.llm_model,
+            api_key=settings.openai_api_key,
+            rate_limiter=rate_limiter,
+            reasoning_effort=settings.llm_reasoning_effort or None,
+            max_output_tokens=settings.llm_max_output_tokens or None,
         )
 
     if provider == "groq":
