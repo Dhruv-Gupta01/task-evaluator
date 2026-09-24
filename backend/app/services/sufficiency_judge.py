@@ -8,30 +8,17 @@ import json
 import re
 from pathlib import Path
 
+from app.services.judge_files import read_text_files as _read_text_files
 from app.services.llm.base import Message
 from app.services.llm.factory import get_llm_client
-
-MAX_FILE_CHARS = 20_000
-MAX_TOTAL_CHARS = 120_000
-
-_TEXT_EXTENSIONS = {
-    ".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".py", ".sh", ".pl",
-    ".csv", ".cfg", ".ini", ".rego",
-    ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
-    ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp",
-    ".java", ".go", ".rb", ".rs", ".sql",
-}
-
-# Files conventionally named without an extension (path.suffix == "") that
-# still need to be visible to the judge — a Makefile or Dockerfile can be
-# exactly where a real requirement (a build flag, an install step) lives.
-_TEXT_FILENAMES = {"Makefile", "makefile", "Dockerfile", "dockerfile"}
 
 SYSTEM_PROMPT = """You are a strict instruction-sufficiency judge for an automated coding-agent \
 benchmark task. You will be shown two things:
 
 1. AGENT-VISIBLE MATERIAL — exactly what the agent sees before attempting the task: the \
-instruction text and every file under environment/ (the sandbox it starts from).
+instruction text and every file under environment/ (the sandbox it starts from). A FILE LISTING names every file; \
+a file whose contents are not shown (binary, truncated, or over the size budget) still exists in the \
+sandbox — never report it as missing.
 2. HIDDEN TEST SUITE — the grading code, which the agent never sees.
 
 Your job: for every discrete requirement, value, or behavior the hidden tests actually check, \
@@ -50,33 +37,6 @@ Respond with ONLY a JSON object, no other text, in exactly this shape:
   "gaps": ["specific gap 1", "specific gap 2", ...]
 }
 "passed" must be false if gaps is non-empty, true only if you found no genuine gap."""
-
-
-def _read_text_files(root: Path, max_total: int = MAX_TOTAL_CHARS) -> str:
-    """Walk root, read every plausibly-text file, concatenate with path
-    headers. Skips binaries and anything over MAX_FILE_CHARS individually;
-    stops once max_total is reached across all files combined."""
-    chunks: list[str] = []
-    total = 0
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in _TEXT_EXTENSIONS and path.name not in _TEXT_FILENAMES:
-            continue
-        try:
-            content = path.read_text(errors="replace")
-        except OSError:
-            continue
-        if len(content) > MAX_FILE_CHARS:
-            content = content[:MAX_FILE_CHARS] + "\n... [truncated]"
-        rel = path.relative_to(root)
-        chunk = f"--- {rel} ---\n{content}\n"
-        if total + len(chunk) > max_total:
-            chunks.append(f"... [remaining files omitted, budget reached]")
-            break
-        chunks.append(chunk)
-        total += len(chunk)
-    return "\n".join(chunks)
 
 
 def _parse_verdict(text: str) -> dict:
