@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     # linux/amd64 works too but is emulated there and much slower.
     docker_platform: str = "linux/arm64"
 
+    # Comma-separated "hostname:ip" pairs pinned into every Docker build the
+    # platform runs (docker build --add-host, and Harbor via a compose overlay),
+    # for networks that filter one address of a multi-address host. Example:
+    # GitHub's release/raw downloads sit on 185.199.108-111.133 and one of
+    # those, .109, hangs on some networks, so a Dockerfile that curls GitHub
+    # fails at random. Empty = off (builds use normal DNS).
+    docker_add_hosts: str = ""
+
     # Oracle/Nop and agent trials run through the Harbor CLI
     # (`uv tool install harbor`).
     harbor_bin: str = "harbor"
@@ -83,6 +91,16 @@ class Settings(BaseSettings):
     # Spending cap for all priced LLM use (agent trials and OpenAI judge
     # calls) per calendar month (UTC); 0 disables it.
     llm_budget_usd: float = 50.0
+
+
+def docker_add_host_pairs() -> list[tuple[str, str]]:
+    """DOCKER_ADD_HOSTS parsed into (hostname, ip) pairs, ignoring blanks."""
+    pairs = []
+    for item in Settings().docker_add_hosts.replace(" ", "").split(","):
+        host, _, ip = item.partition(":")  # the ip may itself contain colons (IPv6)
+        if host and ip:
+            pairs.append((host, ip))
+    return pairs
 
 
 @lru_cache

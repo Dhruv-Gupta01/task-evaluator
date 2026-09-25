@@ -4,7 +4,7 @@ import subprocess
 import docker
 from docker import DockerClient
 
-from app.config import get_settings
+from app.config import docker_add_host_pairs, get_settings
 
 _client: DockerClient | None = None
 
@@ -63,6 +63,8 @@ def _run_docker_build_cli(
     slowness) must eventually fail cleanly rather than block that
     submission's build forever."""
     cmd = ["docker", "build", "--platform", get_settings().docker_platform, "--tag", tag]
+    for host, ip in docker_add_host_pairs():
+        cmd += ["--add-host", f"{host}:{ip}"]
     for k, v in (buildargs or {}).items():
         cmd += ["--build-arg", f"{k}={v}"]
     for k, v in labels.items():

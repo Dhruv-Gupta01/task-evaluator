@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.config import get_settings
+from app.config import docker_add_host_pairs, get_settings
 from app.services.llm import pricing
 from app.services.llm.base import Usage
 
@@ -215,6 +215,20 @@ def _prepare_task(
                 "CODEX_BAKE_INTO_IMAGE, so the trial needs no download)"
             )
     return work_dir, "\n".join(notes)
+
+
+def _write_build_hosts_overlay(path: Path) -> Path | None:
+    """A Docker Compose overlay that adds DOCKER_ADD_HOSTS to the task
+    image's build (Harbor builds the environment itself with compose), so
+    Harbor's builds see the same pinned addresses as the platform's Build
+    stage. None when the setting is empty."""
+    pairs = docker_add_host_pairs()
+    if not pairs:
+        return None
+    lines = ["services:", "  main:", "    build:", "      extra_hosts:"]
+    lines += [f'        - "{host}={ip}"' for host, ip in pairs]
+    path.write_text("\n".join(lines) + "\n")
+    return path
 
 
 def _usage_line(outcome: TrialOutcome) -> str:
@@ -448,6 +462,7 @@ async def run_job(
         if n
     )
     job_dir = jobs_dir / job_name
+    hosts_overlay = _write_build_hosts_overlay(jobs_dir.parent / f"{jobs_dir.name}-build-hosts.yaml")
     cli_output_path = jobs_dir / f"{job_name}.out"
     cmd = [
         settings.harbor_bin,
@@ -465,6 +480,8 @@ async def run_job(
     if agent_setup_timeout_sec > 0:
         # Harbor takes a multiplier of its own 360s default (trial.py).
         cmd += ["--agent-setup-timeout-multiplier", f"{agent_setup_timeout_sec / _HARBOR_DEFAULT_SETUP_TIMEOUT_SEC:.3f}"]
+    if hosts_overlay:
+        cmd += ["--extra-docker-compose", str(hosts_overlay)]
     if model:
         cmd += ["--model", model]
     for key, value in (agent_kwargs or {}).items():
