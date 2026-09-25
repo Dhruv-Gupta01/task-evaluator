@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -102,8 +102,10 @@ async def trigger_nop(submission_id: str, db: Session = Depends(get_db)) -> dict
 
 @router.post("/submissions/{submission_id}/agent-trials", status_code=202)
 async def trigger_agent_trials(
-    submission_id: str, n: int = 5, db: Session = Depends(get_db)
+    submission_id: str, n: int = 5, append: bool = False, db: Session = Depends(get_db)
 ) -> dict[str, str]:
+    """Runs n agent trials. By default they replace any earlier trials;
+    append=true keeps them and adds n more after the last one."""
     if n < 1 or n > settings.max_agent_trials:
         raise HTTPException(
             status_code=400, detail=f"n must be between 1 and {settings.max_agent_trials}"
@@ -111,14 +113,22 @@ async def trigger_agent_trials(
     _require_built_submission(submission_id, db)
     _raise_if_over_budget(db, budget.exceeded_message(db))
 
-    # re-run overwrites prior agent trial results
-    db.query(Run).filter_by(submission_id=submission_id, kind="agent").delete()
-    for run_index in range(n):
+    if append:
+        last = (
+            db.query(func.max(Run.run_index))
+            .filter_by(submission_id=submission_id, kind="agent")
+            .scalar()
+        )
+        first_index = 0 if last is None else last + 1
+    else:  # a plain re-run overwrites prior agent trial results
+        db.query(Run).filter_by(submission_id=submission_id, kind="agent").delete()
+        first_index = 0
+    for run_index in range(first_index, first_index + n):
         db.add(Run(submission_id=submission_id, kind="agent", run_index=run_index, status="pending"))
     db.commit()
 
     await task_queue.submit(
-        f"{submission_id}:agent", task_runner.run_agent_trials(submission_id, n)
+        f"{submission_id}:agent", task_runner.run_agent_trials(submission_id, n, append)
     )
     return {"status": "started"}
 

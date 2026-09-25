@@ -303,7 +303,7 @@ async def _run_harbor_gate(submission_id: str, kind: str) -> None:
         db.close()
 
 
-async def run_agent_trials(submission_id: str, n: int) -> None:
+async def run_agent_trials(submission_id: str, n: int, append: bool = False) -> None:
     """n trials of an LLM agent via one `harbor run` job. Harbor runs the
     agent inside the task container and only copies tests/ in afterwards to
     verify, so the agent never sees the tests. Each Run row is filled in as
@@ -316,10 +316,10 @@ async def run_agent_trials(submission_id: str, n: int) -> None:
 
         runs = (
             db.query(Run)
-            .filter_by(submission_id=submission_id, kind="agent")
+            .filter_by(submission_id=submission_id, kind="agent", status="pending")
             .order_by(Run.run_index)
             .all()
-        )  # the router pre-creates all n rows
+        )  # the router pre-creates the n new rows as pending; earlier trials are left alone
         config_error = _agent_config_error()
         if config_error:
             for r in runs:
@@ -351,7 +351,7 @@ async def run_agent_trials(submission_id: str, n: int) -> None:
         agent_kwargs = _agent_kwargs()
 
         jobs_dir = settings.storage_dir / "submissions" / submission_id / "runs" / "agent" / "harbor"
-        if jobs_dir.exists():
+        if jobs_dir.exists() and not append:
             shutil.rmtree(jobs_dir)  # keep only the latest attempt's output
 
         pending = list(runs)
