@@ -85,6 +85,13 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
 - **LLM spending cap**: agent trials and OpenAI judge calls stop once this calendar month's
   recorded spend reaches `LLM_BUDGET_USD` (default $50; `0` disables it). `GET /budget` shows
   spend so far. Only models with a known price (currently `gpt-6-astra`) are tracked.
+- **Builds that download from GitHub**: on some networks one of GitHub's release/raw CDN addresses
+  (`185.199.109.133`) accepts the connection and then hangs, so a Dockerfile that `curl`s GitHub
+  fails at random. Set `DOCKER_ADD_HOSTS=raw.githubusercontent.com:185.199.108.133,release-assets.githubusercontent.com:185.199.108.133`
+  in `backend/.env` to pin a working address for every build (the platform's and Harbor's). Leave it
+  empty on a normal network.
+- **Adding trials without replacing the old ones**: `POST /submissions/{id}/agent-trials?n=3&append=true`
+  (API only; the UI button replaces).
 - **Agent timeout and run cost cap**: `AGENT_TIMEOUT_SEC` forces one agent timeout on every task
   (Terminal-Bench 4.0 uses 8 hours, `28800`); empty keeps each task's own. `AGENT_RUN_BUDGET_USD`
   (default $5) stops an agent-trials run once its own cost reaches it, and a run is also stopped
