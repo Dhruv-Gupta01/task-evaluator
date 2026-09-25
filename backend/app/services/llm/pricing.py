@@ -11,6 +11,10 @@ from app.services.llm.base import Usage
 
 PRICES_PER_M: dict[str, tuple[float, float, float, float]] = {
     "gpt-6-astra": (10.0, 1.0, 50.0, 12.5),
+    "gpt-6-sol": (2.0, 0.2, 10.0, 2.5),
+    "gpt-6-luna": (0.1, 0.01, 0.5, 0.125),
+    # Google paid tier; no cache-write premium, output includes thinking tokens.
+    "gemini-3.5-flash-lite": (0.30, 0.03, 2.50, 0.30),
 }
 
 
