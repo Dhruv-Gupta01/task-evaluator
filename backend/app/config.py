@@ -63,9 +63,21 @@ class Settings(BaseSettings):
     # container on every trial and runs there, so it needs network access
     # (HARBOR_NETWORK_MODE=public) and gets the OpenAI key inside the
     # container. It has no turn cap; only the task's agent timeout bounds it.
+    # Absolute agent timeout (seconds) applied to every task, overriding each
+    # task.toml's [agent] timeout_sec. Terminal-Bench 4.0 uses a flat 8 hours
+    # (28800). 0 = respect each task's own value.
+    agent_timeout_sec: int = 0
+    # Stops an agent-trials run once its own cost (finished plus in-flight
+    # trials) reaches this many USD; 0 disables it. The run is also capped by
+    # whatever is left of LLM_BUDGET_USD this month.
+    agent_run_budget_usd: float = 5.0
     # Seconds Harbor allows an agent to install itself before failing the trial
     # (its default is 360). 0 = default, except Codex, which needs 1200.
     agent_setup_timeout_sec: int = 0
+    # Install Node and Codex while the task image builds (from nodejs.org and
+    # the npm registry) so trials don't download them from GitHub, apt and npm
+    # at run time; Harbor skips its own install once `codex` exists.
+    codex_bake_into_image: bool = True
     codex_version: str = ""  # pin the Codex CLI; empty installs the latest each trial
     codex_web_search: str = ""  # disabled | cached | live; empty = Codex default
     # Spending cap for all priced LLM use (agent trials and OpenAI judge

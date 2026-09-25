@@ -88,9 +88,12 @@ class OpenAIClient(LLMClient):
         usage = None
         if resp.usage is not None:
             details = getattr(resp.usage, "prompt_tokens_details", None)
+            # cache_write_tokens isn't a typed field in the SDK; model_dump keeps extras.
+            detail_values = details.model_dump() if details else {}
             usage = Usage(
                 input_tokens=resp.usage.prompt_tokens or 0,
-                cached_tokens=(getattr(details, "cached_tokens", 0) or 0) if details else 0,
+                cached_tokens=detail_values.get("cached_tokens") or 0,
+                cache_write_tokens=detail_values.get("cache_write_tokens") or 0,
                 output_tokens=resp.usage.completion_tokens or 0,
             )
             usage_collector.report(self.model, usage)

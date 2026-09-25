@@ -85,9 +85,14 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
 - **LLM spending cap**: agent trials and OpenAI judge calls stop once this calendar month's
   recorded spend reaches `LLM_BUDGET_USD` (default $50; `0` disables it). `GET /budget` shows
   spend so far. Only models with a known price (currently `gpt-6-astra`) are tracked.
+- **Agent timeout and run cost cap**: `AGENT_TIMEOUT_SEC` forces one agent timeout on every task
+  (Terminal-Bench 4.0 uses 8 hours, `28800`); empty keeps each task's own. `AGENT_RUN_BUDGET_USD`
+  (default $5) stops an agent-trials run once its own cost reaches it, and a run is also stopped
+  when it would exceed what is left of this month's `LLM_BUDGET_USD`. The cost is checked every 10
+  seconds, so a run can overshoot the cap by a few cents.
 - **Codex agent**: set `HARBOR_AGENT=codex` and `AGENT_MODEL=openai/gpt-6-astra` in `backend/.env`
-  to run trials with OpenAI's Codex instead of Terminus-2. Codex installs itself inside each
-  task container (about 2 minutes per trial), needs the network (`HARBOR_NETWORK_MODE=public`,
+  to run trials with OpenAI's Codex instead of Terminus-2. Codex is baked into each task's image at build time (`CODEX_BAKE_INTO_IMAGE`, default on;
+  the first build of a task takes about a minute longer, later trials start in seconds), needs the network (`HARBOR_NETWORK_MODE=public`,
   the default), has the OpenAI key inside the container, and has no turn cap: only the task's
   agent timeout bounds its cost. Pin its version with `CODEX_VERSION`.
 - **Task network policy**: Harbor 0.23+ only enforces `no-network` when Docker's kernel supports

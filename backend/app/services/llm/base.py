@@ -21,8 +21,9 @@ class ToolCall(BaseModel):
 
 
 class Usage(BaseModel):
-    input_tokens: int = 0  # includes cached_tokens
-    cached_tokens: int = 0
+    input_tokens: int = 0  # includes cached_tokens and cache_write_tokens
+    cached_tokens: int = 0  # read from the prompt cache
+    cache_write_tokens: int = 0  # written to the prompt cache (billed above the input price)
     output_tokens: int = 0  # includes reasoning tokens
 
 

@@ -70,6 +70,25 @@ def _agent_setup_timeout_sec() -> int:
     return _CODEX_SETUP_TIMEOUT_SEC if settings.harbor_agent == "codex" else 0
 
 
+def _agent_timeout_sec(config: TaskConfig) -> float:
+    """The agent timeout Harbor will enforce (see AGENT_TIMEOUT_SEC)."""
+    return settings.agent_timeout_sec or config.agent.timeout_sec
+
+
+def _run_cost_cap(db) -> tuple[float | None, str]:
+    """The tightest dollar limit for one agent-trials run: the per-run budget
+    and what's left of this month's budget."""
+    caps: list[tuple[float, str]] = []
+    if settings.agent_run_budget_usd > 0:
+        caps.append((settings.agent_run_budget_usd, "AGENT_RUN_BUDGET_USD"))
+    if settings.llm_budget_usd > 0:
+        remaining = max(settings.llm_budget_usd - budget.spent_this_month(db), 0.0)
+        caps.append((remaining, "what is left of LLM_BUDGET_USD this month"))
+    if not caps:
+        return None, ""
+    return min(caps, key=lambda cap: cap[0])
+
+
 def _agent_config_error() -> str | None:
     """A reason the configured agent can't run, or None."""
     if settings.harbor_agent == "codex":
@@ -243,7 +262,7 @@ async def _run_harbor_gate(submission_id: str, kind: str) -> None:
         config = _get_task_config(submission)
         timeout_sec = (
             config.environment.build_timeout_sec
-            + config.agent.timeout_sec
+            + _agent_timeout_sec(config)
             + config.verifier.timeout_sec
             + _HARBOR_TIMEOUT_BUFFER_SEC
         )
@@ -324,7 +343,7 @@ async def run_agent_trials(submission_id: str, n: int) -> None:
         rounds = -(-n // concurrency)  # ceil
         timeout_sec = (
             config.environment.build_timeout_sec
-            + rounds * (config.agent.timeout_sec + config.verifier.timeout_sec)
+            + rounds * (_agent_timeout_sec(config) + config.verifier.timeout_sec)
             + rounds * max(_AGENT_SETUP_ALLOWANCE_SEC, _agent_setup_timeout_sec())
             + _HARBOR_TIMEOUT_BUFFER_SEC
         )
@@ -365,6 +384,7 @@ async def run_agent_trials(submission_id: str, n: int) -> None:
             reason = budget.exceeded_message(db)
             return f"skipped: {reason}" if reason and pending else None
 
+        cost_cap_usd, cost_cap_label = _run_cost_cap(db)
         result = await harbor_runner.run_job(
             Path(submission.extracted_path),
             settings.harbor_agent,
@@ -376,6 +396,8 @@ async def run_agent_trials(submission_id: str, n: int) -> None:
             n_attempts=n,
             n_concurrent=concurrency,
             agent_setup_timeout_sec=_agent_setup_timeout_sec(),
+            cost_cap_usd=cost_cap_usd,
+            cost_cap_label=cost_cap_label,
             on_trial=on_trial,
         )
 
