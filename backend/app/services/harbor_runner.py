@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.config import get_settings
+from app.services.llm import pricing
+from app.services.llm.base import Usage
 
 settings = get_settings()
 
@@ -23,6 +25,10 @@ MAX_LOG_CHARS = 200_000
 _SHUTDOWN_GRACE_SEC = 60
 # How often to look for newly finished trials while a job is running.
 _POLL_INTERVAL_SEC = 5
+# Tail of a failed trial's agent transcript, where the agent left one.
+MAX_AGENT_OUTPUT_CHARS = 4_000
+# Harbor's built-in agent install limit, which --agent-setup-timeout-multiplier scales.
+_HARBOR_DEFAULT_SETUP_TIMEOUT_SEC = 360
 
 
 @dataclass
@@ -122,7 +128,7 @@ def _usage_line(outcome: TrialOutcome) -> str:
     )
 
 
-def _parse_trial(result_path: Path) -> TrialOutcome:
+def _parse_trial(result_path: Path, model: str | None = None) -> TrialOutcome:
     trial_dir = result_path.parent
     result = json.loads(result_path.read_text())
 
@@ -141,6 +147,17 @@ def _parse_trial(result_path: Path) -> TrialOutcome:
         cost_usd=agent_result.get("cost_usd"),
     )
 
+    if outcome.cost_usd is None and outcome.n_input_tokens is not None and model:
+        # Not every agent reports cost; price the tokens ourselves when we can.
+        outcome.cost_usd = pricing.cost_usd(
+            model.split("/", 1)[-1],
+            Usage(
+                input_tokens=outcome.n_input_tokens,
+                cached_tokens=outcome.n_cache_tokens or 0,
+                output_tokens=outcome.n_output_tokens or 0,
+            ),
+        )
+
     # Most useful section last: review_report reads the tail of trial logs.
     sections = [
         f"(full Harbor trial output: {trial_dir})",
@@ -154,6 +171,12 @@ def _parse_trial(result_path: Path) -> TrialOutcome:
             f"{exception.get('exception_message')}\n\n"
             f"{exception.get('exception_traceback', '')}"
         )
+    if reward != 1.0:
+        agent_output = _read_text(trial_dir / "agent" / "codex.txt")
+        if agent_output:
+            sections.append(
+                f"=== AGENT OUTPUT (tail) ===\n{agent_output[-MAX_AGENT_OUTPUT_CHARS:]}"
+            )
     trial_log = _read_text(trial_dir / "trial.log")
     if trial_log:
         sections.append(f"=== TRIAL LOG ===\n{trial_log}")
@@ -205,6 +228,7 @@ async def run_job(
     agent_kwargs: dict[str, str] | None = None,
     n_attempts: int = 1,
     n_concurrent: int = 1,
+    agent_setup_timeout_sec: int = 0,
     on_trial: Callable[[TrialOutcome], Awaitable[str | None]] | None = None,
 ) -> HarborJobResult:
     """Run `harbor run` with `n_attempts` trials of `agent` against the task
@@ -214,6 +238,14 @@ async def run_job(
     crashed trial, or timeout comes back as reward=None or a job error."""
     jobs_dir.mkdir(parents=True, exist_ok=True)
     task_path, network_note = _prepare_task(task_root, jobs_dir.parent / f"{jobs_dir.name}-task")
+    notes = "\n".join(
+        n
+        for n in (
+            f"(agent: {agent}, model: {model or 'n/a'}, options: {agent_kwargs or {}})",
+            network_note,
+        )
+        if n
+    )
     job_dir = jobs_dir / job_name
     cli_output_path = jobs_dir / f"{job_name}.out"
     cmd = [
@@ -229,6 +261,9 @@ async def run_job(
         "--quiet",
         "--yes",
     ]
+    if agent_setup_timeout_sec > 0:
+        # Harbor takes a multiplier of its own 360s default (trial.py).
+        cmd += ["--agent-setup-timeout-multiplier", f"{agent_setup_timeout_sec / _HARBOR_DEFAULT_SETUP_TIMEOUT_SEC:.3f}"]
     if model:
         cmd += ["--model", model]
     for key, value in (agent_kwargs or {}).items():
@@ -253,12 +288,12 @@ async def run_job(
             if result_path in seen:
                 continue
             try:
-                outcome = _parse_trial(result_path)
+                outcome = _parse_trial(result_path, model)
             except (json.JSONDecodeError, OSError):
                 continue  # caught mid-write; pick it up on the next poll
             seen.add(result_path)
-            if network_note:
-                outcome.logs = f"{network_note}\n\n{outcome.logs}"
+            if notes:
+                outcome.logs = f"{notes}\n\n{outcome.logs}"
             if stop_reason is not None:
                 # Finished only because we stopped the job; say why first.
                 outcome.logs = f"{stop_reason}\n\n{outcome.logs}"

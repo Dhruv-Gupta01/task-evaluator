@@ -59,6 +59,15 @@ class Settings(BaseSettings):
     agent_model: str = ""
     agent_reasoning_effort: str = ""  # e.g. low | medium | high; empty = model default
     agent_trials_concurrency: int = 1
+    # Codex-only (HARBOR_AGENT=codex). Codex installs itself inside the task
+    # container on every trial and runs there, so it needs network access
+    # (HARBOR_NETWORK_MODE=public) and gets the OpenAI key inside the
+    # container. It has no turn cap; only the task's agent timeout bounds it.
+    # Seconds Harbor allows an agent to install itself before failing the trial
+    # (its default is 360). 0 = default, except Codex, which needs 1200.
+    agent_setup_timeout_sec: int = 0
+    codex_version: str = ""  # pin the Codex CLI; empty installs the latest each trial
+    codex_web_search: str = ""  # disabled | cached | live; empty = Codex default
     # Spending cap for all priced LLM use (agent trials and OpenAI judge
     # calls) per calendar month (UTC); 0 disables it.
     llm_budget_usd: float = 50.0

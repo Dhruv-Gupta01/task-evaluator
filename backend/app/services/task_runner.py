@@ -42,6 +42,52 @@ _LITELLM_PREFIX = {
 }
 
 
+def _agent_kwargs() -> dict[str, str]:
+    """Options for `harbor run --agent-kwarg`. Harbor >= 0.23 rejects options
+    an agent doesn't declare, so each agent only gets the ones it knows."""
+    agent = settings.harbor_agent
+    kwargs: dict[str, str] = {}
+    if agent.startswith("terminus"):
+        kwargs["max_turns"] = str(settings.llm_max_iters)
+    if agent.startswith("terminus") or agent == "codex":
+        if settings.agent_reasoning_effort:
+            kwargs["reasoning_effort"] = settings.agent_reasoning_effort
+    if agent == "codex":
+        if settings.codex_version:
+            kwargs["version"] = settings.codex_version
+        if settings.codex_web_search:
+            kwargs["web_search"] = settings.codex_web_search
+    return kwargs
+
+
+_CODEX_SETUP_TIMEOUT_SEC = 1200
+
+
+def _agent_setup_timeout_sec() -> int:
+    """0 means Harbor's own default."""
+    if settings.agent_setup_timeout_sec:
+        return settings.agent_setup_timeout_sec
+    return _CODEX_SETUP_TIMEOUT_SEC if settings.harbor_agent == "codex" else 0
+
+
+def _agent_config_error() -> str | None:
+    """A reason the configured agent can't run, or None."""
+    if settings.harbor_agent == "codex":
+        if not _agent_model().startswith("openai/"):
+            return (
+                f"Codex only works with OpenAI models, but the agent model is "
+                f"'{_agent_model()}'. Set AGENT_MODEL=openai/<model> in backend/.env."
+            )
+        if not settings.openai_api_key:
+            return "Codex needs OPENAI_API_KEY in backend/.env."
+        if settings.harbor_network_mode not in ("", "public"):
+            return (
+                "Codex installs itself and calls the OpenAI API from inside the task "
+                "container, so it needs HARBOR_NETWORK_MODE=public."
+            )
+    return None
+
+
 def _agent_model() -> str:
     if settings.agent_model:
         return settings.agent_model
@@ -173,6 +219,8 @@ async def run_nop(submission_id: str) -> None:
 # Headroom over the task's own build + agent + verifier timeouts, which Harbor
 # enforces itself; this outer limit only catches a hung harbor process.
 _HARBOR_TIMEOUT_BUFFER_SEC = 600
+# Per trial: agents that install themselves (Codex: apt, nvm, npm) before running.
+_AGENT_SETUP_ALLOWANCE_SEC = 300
 
 
 async def _run_harbor_gate(submission_id: str, kind: str) -> None:
@@ -253,6 +301,16 @@ async def run_agent_trials(submission_id: str, n: int) -> None:
             .order_by(Run.run_index)
             .all()
         )  # the router pre-creates all n rows
+        config_error = _agent_config_error()
+        if config_error:
+            for r in runs:
+                r.status = "failed"
+                r.reward = None
+                r.logs = config_error
+                r.finished_at = datetime.now(UTC)
+            db.commit()
+            return
+
         now = datetime.now(UTC)
         for r in runs:
             r.status = "running"
@@ -267,12 +325,11 @@ async def run_agent_trials(submission_id: str, n: int) -> None:
         timeout_sec = (
             config.environment.build_timeout_sec
             + rounds * (config.agent.timeout_sec + config.verifier.timeout_sec)
+            + rounds * max(_AGENT_SETUP_ALLOWANCE_SEC, _agent_setup_timeout_sec())
             + _HARBOR_TIMEOUT_BUFFER_SEC
         )
 
-        agent_kwargs = {"max_turns": str(settings.llm_max_iters)}
-        if settings.agent_reasoning_effort:
-            agent_kwargs["reasoning_effort"] = settings.agent_reasoning_effort
+        agent_kwargs = _agent_kwargs()
 
         jobs_dir = settings.storage_dir / "submissions" / submission_id / "runs" / "agent" / "harbor"
         if jobs_dir.exists():
@@ -318,6 +375,7 @@ async def run_agent_trials(submission_id: str, n: int) -> None:
             agent_kwargs=agent_kwargs,
             n_attempts=n,
             n_concurrent=concurrency,
+            agent_setup_timeout_sec=_agent_setup_timeout_sec(),
             on_trial=on_trial,
         )
 
