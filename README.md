@@ -19,7 +19,7 @@ Everything runs locally: FastAPI backend, React/Vite frontend, Postgres, and Doc
 - **Docker Desktop** (or another local Docker daemon) — running, before you start the backend.
 - **Python 3.13+** and [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
 - **[Harbor](https://github.com/laude-institute/harbor)** CLI — runs the Oracle, Nop and Agent
-  Trials stages with the same harness as the real grading pipeline: `uv tool install harbor` (tested with 0.8.0)
+  Trials stages with the same harness as the real grading pipeline: `uv tool install harbor==0.23.0` (the version this was tested with)
 - **Node.js** and [`bun`](https://bun.sh) (this repo is bun-lockfile-managed; `npm` will also
   work off `package-lock.json` if you don't have bun, but bun is what's actually been tested)
 - An API key for at least one LLM provider (Anthropic, OpenAI, Gemini, Groq, or
@@ -85,6 +85,11 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
 - **LLM spending cap**: agent trials and OpenAI judge calls stop once this calendar month's
   recorded spend reaches `LLM_BUDGET_USD` (default $50; `0` disables it). `GET /budget` shows
   spend so far. Only models with a known price (currently `gpt-6-astra`) are tracked.
+- **Task network policy**: Harbor 0.23+ only enforces `no-network` when Docker's kernel supports
+  its egress-control sidecar (Docker Desktop for Mac doesn't) and otherwise rejects the task, so
+  older tasks with `allow_internet = false` would fail every stage. `HARBOR_NETWORK_MODE` (default
+  `public`) runs a temporary copy of each task with `network_mode = "public"`, and the stage logs
+  say so. Set it empty to respect each task's own setting.
 - **Resetting local state**: submission data lives in `backend/storage/submissions/` (safe to
   delete) and in the `taskeval-pg-data` Docker volume (`docker compose down -v` wipes it).
 - **Docker image buildup**: each submission builds a tagged image (`taskeval/{id}:build`). These accumulate over time — `docker image prune -a` reclaims space from ones no

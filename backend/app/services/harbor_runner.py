@@ -7,7 +7,9 @@ container, so every stage matches the real pipeline's verdicts."""
 import asyncio
 import json
 import os
+import shutil
 import signal
+import tomllib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +54,62 @@ def _read_text(path: Path) -> str:
         return path.read_text(errors="replace")
     except OSError:
         return ""
+
+
+_NETWORK_KEYS = ("allow_internet", "network_mode", "allowed_hosts")
+
+
+def _rewrite_network_mode(text: str, mode: str) -> str:
+    """Set [environment].network_mode in task.toml text, dropping the legacy
+    allow_internet and any allowed_hosts lines. Line-based on purpose: the
+    stdlib can read TOML but not write it."""
+    out: list[str] = []
+    section = None
+    inserted = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            section = stripped
+        elif section == "[environment]" and any(
+            stripped.startswith(k) and stripped[len(k) :].lstrip().startswith("=")
+            for k in _NETWORK_KEYS
+        ):
+            continue
+        out.append(line)
+        if section == "[environment]" and stripped == "[environment]" and not inserted:
+            out.append(f'network_mode = "{mode}"')
+            inserted = True
+    if not inserted:
+        out += ["", "[environment]", f'network_mode = "{mode}"']
+    return "\n".join(out) + "\n"
+
+
+def _prepare_task(task_root: Path, work_dir: Path) -> tuple[Path, str | None]:
+    """Returns (task path for Harbor, note for the logs). When
+    HARBOR_NETWORK_MODE is set, Harbor runs a temporary copy of the task
+    whose network policy is forced to that mode."""
+    mode = settings.harbor_network_mode
+    if not mode:
+        return task_root, None
+    toml_path = task_root / "task.toml"
+    original_env = tomllib.loads(toml_path.read_text()).get("environment", {})
+    if original_env.get("network_mode") == mode and "allow_internet" not in original_env:
+        return task_root, None
+
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    shutil.copytree(task_root, work_dir, symlinks=True)
+    new_text = _rewrite_network_mode(toml_path.read_text(), mode)
+    (work_dir / "task.toml").write_text(new_text)
+    new_env = tomllib.loads(new_text).get("environment", {})
+    if new_env.get("network_mode") != mode or any(k in new_env for k in ("allow_internet", "allowed_hosts")):
+        raise ValueError("could not rewrite task.toml network policy")
+
+    was = {k: original_env[k] for k in _NETWORK_KEYS if k in original_env}
+    return work_dir, (
+        f"(network_mode forced to '{mode}' by the platform setting HARBOR_NETWORK_MODE; "
+        f"the task file had {was or 'no network setting'})"
+    )
 
 
 def _usage_line(outcome: TrialOutcome) -> str:
@@ -155,12 +213,13 @@ async def run_job(
     that reason becomes the job error. Never raises for task-level failures — a failed build,
     crashed trial, or timeout comes back as reward=None or a job error."""
     jobs_dir.mkdir(parents=True, exist_ok=True)
+    task_path, network_note = _prepare_task(task_root, jobs_dir.parent / f"{jobs_dir.name}-task")
     job_dir = jobs_dir / job_name
     cli_output_path = jobs_dir / f"{job_name}.out"
     cmd = [
         settings.harbor_bin,
         "run",
-        "--path", str(task_root),
+        "--path", str(task_path),
         "--agent", agent,
         "--jobs-dir", str(jobs_dir),
         "--job-name", job_name,
@@ -198,6 +257,8 @@ async def run_job(
             except (json.JSONDecodeError, OSError):
                 continue  # caught mid-write; pick it up on the next poll
             seen.add(result_path)
+            if network_note:
+                outcome.logs = f"{network_note}\n\n{outcome.logs}"
             if stop_reason is not None:
                 # Finished only because we stopped the job; say why first.
                 outcome.logs = f"{stop_reason}\n\n{outcome.logs}"

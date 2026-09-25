@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     # Oracle/Nop and agent trials run through the Harbor CLI
     # (`uv tool install harbor`).
     harbor_bin: str = "harbor"
+    # Network policy Harbor runs every task with, applied to a temporary copy
+    # of the task (the extracted files are never edited). Harbor >= 0.23 only
+    # enforces "no-network" when Docker's kernel supports its egress-control
+    # sidecar (not the case on Docker Desktop for Mac) and otherwise rejects
+    # the task, so old `allow_internet = false` tasks would fail every stage.
+    # Set empty to respect each task's own setting instead.
+    harbor_network_mode: str = "public"
 
     # Agent trials: Harbor agent plus a LiteLLM model string. When
     # agent_model is empty it's derived from llm_provider/llm_model, so the
