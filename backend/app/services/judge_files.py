@@ -9,8 +9,8 @@ shown) comes first."""
 import codecs
 from pathlib import Path
 
-MAX_FILE_CHARS = 20_000
-MAX_TOTAL_CHARS = 120_000
+from app.config import get_settings
+
 MAX_LISTING_ENTRIES = 300
 
 _SNIFF_BYTES = 4096
@@ -32,7 +32,10 @@ def _is_text(path: Path) -> bool:
     return True
 
 
-def read_text_files(root: Path, max_total: int = MAX_TOTAL_CHARS) -> str:
+def read_text_files(root: Path, max_total: int | None = None) -> str:
+    settings = get_settings()
+    max_file = settings.judge_max_file_chars
+    max_total = max_total or settings.judge_max_total_chars
     listing: list[str] = []
     chunks: list[str] = []
     total = 0
@@ -56,9 +59,9 @@ def read_text_files(root: Path, max_total: int = MAX_TOTAL_CHARS) -> str:
             continue
 
         note = ""
-        if len(content) > MAX_FILE_CHARS:
-            content = content[:MAX_FILE_CHARS] + "\n... [truncated]"
-            note = f", truncated to the first {MAX_FILE_CHARS} characters"
+        if len(content) > max_file:
+            content = content[:max_file] + "\n... [truncated]"
+            note = f", truncated to the first {max_file} characters"
         chunk = f"--- {rel} ---\n{content}\n"
         if budget_reached or total + len(chunk) > max_total:
             budget_reached = True

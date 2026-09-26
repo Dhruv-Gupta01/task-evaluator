@@ -67,6 +67,15 @@ class ReviewReportResult(BaseModel):
     logs: str | None = None
 
 
+class FailureAnalysisResult(BaseModel):
+    """`harbor analyze` over the agent trials. Advisory: "passed" only means
+    the analysis ran. `logs` is JSON: {agent, model, cost_usd, error, results},
+    one entry per trial with a summary and rubric checks (reward_hacking,
+    task_specification), each {outcome, explanation}."""
+    status: StageStatus
+    logs: str | None = None
+
+
 class SubmissionSchema(BaseModel):
     id: str
     task_name: str
@@ -79,6 +88,7 @@ class SubmissionSchema(BaseModel):
     leakage_scan: LeakageScanResult
     code_smell: CodeSmellResult
     review_report: ReviewReportResult
+    failure_analysis: FailureAnalysisResult
 
 
 class SubmissionListItem(BaseModel):

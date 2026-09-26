@@ -102,6 +102,21 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
   the first build of a task takes about a minute longer, later trials start in seconds), needs the network (`HARBOR_NETWORK_MODE=public`,
   the default), has the OpenAI key inside the container, and has no turn cap: only the task's
   agent timeout bounds its cost. Pin its version with `CODEX_VERSION`.
+- **Reasoning level per run**: the Agent Trials card has a Reasoning dropdown (Default, low, medium,
+  high, xhigh, max). Default uses `AGENT_REASONING_EFFORT` from `backend/.env`; anything else applies
+  to that run only (API: `agent-trials?reasoning_effort=high`). The trial logs start with the agent,
+  model and options used, so you can see which level a trial ran on.
+- **Failure analysis**: the Failure Analysis card's "Analyze Trials" button runs `harbor analyze`
+  over every finished agent trial (passes too) and shows a summary plus `reward_hacking` and
+  `task_specification` checks for each. It uses `ANALYZE_MODEL` (default `openai/gpt-6-luna`, a few
+  cents per run) through `ANALYZE_AGENT` (Terminus-2), needs `OPENAI_API_KEY`, and is advisory. The
+  evaluator sees the task's tests and the trajectories, so use keys with no-training / zero-retention
+  terms. Its labels are Harbor's trial folder names, not the "Trial #N" numbers.
+- **Tasks with a docker-compose.yaml**: the Codex bake is skipped for them, so Harbor installs Codex
+  inside each trial (10-16 minutes per trial instead of about 4). Results are unaffected.
+- **Judge file limits**: Sufficiency and Code Smell read up to `JUDGE_MAX_FILE_CHARS` (150000) per
+  file and `JUDGE_MAX_TOTAL_CHARS` (500000) in all; a judge that sees only part of a long dossier
+  reports the rest as missing.
 - **Task network policy**: Harbor 0.23+ only enforces `no-network` when Docker's kernel supports
   its egress-control sidecar (Docker Desktop for Mac doesn't) and otherwise rejects the task, so
   older tasks with `allow_internet = false` would fail every stage. `HARBOR_NETWORK_MODE` (default

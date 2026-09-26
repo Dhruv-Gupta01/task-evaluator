@@ -102,10 +102,21 @@ async def trigger_nop(submission_id: str, db: Session = Depends(get_db)) -> dict
 
 @router.post("/submissions/{submission_id}/agent-trials", status_code=202)
 async def trigger_agent_trials(
-    submission_id: str, n: int = 5, append: bool = False, db: Session = Depends(get_db)
+    submission_id: str,
+    n: int = 5,
+    append: bool = False,
+    reasoning_effort: str | None = None,
+    db: Session = Depends(get_db),
 ) -> dict[str, str]:
     """Runs n agent trials. By default they replace any earlier trials;
-    append=true keeps them and adds n more after the last one."""
+    append=true keeps them and adds n more after the last one.
+    reasoning_effort sets the agent's reasoning level for these trials only
+    (default: AGENT_REASONING_EFFORT from .env)."""
+    if reasoning_effort is not None and reasoning_effort not in task_runner.REASONING_EFFORTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"reasoning_effort must be one of {', '.join(task_runner.REASONING_EFFORTS)}",
+        )
     if n < 1 or n > settings.max_agent_trials:
         raise HTTPException(
             status_code=400, detail=f"n must be between 1 and {settings.max_agent_trials}"
@@ -128,7 +139,7 @@ async def trigger_agent_trials(
     db.commit()
 
     await task_queue.submit(
-        f"{submission_id}:agent", task_runner.run_agent_trials(submission_id, n, append)
+        f"{submission_id}:agent", task_runner.run_agent_trials(submission_id, n, append, reasoning_effort)
     )
     return {"status": "started"}
 
@@ -264,3 +275,30 @@ def get_budget(db: Session = Depends(get_db)) -> dict[str, float]:
         "spent_usd": round(budget.spent_this_month(db), 4),
         "limit_usd": settings.llm_budget_usd,
     }
+
+
+@router.post("/submissions/{submission_id}/failure-analysis", status_code=202)
+async def trigger_failure_analysis(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """`harbor analyze` on the finished agent trials. Advisory, like the other
+    LLM stages; it costs a little (a cheap model) and counts toward the budget."""
+    _raise_if_over_budget(db, budget.exceeded_message(db))
+    submission = db.get(Submission, submission_id)
+    if submission is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    agent_status = submission_service.to_schema(submission).agent_trials.status
+    if agent_status not in _REVIEW_REPORT_TERMINAL:
+        raise HTTPException(status_code=400, detail="run the agent trials to completion first")
+
+    run = (
+        db.query(Run).filter_by(submission_id=submission_id, kind="failure_analysis", run_index=0).one_or_none()
+    )
+    if run is None:
+        run = Run(submission_id=submission_id, kind="failure_analysis", run_index=0)
+        db.add(run)
+    run.status = "pending"
+    db.commit()
+
+    await task_queue.submit(
+        f"{submission_id}:failure_analysis", task_runner.run_failure_analysis(submission_id)
+    )
+    return {"status": "started"}

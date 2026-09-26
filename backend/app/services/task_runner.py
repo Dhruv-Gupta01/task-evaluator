@@ -42,16 +42,22 @@ _LITELLM_PREFIX = {
 }
 
 
-def _agent_kwargs() -> dict[str, str]:
+# Reasoning levels the UI offers for one run of trials.
+REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+def _agent_kwargs(reasoning_effort: str | None = None) -> dict[str, str]:
     """Options for `harbor run --agent-kwarg`. Harbor >= 0.23 rejects options
-    an agent doesn't declare, so each agent only gets the ones it knows."""
+    an agent doesn't declare, so each agent only gets the ones it knows.
+    reasoning_effort overrides AGENT_REASONING_EFFORT for this run only."""
     agent = settings.harbor_agent
     kwargs: dict[str, str] = {}
     if agent.startswith("terminus"):
         kwargs["max_turns"] = str(settings.llm_max_iters)
     if agent.startswith("terminus") or agent == "codex":
-        if settings.agent_reasoning_effort:
-            kwargs["reasoning_effort"] = settings.agent_reasoning_effort
+        effort = reasoning_effort or settings.agent_reasoning_effort
+        if effort:
+            kwargs["reasoning_effort"] = effort
     if agent == "codex":
         if settings.codex_version:
             kwargs["version"] = settings.codex_version
@@ -303,7 +309,9 @@ async def _run_harbor_gate(submission_id: str, kind: str) -> None:
         db.close()
 
 
-async def run_agent_trials(submission_id: str, n: int, append: bool = False) -> None:
+async def run_agent_trials(
+    submission_id: str, n: int, append: bool = False, reasoning_effort: str | None = None
+) -> None:
     """n trials of an LLM agent via one `harbor run` job. Harbor runs the
     agent inside the task container and only copies tests/ in afterwards to
     verify, so the agent never sees the tests. Each Run row is filled in as
@@ -348,7 +356,7 @@ async def run_agent_trials(submission_id: str, n: int, append: bool = False) -> 
             + _HARBOR_TIMEOUT_BUFFER_SEC
         )
 
-        agent_kwargs = _agent_kwargs()
+        agent_kwargs = _agent_kwargs(reasoning_effort)
 
         jobs_dir = settings.storage_dir / "submissions" / submission_id / "runs" / "agent" / "harbor"
         if jobs_dir.exists() and not append:
@@ -661,5 +669,71 @@ async def run_review_report(submission_id: str) -> None:
             run.logs = traceback.format_exc()
             run.finished_at = datetime.now(UTC)
             db.commit()
+    finally:
+        db.close()
+
+
+async def run_failure_analysis(submission_id: str) -> None:
+    """`harbor analyze` over every agent job of this submission (append=true
+    leaves several). The result is stored as JSON in the Run's logs:
+    {"agent", "model", "cost_usd", "error", "results": [per-trial analysis]}."""
+    db = SessionLocal()
+    try:
+        run = _get_or_create_run(db, submission_id, "failure_analysis")
+        run.status = "running"
+        run.started_at = datetime.now(UTC)
+        run.logs = None
+        db.commit()
+
+        agent_root = settings.storage_dir / "submissions" / submission_id / "runs" / "agent" / "harbor"
+        job_dirs = sorted(
+            (d for d in agent_root.glob("agent-*") if d.is_dir()), key=lambda d: d.stat().st_mtime
+        )
+        results: list[dict] = []
+        errors: list[str] = []
+        total_cost: float | None = None
+        analysis_root = settings.storage_dir / "submissions" / submission_id / "runs" / "analysis"
+        stamp = uuid.uuid4().hex[:8]
+        for job_dir in job_dirs:
+            outcome = await harbor_runner.run_analyze(
+                job_dir,
+                analysis_root,
+                f"analyze-{stamp}-{job_dir.name}",
+                settings.analyze_agent,
+                settings.analyze_model,
+                settings.analyze_timeout_sec,
+            )
+            if outcome.error:
+                errors.append(f"{job_dir.name}: {outcome.error}")
+            if outcome.report:
+                results.extend(outcome.report.get("results") or [])
+            if outcome.cost_usd is not None:
+                total_cost = (total_cost or 0.0) + outcome.cost_usd
+                budget.record(
+                    db, submission_id, "failure_analysis", settings.analyze_model,
+                    outcome.cost_usd, None, None, None,
+                )
+
+        run.logs = json.dumps(
+            {
+                "agent": settings.analyze_agent,
+                "model": settings.analyze_model,
+                "cost_usd": total_cost,
+                "error": "\n\n".join(errors) or None,
+                "results": results,
+            }
+        )
+        # "passed" = the analysis ran and produced results; it's advisory, not a verdict.
+        run.status = "passed" if results else "failed"
+        run.reward = 1 if results else None
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    except Exception:
+        run = _get_or_create_run(db, submission_id, "failure_analysis")
+        run.status = "failed"
+        run.reward = None
+        run.logs = json.dumps({"error": traceback.format_exc(), "results": []})
+        run.finished_at = datetime.now(UTC)
+        db.commit()
     finally:
         db.close()

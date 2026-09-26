@@ -59,6 +59,37 @@ export interface CodeSmellResult {
   logs?: string;
 }
 
+// `logs` is JSON (see FailureAnalysis below) once the stage has run.
+export interface FailureAnalysisResult {
+  status: StageStatus;
+  logs?: string;
+}
+
+export interface AnalysisCheck {
+  outcome: "pass" | "fail" | "not_applicable" | string;
+  explanation: string;
+}
+
+export interface TrialAnalysis {
+  trial_name?: string | null;
+  summary?: string | null;
+  checks: Record<string, AnalysisCheck>;
+  cost_usd?: number | null;
+  error?: string | null;
+}
+
+export interface FailureAnalysis {
+  agent?: string;
+  model?: string;
+  cost_usd?: number | null;
+  error?: string | null;
+  results: TrialAnalysis[];
+}
+
+// Reasoning levels the backend accepts for one run of trials.
+export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
 export interface Submission {
   id: string;
   task_name: string;
@@ -71,6 +102,7 @@ export interface Submission {
   leakage_scan: LeakageScanResult;
   code_smell: CodeSmellResult;
   review_report: ReviewReportResult;
+  failure_analysis: FailureAnalysisResult;
 }
 
 export interface SubmissionListItem {
@@ -119,10 +151,17 @@ export const api = {
     fetch(`${API_BASE_URL}/submissions/${id}/nop`, { method: "POST" }).then(
       handle<unknown>,
     ),
-  agentTrials: (id: string, n: number) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/agent-trials?n=${n}`, {
-      method: "POST",
-    }).then(handle<unknown>),
+  // reasoningEffort undefined = the server's default (AGENT_REASONING_EFFORT).
+  agentTrials: (id: string, n: number, reasoningEffort?: ReasoningEffort) =>
+    fetch(
+      `${API_BASE_URL}/submissions/${id}/agent-trials?n=${n}` +
+        (reasoningEffort ? `&reasoning_effort=${reasoningEffort}` : ""),
+      { method: "POST" },
+    ).then(handle<unknown>),
+  failureAnalysis: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/failure-analysis`, { method: "POST" }).then(
+      handle<unknown>,
+    ),
   sufficiency: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/sufficiency`, { method: "POST" }).then(
       handle<unknown>,

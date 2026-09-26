@@ -609,3 +609,70 @@ async def run_single(
     if result.trials:
         return result.trials[0]
     return TrialOutcome(reward=None, logs=result.error or "harbor produced no trial result")
+
+
+@dataclass
+class AnalyzeJobResult:
+    report: dict | None  # harbor's analysis.json: {"results": [...]}
+    cost_usd: float | None
+    error: str | None = None
+
+
+async def run_analyze(
+    trial_or_job_dir: Path,
+    out_dir: Path,
+    job_name: str,
+    agent: str,
+    model: str,
+    timeout_sec: float,
+) -> AnalyzeJobResult:
+    """`harbor analyze` over a job (or trial) directory: an evaluator agent
+    reads each trial and grades it against Harbor's default rubric (reward
+    hacking, task specification). Harbor writes <out_dir>/<job_name>/analysis.json."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        settings.harbor_bin, "analyze", str(trial_or_job_dir),
+        "--agent", agent, "--model", model,
+        "--jobs-dir", str(out_dir), "--job-name", job_name,
+        "--n-concurrent", "2", "--quiet",
+    ]
+    env = {**os.environ, **_litellm_key_env(), "DOCKER_DEFAULT_PLATFORM": settings.docker_platform}
+    cli_output_path = out_dir / f"{job_name}.cli.log"
+    with open(cli_output_path, "wb") as cli_output:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, cwd=out_dir, env=env, stdout=cli_output, stderr=asyncio.subprocess.STDOUT
+            )
+        except FileNotFoundError:
+            return AnalyzeJobResult(None, None, f"harbor CLI not found ({settings.harbor_bin!r}).")
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout_sec)
+        except TimeoutError:
+            await _stop(proc)
+            return AnalyzeJobResult(None, None, f"harbor analyze timed out after {timeout_sec:.0f}s")
+        except asyncio.CancelledError:
+            await _stop(proc)
+            raise
+
+    job_dir = out_dir / job_name
+    report = None
+    try:
+        report = json.loads((job_dir / "analysis.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        pass
+    # The evaluator agent's own model cost, from its trial result.json files.
+    cost = None
+    for result_path in job_dir.glob("*/result.json"):
+        try:
+            value = (json.loads(result_path.read_text()).get("agent_result") or {}).get("cost_usd")
+        except (OSError, json.JSONDecodeError):
+            continue
+        if value is not None:
+            cost = (cost or 0.0) + float(value)
+    error = None
+    if report is None:
+        error = (
+            f"harbor analyze exited with code {proc.returncode} and wrote no analysis.json\n\n"
+            f"=== HARBOR OUTPUT ===\n{_truncate(_read_text(cli_output_path))}"
+        )
+    return AnalyzeJobResult(report, cost, error)

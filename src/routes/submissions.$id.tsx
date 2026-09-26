@@ -2,11 +2,25 @@ import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, AlertTriangle } from "lucide-react";
-import { api, type Submission, type StageStatus } from "@/lib/api";
+import {
+  api,
+  REASONING_EFFORTS,
+  type FailureAnalysis,
+  type ReasoningEffort,
+  type Submission,
+  type StageStatus,
+} from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogPanel } from "@/components/LogPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Tooltip,
   TooltipContent,
@@ -46,6 +60,7 @@ function SubmissionDetail() {
         d.agent_trials.status === "running" ||
         d.sufficiency.status === "running" ||
         d.sufficiency.status === "pending" ||
+        isActive(d.failure_analysis.status) ||
         d.build.status === "pending";
       return any ? 2500 : false;
     },
@@ -79,10 +94,14 @@ function SubmissionDetail() {
   });
   // Each trial is a paid LLM run, so default to one; the backend caps n at 50.
   const [n, setN] = useState(1);
+  // "default" = whatever AGENT_REASONING_EFFORT the server is configured with.
+  const [effort, setEffort] = useState<ReasoningEffort | "default">("default");
   const mAgent = useMutation({
-    mutationFn: () => api.agentTrials(id, n),
+    mutationFn: () => api.agentTrials(id, n, effort === "default" ? undefined : effort),
     onSuccess: () => {
-      toast.success(`Agent trials (n=${n}) started`);
+      toast.success(
+        `Agent trials (n=${n}, reasoning ${effort === "default" ? "server default" : effort}) started`,
+      );
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -107,6 +126,14 @@ function SubmissionDetail() {
     mutationFn: () => api.codeSmell(id),
     onSuccess: () => {
       toast.success("Code smell check started");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const mAnalysis = useMutation({
+    mutationFn: () => api.failureAnalysis(id),
+    onSuccess: () => {
+      toast.success("Failure analysis started");
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -139,6 +166,8 @@ function SubmissionDetail() {
 
   const buildReady = data.build.status === "passed";
   const validated = data.build.status !== "not-run";
+  const agentDone =
+    data.agent_trials.status === "passed" || data.agent_trials.status === "failed";
   const oracleNopPassed =
     data.oracle.status === "passed" && data.nop.status === "passed";
 
@@ -257,6 +286,20 @@ function SubmissionDetail() {
               onChange={(e) => setN(Math.min(50, Math.max(1, Number(e.target.value) || 1)))}
               className="w-20"
             />
+            <label className="text-sm text-muted-foreground">Reasoning</label>
+            <Select value={effort} onValueChange={(v) => setEffort(v as ReasoningEffort | "default")}>
+              <SelectTrigger className="w-32">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="default">Default</SelectItem>
+                {REASONING_EFFORTS.map((e) => (
+                  <SelectItem key={e} value={e}>
+                    {e}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <RunButton
               label="Run Agent Trials"
               runningLabel="Running…"
@@ -405,6 +448,24 @@ function SubmissionDetail() {
           <LogPanel logs={data.code_smell.logs} title="Code smell reasoning" />
         </StageCard>
 
+        {/* Failure analysis (harbor analyze) */}
+        <StageCard
+          title="Failure Analysis"
+          description="harbor analyze over the agent trials: a cheap model reads each trajectory and checks for reward hacking and for failures caused by an unclear instruction. Advisory."
+          status={data.failure_analysis.status}
+        >
+          <RunButton
+            label="Analyze Trials"
+            runningLabel="Analyzing…"
+            onClick={() => mAnalysis.mutate()}
+            running={isActive(data.failure_analysis.status)}
+            pending={mAnalysis.isPending}
+            disabled={!agentDone}
+            disabledReason="Run the agent trials to completion first"
+          />
+          <AnalysisView logs={data.failure_analysis.logs} />
+        </StageCard>
+
         {/* Review Report */}
         <StageCard
           title="Review Report"
@@ -434,6 +495,61 @@ function SubmissionDetail() {
         </StageCard>
       </div>
     </PageShell>
+  );
+}
+
+function AnalysisView({ logs }: { logs?: string }) {
+  if (!logs) return null;
+  let parsed: FailureAnalysis | null = null;
+  try {
+    parsed = JSON.parse(logs) as FailureAnalysis;
+  } catch {
+    return <LogPanel logs={logs} title="Analysis output" />;
+  }
+  return (
+    <div className="space-y-3">
+      <div className="text-xs text-muted-foreground">
+        {parsed.agent} · {parsed.model}
+        {parsed.cost_usd != null && <> · ${parsed.cost_usd.toFixed(3)}</>}
+      </div>
+      {parsed.error && (
+        <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs whitespace-pre-wrap max-h-48 overflow-y-auto">
+          {parsed.error}
+        </div>
+      )}
+      {parsed.results.map((r, i) => (
+        <div key={r.trial_name ?? i} className="rounded-md border border-border p-3 text-sm">
+          <div className="font-mono text-xs text-muted-foreground">{r.trial_name ?? `trial ${i}`}</div>
+          {r.error ? (
+            <div className="mt-1 text-xs text-red-600 dark:text-red-400 whitespace-pre-wrap">
+              {r.error}
+            </div>
+          ) : (
+            <>
+              {r.summary && <p className="mt-1 whitespace-pre-wrap">{r.summary}</p>}
+              <ul className="mt-2 space-y-1.5">
+                {Object.entries(r.checks).map(([name, c]) => (
+                  <li key={name} className="text-xs">
+                    <span
+                      className={`mr-2 rounded px-1.5 py-0.5 font-medium ${
+                        c.outcome === "pass"
+                          ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                          : c.outcome === "fail"
+                          ? "bg-red-500/15 text-red-700 dark:text-red-400"
+                          : "bg-muted text-muted-foreground"
+                      }`}
+                    >
+                      {name}: {c.outcome}
+                    </span>
+                    <span className="text-muted-foreground">{c.explanation}</span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }
 

@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     # linux/amd64 works too but is emulated there and much slower.
     docker_platform: str = "linux/arm64"
 
+    # How much of the task's files the judges (Sufficiency, Code Smell) read.
+    # A task can keep its rules in long documents (one task had 324k characters of
+    # dossier), and a judge that sees only the start of each file reports the
+    # rest as missing, so these are generous; a file cut at the limit is still
+    # named in the judge's file listing.
+    judge_max_file_chars: int = 150_000
+    judge_max_total_chars: int = 500_000
+
     # Comma-separated "hostname:ip" pairs pinned into every Docker build the
     # platform runs (docker build --add-host, and Harbor via a compose overlay),
     # for networks that filter one address of a multi-address host. Example:
@@ -88,6 +96,14 @@ class Settings(BaseSettings):
     codex_bake_into_image: bool = True
     codex_version: str = ""  # pin the Codex CLI; empty installs the latest each trial
     codex_web_search: str = ""  # disabled | cached | live; empty = Codex default
+    # "Failure analysis" stage: `harbor analyze` reads each finished trial's
+    # trajectory and grades it (reward hacking, task specification). It runs a
+    # small evaluator agent, so pick a cheap model. terminus-2 drives the
+    # container from the host, so the OpenAI key stays out of the container
+    # and nothing has to be installed from GitHub.
+    analyze_agent: str = "terminus-2"
+    analyze_model: str = "openai/gpt-6-luna"
+    analyze_timeout_sec: int = 3600
     # Spending cap for all priced LLM use (agent trials and OpenAI judge
     # calls) per calendar month (UTC); 0 disables it.
     llm_budget_usd: float = 50.0

@@ -3,6 +3,7 @@ from app.schemas import (
     AgentTrialsResult,
     BuildResult,
     CodeSmellResult,
+    FailureAnalysisResult,
     LeakageScanResult,
     ReviewReportResult,
     StageResult,
@@ -87,6 +88,12 @@ def _leakage_scan_result(run: Run | None) -> LeakageScanResult:
     return LeakageScanResult(status=run.status, passed=(run.reward == 1) if run.reward is not None else None, logs=run.logs)  # type: ignore[arg-type]
 
 
+def _failure_analysis_result(run: Run | None) -> FailureAnalysisResult:
+    if run is None:
+        return FailureAnalysisResult(status="not-run", logs=None)
+    return FailureAnalysisResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
+
+
 def _review_report_result(run: Run | None) -> ReviewReportResult:
     if run is None:
         return ReviewReportResult(status="not-run", passed=None, logs=None)
@@ -122,6 +129,7 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         leakage_scan=_leakage_scan_result(leakage_scan_run),
         code_smell=_code_smell_result(code_smell_run),
         review_report=_review_report_result(review_report_run),
+        failure_analysis=_failure_analysis_result(_get_run(submission, "failure_analysis")),
     )
 
 
