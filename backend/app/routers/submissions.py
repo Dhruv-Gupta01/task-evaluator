@@ -106,12 +106,19 @@ async def trigger_agent_trials(
     n: int = 5,
     append: bool = False,
     reasoning_effort: str | None = None,
+    agent: str | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
     """Runs n agent trials. By default they replace any earlier trials;
     append=true keeps them and adds n more after the last one.
     reasoning_effort sets the agent's reasoning level for these trials only
-    (default: AGENT_REASONING_EFFORT from .env)."""
+    (default: AGENT_REASONING_EFFORT from .env). agent picks codex (AGENT_MODEL),
+    claude-code (CLAUDE_AGENT_MODEL) or terminus-2 for these trials only
+    (default: HARBOR_AGENT)."""
+    if agent is not None and agent not in task_runner.AGENTS:
+        raise HTTPException(
+            status_code=400, detail=f"agent must be one of {', '.join(task_runner.AGENTS)}"
+        )
     if reasoning_effort is not None and reasoning_effort not in task_runner.REASONING_EFFORTS:
         raise HTTPException(
             status_code=400,
@@ -139,7 +146,7 @@ async def trigger_agent_trials(
     db.commit()
 
     await task_queue.submit(
-        f"{submission_id}:agent", task_runner.run_agent_trials(submission_id, n, append, reasoning_effort)
+        f"{submission_id}:agent", task_runner.run_agent_trials(submission_id, n, append, reasoning_effort, agent)
     )
     return {"status": "started"}
 

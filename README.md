@@ -102,6 +102,11 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
   the first build of a task takes about a minute longer, later trials start in seconds), needs the network (`HARBOR_NETWORK_MODE=public`,
   the default), has the OpenAI key inside the container, and has no turn cap: only the task's
   agent timeout bounds its cost. Pin its version with `CODEX_VERSION`.
+- **Agent per run**: the Agent Trials card has an Agent dropdown: "Codex · GPT-6 Astra" (model
+  `AGENT_MODEL`, needs `OPENAI_API_KEY`) or "Claude Code · Fable 5.1" (model `CLAUDE_AGENT_MODEL`,
+  default `anthropic/claude-fable-5-1`, needs `ANTHROPIC_API_KEY`). API: `agent-trials?agent=claude-code`.
+  Both install themselves inside the task container, so their key enters it. Claude Code's cost can't
+  be read while it runs, so each trial is also capped by Claude Code itself at its share of the run budget.
 - **Reasoning level per run**: the Agent Trials card has a Reasoning dropdown (Default, low, medium,
   high, xhigh, max). Default uses `AGENT_REASONING_EFFORT` from `backend/.env`; anything else applies
   to that run only (API: `agent-trials?reasoning_effort=high`). The trial logs start with the agent,

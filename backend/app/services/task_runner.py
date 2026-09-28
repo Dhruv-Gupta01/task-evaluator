@@ -42,19 +42,21 @@ _LITELLM_PREFIX = {
 }
 
 
-# Reasoning levels the UI offers for one run of trials.
+# Reasoning levels the UI offers for one run of trials. Codex, Claude Code and
+# Terminus all accept these.
 REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# Agents a run of trials can pick (default: HARBOR_AGENT).
+AGENTS = ("codex", "claude-code", "terminus-2")
 
 
-def _agent_kwargs(reasoning_effort: str | None = None) -> dict[str, str]:
+def _agent_kwargs(agent: str, reasoning_effort: str | None = None) -> dict[str, str]:
     """Options for `harbor run --agent-kwarg`. Harbor >= 0.23 rejects options
     an agent doesn't declare, so each agent only gets the ones it knows.
     reasoning_effort overrides AGENT_REASONING_EFFORT for this run only."""
-    agent = settings.harbor_agent
     kwargs: dict[str, str] = {}
     if agent.startswith("terminus"):
         kwargs["max_turns"] = str(settings.llm_max_iters)
-    if agent.startswith("terminus") or agent == "codex":
+    if agent.startswith("terminus") or agent in ("codex", "claude-code"):
         effort = reasoning_effort or settings.agent_reasoning_effort
         if effort:
             kwargs["reasoning_effort"] = effort
@@ -66,14 +68,16 @@ def _agent_kwargs(reasoning_effort: str | None = None) -> dict[str, str]:
     return kwargs
 
 
-_CODEX_SETUP_TIMEOUT_SEC = 1200
+# Codex and Claude Code install themselves inside the container (Node, npm or a
+# download), which can take longer than Harbor's 360s default.
+_INSTALLED_AGENT_SETUP_TIMEOUT_SEC = 1200
 
 
-def _agent_setup_timeout_sec() -> int:
+def _agent_setup_timeout_sec(agent: str) -> int:
     """0 means Harbor's own default."""
     if settings.agent_setup_timeout_sec:
         return settings.agent_setup_timeout_sec
-    return _CODEX_SETUP_TIMEOUT_SEC if settings.harbor_agent == "codex" else 0
+    return _INSTALLED_AGENT_SETUP_TIMEOUT_SEC if agent in ("codex", "claude-code") else 0
 
 
 def _agent_timeout_sec(config: TaskConfig) -> float:
@@ -95,13 +99,26 @@ def _run_cost_cap(db) -> tuple[float | None, str]:
     return min(caps, key=lambda cap: cap[0])
 
 
-def _agent_config_error() -> str | None:
-    """A reason the configured agent can't run, or None."""
-    if settings.harbor_agent == "codex":
-        if not _agent_model().startswith("openai/"):
+def _agent_config_error(agent: str) -> str | None:
+    """A reason the chosen agent can't run, or None."""
+    if agent == "claude-code":
+        if not _agent_model(agent).startswith("anthropic/"):
+            return (
+                f"Claude Code only works with Anthropic models, but CLAUDE_AGENT_MODEL is "
+                f"'{_agent_model(agent)}'. Set CLAUDE_AGENT_MODEL=anthropic/<model> in backend/.env."
+            )
+        if not settings.anthropic_api_key:
+            return "Claude Code needs ANTHROPIC_API_KEY in backend/.env."
+        if settings.harbor_network_mode not in ("", "public"):
+            return (
+                "Claude Code installs itself and calls the Anthropic API from inside the "
+                "task container, so it needs HARBOR_NETWORK_MODE=public."
+            )
+    if agent == "codex":
+        if not _agent_model(agent).startswith("openai/"):
             return (
                 f"Codex only works with OpenAI models, but the agent model is "
-                f"'{_agent_model()}'. Set AGENT_MODEL=openai/<model> in backend/.env."
+                f"'{_agent_model(agent)}'. Set AGENT_MODEL=openai/<model> in backend/.env."
             )
         if not settings.openai_api_key:
             return "Codex needs OPENAI_API_KEY in backend/.env."
@@ -113,7 +130,9 @@ def _agent_config_error() -> str | None:
     return None
 
 
-def _agent_model() -> str:
+def _agent_model(agent: str) -> str:
+    if agent == "claude-code":
+        return settings.claude_agent_model
     if settings.agent_model:
         return settings.agent_model
     prefix = _LITELLM_PREFIX.get(settings.llm_provider, settings.llm_provider)
@@ -310,7 +329,11 @@ async def _run_harbor_gate(submission_id: str, kind: str) -> None:
 
 
 async def run_agent_trials(
-    submission_id: str, n: int, append: bool = False, reasoning_effort: str | None = None
+    submission_id: str,
+    n: int,
+    append: bool = False,
+    reasoning_effort: str | None = None,
+    agent: str | None = None,
 ) -> None:
     """n trials of an LLM agent via one `harbor run` job. Harbor runs the
     agent inside the task container and only copies tests/ in afterwards to
@@ -328,7 +351,8 @@ async def run_agent_trials(
             .order_by(Run.run_index)
             .all()
         )  # the router pre-creates the n new rows as pending; earlier trials are left alone
-        config_error = _agent_config_error()
+        agent = agent or settings.harbor_agent
+        config_error = _agent_config_error(agent)
         if config_error:
             for r in runs:
                 r.status = "failed"
@@ -352,18 +376,18 @@ async def run_agent_trials(
         timeout_sec = (
             config.environment.build_timeout_sec
             + rounds * (_agent_timeout_sec(config) + config.verifier.timeout_sec)
-            + rounds * max(_AGENT_SETUP_ALLOWANCE_SEC, _agent_setup_timeout_sec())
+            + rounds * max(_AGENT_SETUP_ALLOWANCE_SEC, _agent_setup_timeout_sec(agent))
             + _HARBOR_TIMEOUT_BUFFER_SEC
         )
 
-        agent_kwargs = _agent_kwargs(reasoning_effort)
+        agent_kwargs = _agent_kwargs(agent, reasoning_effort)
 
         jobs_dir = settings.storage_dir / "submissions" / submission_id / "runs" / "agent" / "harbor"
         if jobs_dir.exists() and not append:
             shutil.rmtree(jobs_dir)  # keep only the latest attempt's output
 
         pending = list(runs)
-        model = _agent_model()
+        model = _agent_model(agent)
 
         async def on_trial(outcome: harbor_runner.TrialOutcome) -> str | None:
             if outcome.cost_usd is not None:
@@ -393,9 +417,14 @@ async def run_agent_trials(
             return f"skipped: {reason}" if reason and pending else None
 
         cost_cap_usd, cost_cap_label = _run_cost_cap(db)
+        if agent == "claude-code" and cost_cap_usd is not None:
+            # The watchdog can't read Claude Code's cost while it runs (its
+            # session log stays in the container), so each trial also gets its
+            # share of the cap as Claude Code's own --max-budget-usd.
+            agent_kwargs["max_budget_usd"] = f"{max(cost_cap_usd / n, 0.01):.2f}"
         result = await harbor_runner.run_job(
             Path(submission.extracted_path),
-            settings.harbor_agent,
+            agent,
             jobs_dir,
             f"agent-{uuid.uuid4().hex[:8]}",
             timeout_sec,
@@ -403,7 +432,7 @@ async def run_agent_trials(
             agent_kwargs=agent_kwargs,
             n_attempts=n,
             n_concurrent=concurrency,
-            agent_setup_timeout_sec=_agent_setup_timeout_sec(),
+            agent_setup_timeout_sec=_agent_setup_timeout_sec(agent),
             cost_cap_usd=cost_cap_usd,
             cost_cap_label=cost_cap_label,
             on_trial=on_trial,

@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     # agent and the LLM judges use the same model unless overridden.
     harbor_agent: str = "terminus-2"
     agent_model: str = ""
+    # Model for the Claude Code agent (the UI's "Claude Code" choice, or
+    # HARBOR_AGENT=claude-code). Needs ANTHROPIC_API_KEY. Like Codex it runs
+    # inside the task container, so the key enters the container.
+    claude_agent_model: str = "anthropic/claude-fable-5-1"
     agent_reasoning_effort: str = ""  # e.g. low | medium | high; empty = model default
     agent_trials_concurrency: int = 1
     # Codex-only (HARBOR_AGENT=codex). Codex installs itself inside the task

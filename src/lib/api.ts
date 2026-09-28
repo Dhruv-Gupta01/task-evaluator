@@ -90,6 +90,14 @@ export interface FailureAnalysis {
 export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
+// Agents a run of trials can use; the backend picks each one's model from .env
+// (codex: AGENT_MODEL, claude-code: CLAUDE_AGENT_MODEL).
+export const AGENT_CHOICES = [
+  { value: "codex", label: "Codex · GPT-6 Astra" },
+  { value: "claude-code", label: "Claude Code · Fable 5.1" },
+] as const;
+export type AgentChoice = (typeof AGENT_CHOICES)[number]["value"];
+
 export interface Submission {
   id: string;
   task_name: string;
@@ -151,11 +159,13 @@ export const api = {
     fetch(`${API_BASE_URL}/submissions/${id}/nop`, { method: "POST" }).then(
       handle<unknown>,
     ),
-  // reasoningEffort undefined = the server's default (AGENT_REASONING_EFFORT).
-  agentTrials: (id: string, n: number, reasoningEffort?: ReasoningEffort) =>
+  // reasoningEffort / agent undefined = the server's defaults
+  // (AGENT_REASONING_EFFORT, HARBOR_AGENT).
+  agentTrials: (id: string, n: number, reasoningEffort?: ReasoningEffort, agent?: AgentChoice) =>
     fetch(
       `${API_BASE_URL}/submissions/${id}/agent-trials?n=${n}` +
-        (reasoningEffort ? `&reasoning_effort=${reasoningEffort}` : ""),
+        (reasoningEffort ? `&reasoning_effort=${reasoningEffort}` : "") +
+        (agent ? `&agent=${agent}` : ""),
       { method: "POST" },
     ).then(handle<unknown>),
   failureAnalysis: (id: string) =>

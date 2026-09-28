@@ -4,7 +4,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, AlertTriangle } from "lucide-react";
 import {
   api,
+  AGENT_CHOICES,
   REASONING_EFFORTS,
+  type AgentChoice,
   type FailureAnalysis,
   type ReasoningEffort,
   type Submission,
@@ -96,11 +98,14 @@ function SubmissionDetail() {
   const [n, setN] = useState(1);
   // "default" = whatever AGENT_REASONING_EFFORT the server is configured with.
   const [effort, setEffort] = useState<ReasoningEffort | "default">("default");
+  const [agentChoice, setAgentChoice] = useState<AgentChoice>("codex");
   const mAgent = useMutation({
-    mutationFn: () => api.agentTrials(id, n, effort === "default" ? undefined : effort),
+    mutationFn: () =>
+      api.agentTrials(id, n, effort === "default" ? undefined : effort, agentChoice),
     onSuccess: () => {
+      const label = AGENT_CHOICES.find((a) => a.value === agentChoice)?.label ?? agentChoice;
       toast.success(
-        `Agent trials (n=${n}, reasoning ${effort === "default" ? "server default" : effort}) started`,
+        `Agent trials (${label}, n=${n}, reasoning ${effort === "default" ? "server default" : effort}) started`,
       );
       invalidate();
     },
@@ -276,7 +281,7 @@ function SubmissionDetail() {
               </span>
             </div>
           )}
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <label className="text-sm text-muted-foreground">N =</label>
             <Input
               type="number"
@@ -286,6 +291,19 @@ function SubmissionDetail() {
               onChange={(e) => setN(Math.min(50, Math.max(1, Number(e.target.value) || 1)))}
               className="w-20"
             />
+            <label className="text-sm text-muted-foreground">Agent</label>
+            <Select value={agentChoice} onValueChange={(v) => setAgentChoice(v as AgentChoice)}>
+              <SelectTrigger className="w-52">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {AGENT_CHOICES.map((a) => (
+                  <SelectItem key={a.value} value={a.value}>
+                    {a.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <label className="text-sm text-muted-foreground">Reasoning</label>
             <Select value={effort} onValueChange={(v) => setEffort(v as ReasoningEffort | "default")}>
               <SelectTrigger className="w-32">
