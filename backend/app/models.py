@@ -25,6 +25,13 @@ class Submission(Base):
     # cached parsed task.toml, re-derived on validate; stored as JSON text
     task_config_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # The canonical task_checksum (Harbor's dirhash of the task dir) for this
+    # submission: set from the first Harbor-backed run that reports one, then
+    # left alone. Every later run's own checksum is compared against this to
+    # catch a frozen-run-set violation (e.g. oracle run against one task copy,
+    # rollouts against another) instead of assuming it silently held.
+    task_checksum: Mapped[str | None] = mapped_column(String, nullable=True)
+
     runs: Mapped[list["Run"]] = relationship(
         back_populates="submission", cascade="all, delete-orphan"
     )
@@ -36,13 +43,17 @@ class Run(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     submission_id: Mapped[str] = mapped_column(ForeignKey("submissions.id"))
-    kind: Mapped[str] = mapped_column(String)  # "oracle" | "nop" | "agent" | "cheat_trial" | "rubric_check"
+    kind: Mapped[str] = mapped_column(String)  # "oracle" | "nop" | "agent" | "cheat_trial" | "rubric_check" | "static_checks"
     run_index: Mapped[int] = mapped_column(Integer, default=0)
 
     status: Mapped[str] = mapped_column(String, default="pending")
     reward: Mapped[int | None] = mapped_column(Integer, nullable=True)
     logs: Mapped[str | None] = mapped_column(Text, nullable=True)
     container_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Harbor's own dirhash of the task dir this run actually executed
+    # against (result.json's task_checksum), null for runs Harbor doesn't
+    # produce a result.json for (e.g. rubric_check).
+    task_checksum: Mapped[str | None] = mapped_column(String, nullable=True)
 
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

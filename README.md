@@ -97,6 +97,15 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
   old behavior silently overwrote the single previous run, which meant you could never actually see
   whether the 3 consecutive runs Gate 1 wants had all passed, only the most recent one. "passed" on
   the card means every run so far has reward=1, not just the latest.
+- **Task version consistency check**: every Oracle, Nop and Agent Trials run records the
+  `task_checksum` Harbor's own `result.json` reports for the exact task directory it ran against.
+  The first one seen on a submission becomes its canonical checksum; a red banner appears on the
+  submission page if any later run's checksum differs (a submission stitched together from runs
+  against different task zips/extractions, rather than one frozen version, e.g. an oracle run
+  before a re-upload and rollouts after). `GET /submissions/{id}` exposes it as `checksum:
+  {canonical, consistent, mismatched}` and each run's own `task_checksum`. The Cheat Trial is
+  excluded from this check — its task copy always has an intentionally edited `instruction.md`
+  (see below), so its checksum never matches by design.
 - **Agent timeout and run cost cap**: `AGENT_TIMEOUT_SEC` forces one agent timeout on every task
   (Terminal-Bench 4.0 uses 8 hours, `28800`); empty keeps each task's own. `AGENT_RUN_BUDGET_USD`
   (default $5) stops an agent-trials run once its own cost reaches it, and a run is also stopped
@@ -116,6 +125,20 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
   high, xhigh, max). Default uses `AGENT_REASONING_EFFORT` from `backend/.env`; anything else applies
   to that run only (API: `agent-trials?reasoning_effort=high`). The trial logs start with the agent,
   model and options used, so you can see which level a trial ran on.
+- **Every trial's logs start with a full audit header**: the Harbor CLI version, the exact `harbor run`
+  command (every `--agent-kwarg` it actually passed, including reasoning effort), confirmation the
+  agent execution timeout was written into task.toml as-is with no multiplier applied (the separate
+  install-time `--agent-setup-timeout-multiplier`, if any, is logged too), and the agent's own resolved
+  version — read per trial from Harbor's own `agent/trajectory.json` (every installed agent writes this
+  itself), not from a requested/pinned setting like `CODEX_VERSION` (which resolves to npm's "latest"
+  when empty, and has no equivalent for Claude Code at all).
+- **Infra failures get one automatic retry**: a trial that crashed or timed out with no reward, and
+  whose logs match a known infra-noise pattern (connect/read timeout, rate limit, DNS failure, Docker
+  orchestration error — see `infra_marker_scan.py`), is retried once automatically at the end of the
+  Agent Trials run, rather than counted as the agent genuinely failing the task. The original failure
+  is kept, not discarded, in the trial's logs; a retry that shows infra noise again is left as-is for a
+  human rather than retried forever. A real reward=0 attempt (the agent tried and failed) is never
+  touched by this.
 - **Failure analysis**: the Failure Analysis card's "Analyze Trials" button runs `harbor analyze`
   over every finished agent trial (passes too) and shows a summary plus `reward_hacking` and
   `task_specification` checks for each. It uses `ANALYZE_MODEL` (default `openai/gpt-6-luna`, a few
@@ -130,6 +153,20 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
   Harbor's own launcher fail with an OS argument-length error; that shows up as an error in the
   stage's logs, not a real quality verdict — strip large vendor directories before checking if you
   hit this.
+- **Static checks**: the Static Checks card's "Run Static Checks" button runs the same mechanical,
+  LLM-free checks (word counts, formatting, Dockerfile/test.sh/zip hygiene) that Review Report already
+  used internally, but persists the result as its own stage so it's independently visible and part of
+  the evidence bundle below. No Docker, no LLM cost. Advisory.
+- **Evidence bundle & auto-filled summary**: `GET /submissions/{id}/evidence` downloads one JSON file
+  with the Docker build log, the Static Checks report, and the Rubric Check report, plus a
+  `summary_markdown` field (C8) rendered straight from that same run data — task name, checksum
+  consistency, every gate's status, agent trial pass rate and **pass@k for every k from 1 to n** (C6;
+  the standard unbiased estimator `1 - C(n-c,k)/C(n,k)`, unlike Harbor's own job-level reporting, which
+  only ever fills in powers-of-2/multiples-of-5 k values and never computes pass@1 at all), and total
+  recorded LLM spend. No LLM call generates it, so every field is a real value or an explicit "not run
+  yet"/"not recorded" — never a `[fill]` placeholder. Every absolute `/Users/<user>/...` or
+  `/home/<user>/...` path in the bundle has its username redacted (C10) before this leaves the platform.
+  The "Download Evidence" button in the header triggers this from the UI.
 - **Cheat trial**: the Cheat Trial card's "Run Cheat Trial" button runs one agent trial with an
   explicit directive to cheat spliced into the instruction (edit the verifier, hardcode outputs,
   read the reference solution). It uses the same Agent/Reasoning choice as a normal run. A pass

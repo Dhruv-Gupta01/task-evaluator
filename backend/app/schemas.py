@@ -10,6 +10,7 @@ class StageResult(BaseModel):
     status: StageStatus
     reward: int | None = None  # 0 | 1 | null
     logs: str | None = None
+    task_checksum: str | None = None
 
 
 class BuildResult(BaseModel):
@@ -22,6 +23,7 @@ class TrialResult(BaseModel):
     index: int
     reward: int | None = None
     logs: str | None = None
+    task_checksum: str | None = None
 
 
 class AgentTrialsResult(BaseModel):
@@ -29,6 +31,12 @@ class AgentTrialsResult(BaseModel):
     n: int
     trials: list[TrialResult]
     pass_rate: float | None = None
+    # C6: pass@k (the standard unbiased estimator) for every k from 1 to n,
+    # keyed by k as a string. Unlike Harbor's own job-level reporting (which
+    # only fills powers-of-2/multiples-of-5 -- pass@1 is never computed by
+    # Harbor itself), every k is always present here once all trials are
+    # terminal; null while any trial is still running/pending.
+    pass_at_k: dict[str, float] | None = None
 
 
 class OracleRunsResult(BaseModel):
@@ -102,6 +110,20 @@ class CheatTrialResult(BaseModel):
     status: StageStatus
     reward: int | None = None
     logs: str | None = None
+    # Recorded for audit, but never compared to the submission's canonical
+    # checksum -- this trial's task copy always has an intentionally edited
+    # instruction.md, so it legitimately never matches. See ChecksumInfo.
+    task_checksum: str | None = None
+
+
+class StaticChecksResult(BaseModel):
+    """Mechanical, LLM-free checks (services/static_checks.py) over
+    instruction.md, test.sh, Dockerfile and zip layout. Advisory: "failed"
+    means at least one check came back `fail` (findings for a human to look
+    at), not that the submission is disqualified. `logs` is JSON:
+    {fail_count, warn_count, results: [{name, severity, message}], text}."""
+    status: StageStatus
+    logs: str | None = None
 
 
 class RubricCheckResult(BaseModel):
@@ -115,6 +137,23 @@ class RubricCheckResult(BaseModel):
     verdict."""
     status: StageStatus
     logs: str | None = None
+
+
+class ChecksumInfo(BaseModel):
+    """C1: verifies Build/Oracle/Nop/Agent Trials all ran against the same
+    frozen task version instead of assuming it. `canonical` is the first
+    Harbor-reported task_checksum seen for this submission (set once, never
+    changed). `consistent` is null until at least one Harbor-backed run has
+    reported a checksum; false means some run's own checksum (see each
+    stage's `task_checksum` field) differs from canonical -- e.g. a
+    submission stitched together from runs against different task copies.
+    `mismatched` names those runs (e.g. "oracle#1", "agent#0"). The Cheat
+    Trial is deliberately excluded: its task copy always has an edited
+    instruction.md, so it never matches canonical by design -- see
+    CheatTrialResult.task_checksum instead."""
+    canonical: str | None = None
+    consistent: bool | None = None
+    mismatched: list[str] = []
 
 
 class SubmissionSchema(BaseModel):
@@ -132,6 +171,8 @@ class SubmissionSchema(BaseModel):
     failure_analysis: FailureAnalysisResult
     cheat_trial: CheatTrialResult
     rubric_check: RubricCheckResult
+    static_checks: StaticChecksResult
+    checksum: ChecksumInfo
 
 
 class SubmissionListItem(BaseModel):

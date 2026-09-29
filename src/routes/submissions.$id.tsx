@@ -13,6 +13,7 @@ import {
   type ReasoningEffort,
   type Submission,
   type StageStatus,
+  type StaticCheckReport,
 } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogPanel } from "@/components/LogPanel";
@@ -132,6 +133,18 @@ function SubmissionDetail() {
     },
     onError: (e: Error) => toast.error(e.message),
   });
+  const mStaticChecks = useMutation({
+    mutationFn: () => api.staticChecks(id),
+    onSuccess: () => {
+      toast.success("Static checks started");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const mEvidence = useMutation({
+    mutationFn: () => api.downloadEvidence(id),
+    onError: (e: Error) => toast.error(e.message),
+  });
   const mCodeSmell = useMutation({
     mutationFn: () => api.codeSmell(id),
     onSuccess: () => {
@@ -227,9 +240,29 @@ function SubmissionDetail() {
                 {data.build.image_tag}
               </span>
             )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => mEvidence.mutate()}
+              disabled={mEvidence.isPending}
+            >
+              {mEvidence.isPending ? "Preparing…" : "Download Evidence"}
+            </Button>
           </div>
         </div>
       </div>
+
+      {data.checksum.consistent === false && (
+        <div className="mb-6 flex items-start gap-2 rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-400">
+          <span>
+            <strong>Task version mismatch:</strong> {data.checksum.mismatched.join(", ")} ran
+            against a different task checksum than the rest of this submission&apos;s runs (
+            <span className="font-mono text-xs">{data.checksum.canonical}</span>). Every gate
+            result here may describe a different task version, not one frozen submission — re-run
+            the affected stages before trusting this report.
+          </span>
+        </div>
+      )}
 
       <div className="grid gap-4 md:grid-cols-2">
         {/* Validate & Build */}
@@ -405,6 +438,17 @@ function SubmissionDetail() {
                   )}
                 </span>
               </div>
+              {data.agent_trials.pass_at_k && (
+                <div className="flex flex-wrap gap-x-4 gap-y-1 border-b border-border px-3 py-2 text-xs text-muted-foreground">
+                  {Object.entries(data.agent_trials.pass_at_k)
+                    .sort((a, b) => Number(a[0]) - Number(b[0]))
+                    .map(([k, v]) => (
+                      <span key={k}>
+                        pass@{k}: <span className="font-mono">{(v * 100).toFixed(1)}%</span>
+                      </span>
+                    ))}
+                </div>
+              )}
               <ul className="divide-y divide-border">
                 {data.agent_trials.trials.map((t) => (
                   <li key={t.index} className="px-3 py-2">
@@ -461,6 +505,50 @@ function SubmissionDetail() {
             </div>
           )}
           <LogPanel logs={data.sufficiency.logs} title="Sufficiency verdict" />
+        </StageCard>
+
+        {/* Static Checks */}
+        <StageCard
+          title="Static Checks"
+          description="Advisory, LLM-free mechanical checks over instruction.md/test.sh/Dockerfile/zip layout — word counts, formatting, hygiene. Not a pass/fail gate."
+          status={data.static_checks.status}
+        >
+          <RunButton
+            label="Run Static Checks"
+            runningLabel="Checking…"
+            onClick={() => mStaticChecks.mutate()}
+            running={
+              data.static_checks.status === "running" || data.static_checks.status === "pending"
+            }
+            pending={mStaticChecks.isPending}
+            disabled={!validated}
+            disabledReason="Validate the submission first"
+          />
+          {data.static_checks.logs &&
+            (() => {
+              let report: StaticCheckReport | null = null;
+              try {
+                report = JSON.parse(data.static_checks.logs) as StaticCheckReport;
+              } catch {
+                report = null;
+              }
+              if (!report) return null;
+              return (
+                <>
+                  <div
+                    className={`rounded-md border p-2.5 text-xs ${
+                      report.fail_count === 0
+                        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                        : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
+                    }`}
+                  >
+                    {report.fail_count} fail, {report.warn_count} warn, {report.results.length}{" "}
+                    checks total
+                  </div>
+                  <LogPanel logs={report.text} title="Static check findings" />
+                </>
+              );
+            })()}
         </StageCard>
 
         {/* Leakage Scan */}

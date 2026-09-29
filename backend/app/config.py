@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -126,6 +127,19 @@ class Settings(BaseSettings):
     # Spending cap for all priced LLM use (agent trials and OpenAI judge
     # calls) per calendar month (UTC); 0 disables it.
     llm_budget_usd: float = 50.0
+
+
+def host_env_for_subprocess(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """os.environ, minus TZ (C10: the host's timezone must never reach a
+    task container). Nothing in this codebase or Harbor 0.23 forwards host
+    env into the containers it builds/runs, so this is precautionary rather
+    than a fix for an observed leak -- but every `docker build`/`docker
+    run`/`harbor` subprocess call should use this instead of raw os.environ
+    so that stays true even if a future Docker/Harbor default changes."""
+    env = {k: v for k, v in os.environ.items() if k != "TZ"}
+    if extra:
+        env.update(extra)
+    return env
 
 
 def docker_add_host_pairs() -> list[tuple[str, str]]:

@@ -1,7 +1,12 @@
+import json
+import math
+import re
+
 from app.models import Run, Submission
 from app.schemas import (
     AgentTrialsResult,
     BuildResult,
+    ChecksumInfo,
     CodeSmellResult,
     CheatTrialResult,
     FailureAnalysisResult,
@@ -11,6 +16,7 @@ from app.schemas import (
     ReviewReportResult,
     StageResult,
     StageStatus,
+    StaticChecksResult,
     SubmissionListItem,
     SubmissionSchema,
     SufficiencyResult,
@@ -18,6 +24,28 @@ from app.schemas import (
 )
 
 _TERMINAL = {"passed", "failed", "not-run"}
+
+# C10: build/trial logs and check reports embed absolute host paths
+# (backend/storage/..., a candidate's own machine's home dir in task file
+# content, etc.) -- fine for the platform's own UI, but a submission's
+# username shouldn't leak into anything exported for outside reading. Only
+# the username segment is redacted, not the whole path, so the rest (still
+# useful for debugging) survives.
+_HOST_PATH_RE = re.compile(r"(/(?:Users|home)/)([^/\s\"'\\]+)")
+
+
+def redact_host_paths(value):
+    """Recursively redacts `/Users/<user>/...` and `/home/<user>/...`
+    segments in strings, dicts and lists -- used on export only (see
+    routers.submissions.get_evidence_bundle), never on data stored or shown
+    inside the platform itself."""
+    if isinstance(value, str):
+        return _HOST_PATH_RE.sub(lambda m: f"{m.group(1)}<redacted>", value)
+    if isinstance(value, dict):
+        return {k: redact_host_paths(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact_host_paths(v) for v in value]
+    return value
 
 
 def _get_run(submission: Submission, kind: str, run_index: int = 0) -> Run | None:
@@ -30,7 +58,7 @@ def _get_run(submission: Submission, kind: str, run_index: int = 0) -> Run | Non
 def _stage_result(run: Run | None) -> StageResult:
     if run is None:
         return StageResult(status="not-run", reward=None, logs=None)
-    return StageResult(status=run.status, reward=run.reward, logs=run.logs)  # type: ignore[arg-type]
+    return StageResult(status=run.status, reward=run.reward, logs=run.logs, task_checksum=run.task_checksum)  # type: ignore[arg-type]
 
 
 def _invert_status(status: StageStatus) -> StageStatus:
@@ -72,8 +100,30 @@ def _oracle_runs_result(submission: Submission) -> OracleRunsResult:
     else:
         status = "running"
 
-    runs = [TrialResult(index=r.run_index, reward=r.reward, logs=r.logs) for r in oracle_runs]
+    runs = [
+        TrialResult(index=r.run_index, reward=r.reward, logs=r.logs, task_checksum=r.task_checksum)
+        for r in oracle_runs
+    ]
     return OracleRunsResult(status=status, n=n, runs=runs, all_passed=all_passed)
+
+
+def _pass_at_k(n: int, c: int, k: int) -> float:
+    """The standard unbiased pass@k estimator (Codex/HumanEval):
+    1 - C(n-c, k) / C(n, k) -- the probability that at least one of k
+    trials sampled without replacement from the n actually run is a pass,
+    given c of them passed. C6: unlike Harbor's own reporting (which only
+    ever fills in powers-of-2 and multiples-of-5 k values -- pass@1 is never
+    computed by Harbor for any job, by design), this is computed here for
+    every k from 1 to n, so pass@1 and pass@3 are always available."""
+    if k > n:
+        raise ValueError(f"k={k} exceeds n={n}")
+    if n - c < k:
+        return 1.0
+    return 1.0 - math.comb(n - c, k) / math.comb(n, k)
+
+
+def _pass_at_k_table(n: int, c: int) -> dict[str, float]:
+    return {str(k): _pass_at_k(n, c, k) for k in range(1, n + 1)}
 
 
 def _agent_trials_result(submission: Submission) -> AgentTrialsResult:
@@ -93,12 +143,19 @@ def _agent_trials_result(submission: Submission) -> AgentTrialsResult:
         status = "passed" if any(r.reward == 1 for r in agent_runs) else "failed"
 
     pass_rate = None
+    pass_at_k = None
     if all_terminal:
         passed = sum(1 for r in agent_runs if r.reward == 1)
         pass_rate = passed / n
+        pass_at_k = _pass_at_k_table(n, passed)
 
-    trials = [TrialResult(index=r.run_index, reward=r.reward, logs=r.logs) for r in agent_runs]
-    return AgentTrialsResult(status=status, n=n, trials=trials, pass_rate=pass_rate)
+    trials = [
+        TrialResult(index=r.run_index, reward=r.reward, logs=r.logs, task_checksum=r.task_checksum)
+        for r in agent_runs
+    ]
+    return AgentTrialsResult(
+        status=status, n=n, trials=trials, pass_rate=pass_rate, pass_at_k=pass_at_k
+    )
 
 
 def _sufficiency_result(run: Run | None) -> SufficiencyResult:
@@ -122,7 +179,37 @@ def _failure_analysis_result(run: Run | None) -> FailureAnalysisResult:
 def _cheat_trial_result(run: Run | None) -> CheatTrialResult:
     if run is None:
         return CheatTrialResult(status="not-run", reward=None, logs=None)
-    return CheatTrialResult(status=run.status, reward=run.reward, logs=run.logs)  # type: ignore[arg-type]
+    return CheatTrialResult(status=run.status, reward=run.reward, logs=run.logs, task_checksum=run.task_checksum)  # type: ignore[arg-type]
+
+
+def _checksum_info(submission: Submission) -> ChecksumInfo:
+    """C1: did Build/Oracle/Nop/Agent Trials actually run against the same
+    task version? Compares every Harbor-backed run's own task_checksum
+    (oracle, nop, agent -- never cheat_trial, whose task copy always has an
+    intentionally edited instruction.md) against the submission's canonical
+    checksum (the first one any run reported). `consistent` stays null
+    until at least one comparable run has reported a checksum."""
+    canonical = submission.task_checksum
+    mismatched: list[str] = []
+    seen_any = False
+    for r in submission.runs:
+        if r.kind not in ("oracle", "nop", "agent") or not r.task_checksum:
+            continue
+        seen_any = True
+        if canonical and r.task_checksum != canonical:
+            label = r.kind if r.kind == "nop" else f"{r.kind}#{r.run_index}"
+            mismatched.append(label)
+    return ChecksumInfo(
+        canonical=canonical,
+        consistent=(len(mismatched) == 0) if seen_any else None,
+        mismatched=mismatched,
+    )
+
+
+def _static_checks_result(run: Run | None) -> StaticChecksResult:
+    if run is None:
+        return StaticChecksResult(status="not-run", logs=None)
+    return StaticChecksResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
 
 
 def _rubric_check_result(run: Run | None) -> RubricCheckResult:
@@ -168,6 +255,8 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         failure_analysis=_failure_analysis_result(_get_run(submission, "failure_analysis")),
         cheat_trial=_cheat_trial_result(_get_run(submission, "cheat_trial")),
         rubric_check=_rubric_check_result(_get_run(submission, "rubric_check")),
+        static_checks=_static_checks_result(_get_run(submission, "static_checks")),
+        checksum=_checksum_info(submission),
     )
 
 
@@ -191,3 +280,92 @@ def to_list_item(submission: Submission) -> SubmissionListItem:
         code_smell_status=(code_smell_run.status if code_smell_run else "not-run"),  # type: ignore[arg-type]
         review_report_status=(review_report_run.status if review_report_run else "not-run"),  # type: ignore[arg-type]
     )
+
+
+def _fmt_pct(x: float | None) -> str:
+    return f"{x * 100:.1f}%" if x is not None else "not run yet"
+
+
+def _fmt_status(status: str) -> str:
+    return {"not-run": "not run yet", "pending": "queued", "running": "in progress"}.get(
+        status, status
+    )
+
+
+def build_summary_markdown(schema: SubmissionSchema, total_cost_usd: float | None) -> str:
+    """C8: a README/summary rendered straight from already-verified run data
+    -- no LLM call, so every field is a real value or an explicit "not run
+    yet" / "not recorded" -- never a [fill] placeholder ship. Used by
+    routers.submissions.get_evidence_bundle. Extend this, not a separate
+    template file, when a deliverable needs another field: every value here
+    traces back to SubmissionSchema, so it can't drift from what the
+    platform actually recorded."""
+    c = schema.checksum
+    if c.consistent is True:
+        checksum_line = f"Consistent across all runs (`{c.canonical}`)."
+    elif c.consistent is False:
+        checksum_line = (
+            f"**MISMATCH** -- {', '.join(c.mismatched)} ran against a different task version "
+            f"than the rest of this submission's runs (canonical: `{c.canonical}`). Every result "
+            "below may describe more than one task version; re-run before trusting this summary."
+        )
+    else:
+        checksum_line = "Not enough Harbor-backed runs yet to compare."
+
+    lines = [
+        f"# {schema.task_name or 'Untitled task'} — Evaluation Summary",
+        "",
+        f"Submission: `{schema.id}`",
+        f"Task checksum: {checksum_line}",
+        "",
+        "## Gates",
+        f"- Build: {_fmt_status(schema.build.status)}",
+        (
+            f"- Oracle ({schema.oracle.n}x): {_fmt_status(schema.oracle.status)}"
+            + (
+                f", all {schema.oracle.n} runs passed"
+                if schema.oracle.all_passed
+                else ", not all runs passed" if schema.oracle.all_passed is False else ""
+            )
+        ),
+        f"- Nop: {_fmt_status(schema.nop.status)}"
+        + (f" (reward={schema.nop.reward})" if schema.nop.reward is not None else ""),
+        f"- Sufficiency: {_fmt_status(schema.sufficiency.status)}",
+        "",
+        "## Agent Trials",
+        f"- N: {schema.agent_trials.n}",
+        f"- Pass rate: {_fmt_pct(schema.agent_trials.pass_rate)}",
+    ]
+    if schema.agent_trials.pass_at_k:
+        pass_k_line = ", ".join(
+            f"pass@{k}: {_fmt_pct(v)}"
+            for k, v in sorted(schema.agent_trials.pass_at_k.items(), key=lambda kv: int(kv[0]))
+        )
+        lines.append(f"- {pass_k_line}")
+    else:
+        lines.append("- pass@k: not run yet")
+
+    lines += [
+        "",
+        "## Advisory checks",
+        f"- Leakage Scan: {_fmt_status(schema.leakage_scan.status)}",
+        f"- Code Smell: {_fmt_status(schema.code_smell.status)}",
+        (
+            f"- Static Checks: {_fmt_status(schema.static_checks.status)}"
+            + (
+                f" ({json.loads(schema.static_checks.logs)['fail_count']} fail, "
+                f"{json.loads(schema.static_checks.logs)['warn_count']} warn)"
+                if schema.static_checks.logs
+                else ""
+            )
+        ),
+        f"- Rubric Check: {_fmt_status(schema.rubric_check.status)}",
+        f"- Cheat Trial: {_fmt_status(schema.cheat_trial.status)}",
+        f"- Failure Analysis: {_fmt_status(schema.failure_analysis.status)}",
+        f"- Review Report: {_fmt_status(schema.review_report.status)}",
+        "",
+        "## Cost",
+        f"- Total recorded LLM spend for this submission: "
+        + (f"${total_cost_usd:.4f}" if total_cost_usd is not None else "not recorded"),
+    ]
+    return "\n".join(lines) + "\n"

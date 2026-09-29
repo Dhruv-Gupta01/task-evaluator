@@ -123,6 +123,11 @@ async def run_review_report(submission, task_root: Path) -> dict:
                 "n": schema.agent_trials.n,
                 "pass_rate": schema.agent_trials.pass_rate,
             },
+            "checksum": {
+                "canonical": schema.checksum.canonical,
+                "consistent": schema.checksum.consistent,
+                "mismatched": schema.checksum.mismatched,
+            },
         },
         indent=2,
     )
@@ -136,6 +141,12 @@ async def run_review_report(submission, task_root: Path) -> dict:
         "\"nop.status: failed\" would mean doing nothing somehow passed the real tests, which is "
         "the actual problem case. Explain it this way if you reference it — don't tell the "
         "candidate to \"ignore\" the failing output, since that failure IS the pass condition.\n\n"
+        "Note on \"checksum\": this is Harbor's own dirhash of the exact task directory each "
+        "stage ran against. \"consistent: false\" means Oracle/Nop/Agent Trials did not all run "
+        "against the same frozen task version (e.g. re-uploaded or re-extracted between stages) "
+        "-- if so, treat every gate result above as unreliable until it's re-run as one set, and "
+        "say so plainly rather than reasoning over results that may not describe the same task. "
+        "\"consistent: null\" just means too few Harbor-backed stages have run yet to compare.\n\n"
         f"{platform_summary}\n\n"
         "=== STATIC CHECKS (verified, mechanical) ===\n"
         f"{static_report.as_text()}\n\n"

@@ -8,6 +8,7 @@ export interface StageResult {
   status: StageStatus;
   reward: 0 | 1 | null;
   logs?: string;
+  task_checksum?: string | null;
 }
 
 export interface BuildResult {
@@ -20,6 +21,21 @@ export interface TrialResult {
   index: number;
   reward: 0 | 1 | null;
   logs?: string;
+  task_checksum?: string | null;
+}
+
+// C1: did Build/Oracle/Nop/Agent Trials all run against the same frozen
+// task version? `canonical` is the first task_checksum any Harbor-backed
+// run reported. `consistent: false` means some run's own task_checksum
+// (see each stage's TrialResult/StageResult) differs -- `mismatched` names
+// which ones (e.g. "oracle#1", "agent#0"). The Cheat Trial is deliberately
+// excluded -- its task copy always has an edited instruction.md, so its
+// checksum never matches canonical by design. `consistent: null` means too
+// few comparable runs have finished yet.
+export interface ChecksumInfo {
+  canonical: string | null;
+  consistent: boolean | null;
+  mismatched: string[];
 }
 
 export interface AgentTrialsResult {
@@ -27,6 +43,10 @@ export interface AgentTrialsResult {
   n: number;
   trials: TrialResult[];
   pass_rate: number | null;
+  // C6: pass@k (standard unbiased estimator) for every k from 1 to n, keyed
+  // by k as a string. Harbor's own job-level reporting only ever fills
+  // powers-of-2/multiples-of-5 -- pass@1 is never computed by Harbor itself.
+  pass_at_k: Record<string, number> | null;
 }
 
 // Oracle can be run N times, always appended to the ones already there (Gate
@@ -102,6 +122,9 @@ export interface CheatTrialResult {
   status: StageStatus;
   reward: 0 | 1 | null;
   logs?: string;
+  // Recorded for audit only -- never compared against ChecksumInfo.canonical.
+  // This trial's task copy always has an intentionally edited instruction.md.
+  task_checksum?: string | null;
 }
 
 export interface CheatCheck {
@@ -139,6 +162,25 @@ export interface RubricCheck {
   results: RubricCheckEntry[];
 }
 
+// `logs` is JSON (see StaticCheckReport below) once the stage has run.
+export interface StaticChecksResult {
+  status: StageStatus;
+  logs?: string;
+}
+
+export interface StaticCheckFinding {
+  name: string;
+  severity: "fail" | "warn" | "info" | string;
+  message: string;
+}
+
+export interface StaticCheckReport {
+  fail_count: number;
+  warn_count: number;
+  results: StaticCheckFinding[];
+  text: string;
+}
+
 // Reasoning levels the backend accepts for one run of trials.
 export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
@@ -166,6 +208,8 @@ export interface Submission {
   failure_analysis: FailureAnalysisResult;
   cheat_trial: CheatTrialResult;
   rubric_check: RubricCheckResult;
+  static_checks: StaticChecksResult;
+  checksum: ChecksumInfo;
 }
 
 export interface SubmissionListItem {
@@ -254,4 +298,22 @@ export const api = {
     fetch(`${API_BASE_URL}/submissions/${id}/code-smell`, { method: "POST" }).then(
       handle<unknown>,
     ),
+  staticChecks: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/static-checks`, { method: "POST" }).then(
+      handle<unknown>,
+    ),
+  // C5: one downloadable bundle of the build log, static checks and rubric
+  // check -- triggers a browser download rather than returning JSON to read
+  // inline, since the whole point is a file a human can save/attach.
+  downloadEvidence: async (id: string) => {
+    const res = await fetch(`${API_BASE_URL}/submissions/${id}/evidence`);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${id}-evidence.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  },
 };

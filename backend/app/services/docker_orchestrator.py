@@ -1,10 +1,9 @@
-import os
 import subprocess
 
 import docker
 from docker import DockerClient
 
-from app.config import docker_add_host_pairs, get_settings
+from app.config import docker_add_host_pairs, get_settings, host_env_for_subprocess
 
 _client: DockerClient | None = None
 
@@ -71,7 +70,7 @@ def _run_docker_build_cli(
         cmd += ["--label", f"{k}={v}"]
     cmd.append(str(context_dir))
 
-    env = {**os.environ, "DOCKER_BUILDKIT": "1"}
+    env = host_env_for_subprocess({"DOCKER_BUILDKIT": "1"})
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout_sec)
     except subprocess.TimeoutExpired as e:

@@ -15,8 +15,10 @@ from app.services import (
     code_smell_judge,
     docker_orchestrator,
     harbor_runner,
+    infra_marker_scan,
     leakage_scan,
     review_report,
+    static_checks,
     sufficiency_judge,
     validation_service,
 )
@@ -192,6 +194,26 @@ def _get_or_create_run(db, submission_id: str, kind: str, run_index: int = 0) ->
     return run
 
 
+def _record_checksum(
+    submission: Submission, run: Run, task_checksum: str | None, update_canonical: bool = True
+) -> None:
+    """Stores the task_checksum Harbor reported for this run, and — the
+    first time any run on this submission reports one — freezes it on the
+    Submission as the canonical version (C1: one frozen task version per
+    run set). Later runs keep their own checksum even if it differs, so a
+    mismatch (e.g. oracle run against one task copy, rollouts against
+    another) is recorded rather than silently overwritten.
+
+    update_canonical=False for the Cheat Trial: its task copy always has an
+    intentionally edited instruction.md (see _prepare_task's
+    cheat_instruction branch), so its checksum legitimately never matches
+    the others and must never become -- or be compared against -- the
+    canonical version."""
+    run.task_checksum = task_checksum
+    if update_canonical and task_checksum and not submission.task_checksum:
+        submission.task_checksum = task_checksum
+
+
 async def run_validate(submission_id: str) -> None:
     db = SessionLocal()
     try:
@@ -303,6 +325,7 @@ async def run_oracle_trials(submission_id: str, n: int) -> None:
                 run.reward = 1 if outcome.reward >= 1.0 else 0
                 run.status = "passed" if run.reward == 1 else "failed"
             run.logs = outcome.logs
+            _record_checksum(submission, run, outcome.task_checksum)
             run.finished_at = datetime.now(UTC)
             db.commit()
     except Exception:
@@ -381,6 +404,7 @@ async def _run_harbor_gate(submission_id: str, kind: str) -> None:
             run.reward = 1 if result.reward >= 1.0 else 0
             run.status = "passed" if run.reward == 1 else "failed"
         run.logs = result.logs
+        _record_checksum(submission, run, result.task_checksum)
         run.finished_at = datetime.now(UTC)
         db.commit()
     except Exception:
@@ -395,6 +419,92 @@ async def _run_harbor_gate(submission_id: str, kind: str) -> None:
             db.commit()
     finally:
         db.close()
+
+
+# C11: marks a trial's logs as already having had its one automatic infra
+# retry, so a retry that also shows infra noise is left for a human instead
+# of looping forever against a persistent problem (Docker down, etc).
+_INFRA_RETRY_MARKER = "[C11: auto-retried once for infra noise]"
+
+
+async def _retry_infra_agent_failures(
+    db,
+    submission: Submission,
+    submission_id: str,
+    runs: list[Run],
+    agent: str,
+    model: str,
+    agent_kwargs: dict,
+    timeout_sec: float,
+    jobs_dir: Path,
+) -> None:
+    """"Keep the current infra-error policy: rerun infrastructure failures
+    and flag them" (C11). A trial that crashed/timed out with no reward
+    (reward is None -- see run's own "no reward" convention) AND whose logs
+    show a known infra-noise marker (services/infra_marker_scan.py: connect/
+    read timeouts, rate limits, DNS failures, Docker orchestration errors --
+    never a genuine task-logic failure) gets exactly one automatic retry,
+    sequentially (never two Harbor jobs at once -- that itself has caused
+    EnvironmentStartTimeoutError on this machine), before being left for a
+    human. The original failure is kept in the retried trial's logs, not
+    discarded, and the retry itself is flagged either way so it's always
+    clear this reward came from a second attempt."""
+    candidates = [
+        r
+        for r in runs
+        if r.reward is None
+        and r.logs
+        and _INFRA_RETRY_MARKER not in r.logs
+        and infra_marker_scan.scan_trial_logs(r.logs)
+    ]
+    for run in candidates:
+        reason = budget.exceeded_message(db)
+        if reason:
+            run.logs = f"{_INFRA_RETRY_MARKER} (not retried: {reason})\n\n{run.logs}"
+            db.commit()
+            continue
+
+        markers = infra_marker_scan.scan_trial_logs(run.logs)
+        original_logs = run.logs
+        retry_job_dir = jobs_dir.parent / f"{jobs_dir.name}-infra-retry"
+        result = await harbor_runner.run_job(
+            Path(submission.extracted_path),
+            agent,
+            retry_job_dir,
+            f"agent-retry-{uuid.uuid4().hex[:8]}",
+            timeout_sec,
+            model=model,
+            agent_kwargs=agent_kwargs,
+            n_attempts=1,
+            n_concurrent=1,
+        )
+        header = (
+            f"{_INFRA_RETRY_MARKER} original attempt showed infra noise ({', '.join(markers)}), "
+            "so it was rerun once automatically rather than counted as a genuine failure.\n\n"
+            f"=== ORIGINAL (infra-failed) ATTEMPT ===\n{original_logs[-4_000:]}\n\n"
+            "=== RETRY ==="
+        )
+        if result.trials:
+            outcome = result.trials[0]
+            if outcome.cost_usd is not None:
+                budget.record(
+                    db, submission_id, "agent_trials", model, outcome.cost_usd,
+                    outcome.n_input_tokens, outcome.n_cache_tokens, outcome.n_output_tokens,
+                )
+            if outcome.reward is None:
+                run.status = "failed"
+                run.reward = None
+            else:
+                run.reward = 1 if outcome.reward >= 1.0 else 0
+                run.status = "passed" if run.reward == 1 else "failed"
+            run.logs = f"{header}\n{outcome.logs}"
+            _record_checksum(submission, run, outcome.task_checksum)
+        else:
+            run.status = "failed"
+            run.reward = None
+            run.logs = f"{header}\n{result.error or 'harbor produced no result for the retry either'}"
+        run.finished_at = datetime.now(UTC)
+        db.commit()
 
 
 async def run_agent_trials(
@@ -479,6 +589,7 @@ async def run_agent_trials(
                     run.reward = 1 if outcome.reward >= 1.0 else 0
                     run.status = "passed" if run.reward == 1 else "failed"
                 run.logs = outcome.logs
+                _record_checksum(submission, run, outcome.task_checksum)
                 run.finished_at = datetime.now(UTC)
             db.commit()
             # Stop the rest of the job once the monthly cap is crossed.
@@ -513,6 +624,10 @@ async def run_agent_trials(
             run.logs = result.error or "harbor produced no result for this trial"
             run.finished_at = datetime.now(UTC)
         db.commit()
+
+        await _retry_infra_agent_failures(
+            db, submission, submission_id, runs, agent, model, agent_kwargs, timeout_sec, jobs_dir
+        )
     except Exception:
         runs = db.query(Run).filter_by(submission_id=submission_id, kind="agent").all()
         for r in runs:
@@ -631,6 +746,67 @@ async def run_leakage_scan(submission_id: str) -> None:
     except Exception:
         run = db.query(Run).filter_by(
             submission_id=submission_id, kind="leakage_scan", run_index=0
+        ).one_or_none()
+        if run is not None:
+            run.status = "failed"
+            run.reward = None
+            run.logs = traceback.format_exc()
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+    finally:
+        db.close()
+
+
+async def run_static_checks_stage(submission_id: str) -> None:
+    """Advisory-only mechanical checks (services/static_checks.py) over
+    instruction.md, test.sh, Dockerfile and zip layout -- word counts,
+    formatting, hygiene, no LLM call, no Docker. Persisted as its own Run
+    (kind="static_checks") so the evidence (C5: "the output of the static
+    checks") is independently saved and downloadable, not just computed
+    on-the-fly inside Review Report's prompt (which still recomputes it
+    live for the LLM's benefit -- both read the same deterministic
+    function, so they never disagree)."""
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+
+        run = _get_or_create_run(db, submission_id, "static_checks", 0)
+        run.status = "running"
+        run.reward = None
+        run.logs = None
+        run.started_at = datetime.now(UTC)
+        db.commit()
+
+        try:
+            report = static_checks.run_static_checks(Path(submission.extracted_path))
+        except Exception:
+            run.status = "failed"
+            run.reward = None
+            run.logs = traceback.format_exc()
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+            return
+
+        run.status = "passed" if report.fail_count == 0 else "failed"
+        run.reward = 1 if report.fail_count == 0 else 0
+        run.logs = json.dumps(
+            {
+                "fail_count": report.fail_count,
+                "warn_count": report.warn_count,
+                "results": [
+                    {"name": r.name, "severity": r.severity, "message": r.message}
+                    for r in report.results
+                ],
+                "text": report.as_text(),
+            }
+        )
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    except Exception:
+        run = db.query(Run).filter_by(
+            submission_id=submission_id, kind="static_checks", run_index=0
         ).one_or_none()
         if run is not None:
             run.status = "failed"
@@ -974,6 +1150,11 @@ async def run_cheat_trial(submission_id: str, agent: str | None = None) -> None:
             run.logs = json.dumps(
                 {"trial_log": outcome.logs, "reward": run.reward, "cheat_check": cheat_check}
             )
+            # Not update_canonical: this trial's task copy always has an
+            # intentionally edited instruction.md, so its checksum never
+            # matches the others by design -- record it, but never let it
+            # become or be compared against the submission's canonical version.
+            _record_checksum(submission, run, outcome.task_checksum, update_canonical=False)
         else:
             run.status = "failed"
             run.reward = None

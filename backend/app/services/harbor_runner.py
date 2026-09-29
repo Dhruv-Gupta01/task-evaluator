@@ -6,7 +6,6 @@ container, so every stage matches the real pipeline's verdicts."""
 
 import asyncio
 import json
-import os
 import re
 import shutil
 import signal
@@ -16,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.config import docker_add_host_pairs, get_settings
+from app.config import docker_add_host_pairs, get_settings, host_env_for_subprocess
 from app.services.llm import pricing
 from app.services.llm.base import Usage
 
@@ -33,6 +32,23 @@ MAX_AGENT_OUTPUT_CHARS = 4_000
 _HARBOR_DEFAULT_SETUP_TIMEOUT_SEC = 360
 # How often the cost watchdog re-reads in-flight trials' running cost.
 _COST_CHECK_INTERVAL_SEC = 10
+_harbor_version_cache: str | None = None
+
+
+def _harbor_version() -> str:
+    """`harbor --version`, cached for the process lifetime -- logged into
+    every run's notes (C9) so a result can be traced back to the exact
+    harness build that produced it."""
+    global _harbor_version_cache
+    if _harbor_version_cache is None:
+        try:
+            out = subprocess.run(
+                [settings.harbor_bin, "--version"], capture_output=True, text=True, timeout=15
+            )
+            _harbor_version_cache = (out.stdout or out.stderr or "").strip() or "unknown"
+        except (OSError, subprocess.SubprocessError):
+            _harbor_version_cache = "unknown (harbor CLI not found)"
+    return _harbor_version_cache
 
 
 @dataclass
@@ -43,6 +59,16 @@ class TrialOutcome:
     n_cache_tokens: int | None = None
     n_output_tokens: int | None = None
     cost_usd: float | None = None
+    # Harbor's own dirhash of the task dir it actually ran (result.json's
+    # top-level task_checksum), so C1 (one frozen task version per run set)
+    # is verifiable instead of assumed.
+    task_checksum: str | None = None
+    # The agent name+version Harbor itself recorded for this trial (agent/
+    # trajectory.json's agent.name/agent.version -- every installed agent,
+    # Codex, Claude Code and Terminus-2 alike, writes this), so C9's "exact
+    # version" is read from Harbor's own ground truth per trial rather than
+    # assumed from a requested/pinned setting like CODEX_VERSION.
+    agent_version: str | None = None
 
 
 @dataclass
@@ -369,6 +395,14 @@ def _parse_trial(
         reward = float(rewards["reward"])
 
     agent_result = result.get("agent_result") or {}
+    agent_version = None
+    try:
+        traj = json.loads((trial_dir / "agent" / "trajectory.json").read_text())
+        traj_agent = traj.get("agent") or {}
+        if traj_agent.get("name") or traj_agent.get("version"):
+            agent_version = f"{traj_agent.get('name', '?')} {traj_agent.get('version', '?')}"
+    except (OSError, json.JSONDecodeError):
+        pass
     outcome = TrialOutcome(
         reward=reward,
         logs="",
@@ -376,6 +410,8 @@ def _parse_trial(
         n_cache_tokens=agent_result.get("n_cache_tokens"),
         n_output_tokens=agent_result.get("n_output_tokens"),
         cost_usd=agent_result.get("cost_usd"),
+        task_checksum=result.get("task_checksum"),
+        agent_version=agent_version,
     )
 
     if outcome.cost_usd is None and outcome.n_input_tokens is not None and model:
@@ -483,14 +519,6 @@ async def run_job(
         task_root, jobs_dir.parent / f"{jobs_dir.name}-task", agent,
         cheat_instruction=cheat_instruction,
     )
-    notes = "\n".join(
-        n
-        for n in (
-            f"(agent: {agent}, model: {model or 'n/a'}, options: {agent_kwargs or {}})",
-            network_note,
-        )
-        if n
-    )
     job_dir = jobs_dir / job_name
     hosts_overlay = _write_build_hosts_overlay(jobs_dir.parent / f"{jobs_dir.name}-build-hosts.yaml")
     cli_output_path = jobs_dir / f"{job_name}.out"
@@ -507,9 +535,12 @@ async def run_job(
         "--quiet",
         "--yes",
     ]
+    setup_multiplier_note = "(no --agent-setup-timeout-multiplier passed; Harbor's own default install allowance applies)"
     if agent_setup_timeout_sec > 0:
         # Harbor takes a multiplier of its own 360s default (trial.py).
-        cmd += ["--agent-setup-timeout-multiplier", f"{agent_setup_timeout_sec / _HARBOR_DEFAULT_SETUP_TIMEOUT_SEC:.3f}"]
+        multiplier = agent_setup_timeout_sec / _HARBOR_DEFAULT_SETUP_TIMEOUT_SEC
+        cmd += ["--agent-setup-timeout-multiplier", f"{multiplier:.3f}"]
+        setup_multiplier_note = f"(--agent-setup-timeout-multiplier {multiplier:.3f} passed, for {agent_setup_timeout_sec}s of install allowance)"
     if hosts_overlay:
         cmd += ["--extra-docker-compose", str(hosts_overlay)]
     if model:
@@ -517,13 +548,36 @@ async def run_job(
     for key, value in (agent_kwargs or {}).items():
         cmd += ["--agent-kwarg", f"{key}={value}"]
 
+    # C9: every trial's logs start with exactly what ran it, so a result can
+    # be traced back to the precise command/config/harness version rather
+    # than assumed from settings. The agent EXECUTION timeout (as opposed to
+    # the install-time setup allowance above) is written verbatim into
+    # task.toml by _prepare_task with no multiplier math at all -- so "the
+    # multiplier is 1.0" for that timeout is always true by construction,
+    # confirmed here rather than left implicit.
+    notes = "\n".join(
+        n
+        for n in (
+            f"(harbor: {_harbor_version()})",
+            f"(exact command: {' '.join(cmd)})",
+            f"(agent: {agent}, model: {model or 'n/a'}, options: {agent_kwargs or {}})",
+            (
+                f"(agent execution timeout: {settings.agent_timeout_sec}s, applied to task.toml "
+                "as-is -- no multiplier is ever applied to this value)"
+                if settings.agent_timeout_sec
+                else "(agent execution timeout: task's own task.toml value, unmodified)"
+            ),
+            setup_multiplier_note,
+            network_note,
+        )
+        if n
+    )
+
     # Harbor doesn't pin a platform; Docker honours this default for builds
     # and runs, keeping Harbor on the same architecture as our own stages.
-    env = {
-        **os.environ,
-        **_litellm_key_env(),
-        "DOCKER_DEFAULT_PLATFORM": settings.docker_platform,
-    }
+    env = host_env_for_subprocess(
+        {**_litellm_key_env(), "DOCKER_DEFAULT_PLATFORM": settings.docker_platform}
+    )
 
     trials: list[TrialOutcome] = []
     seen: set[Path] = set()
@@ -543,8 +597,19 @@ async def run_job(
             except (json.JSONDecodeError, OSError):
                 continue  # caught mid-write; pick it up on the next poll
             seen.add(result_path)
-            if notes:
-                outcome.logs = f"{notes}\n\n{outcome.logs}"
+            # C9: the agent version actually installed can differ from a
+            # requested/pinned setting (e.g. CODEX_VERSION empty resolves to
+            # whatever npm calls "latest") -- read per-trial from Harbor's
+            # own agent/trajectory.json rather than assumed, for every
+            # installed agent (Codex, Claude Code, Terminus-2 alike).
+            version_note = (
+                f"(agent version actually run: {outcome.agent_version})"
+                if outcome.agent_version
+                else "(agent version: not recorded in this trial's trajectory.json)"
+            )
+            trial_notes = f"{notes}\n{version_note}" if notes else version_note
+            if trial_notes:
+                outcome.logs = f"{trial_notes}\n\n{outcome.logs}"
             if stop_reason is not None:
                 # Finished only because we stopped the job; say why first.
                 outcome.logs = f"{stop_reason}\n\n{outcome.logs}"
@@ -666,7 +731,7 @@ async def run_analyze(
         "--jobs-dir", str(out_dir), "--job-name", job_name,
         "--n-concurrent", "2", "--quiet",
     ]
-    env = {**os.environ, **_litellm_key_env(), "DOCKER_DEFAULT_PLATFORM": settings.docker_platform}
+    env = host_env_for_subprocess({**_litellm_key_env(), "DOCKER_DEFAULT_PLATFORM": settings.docker_platform})
     cli_output_path = out_dir / f"{job_name}.cli.log"
     with open(cli_output_path, "wb") as cli_output:
         try:
@@ -738,7 +803,7 @@ async def run_check(
         "--jobs-dir", str(out_dir), "--job-name", job_name,
         "--quiet",
     ]
-    env = {**os.environ, **_litellm_key_env(), "DOCKER_DEFAULT_PLATFORM": settings.docker_platform}
+    env = host_env_for_subprocess({**_litellm_key_env(), "DOCKER_DEFAULT_PLATFORM": settings.docker_platform})
     cli_output_path = out_dir / f"{job_name}.cli.log"
     with open(cli_output_path, "wb") as cli_output:
         try:

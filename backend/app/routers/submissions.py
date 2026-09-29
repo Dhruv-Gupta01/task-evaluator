@@ -1,13 +1,14 @@
+import json
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
-from app.models import Run, Submission
+from app.models import LlmSpend, Run, Submission
 from app.schemas import SubmissionListItem, SubmissionSchema, UploadResponse
 from app.services import budget, submission_service, task_runner
 from app.workers import task_queue
@@ -382,3 +383,90 @@ async def trigger_rubric_check(submission_id: str, db: Session = Depends(get_db)
         f"{submission_id}:rubric_check", task_runner.run_rubric_check(submission_id)
     )
     return {"status": "started"}
+
+
+@router.post("/submissions/{submission_id}/static-checks", status_code=202)
+async def trigger_static_checks(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """Mechanical, LLM-free checks over instruction.md/test.sh/Dockerfile/zip
+    layout. No Docker, no LLM budget -- only needs the submission extracted."""
+    submission = db.get(Submission, submission_id)
+    if submission is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if submission.extracted_path is None:
+        raise HTTPException(
+            status_code=400, detail="validate the submission first (files must be extracted)"
+        )
+
+    run = (
+        db.query(Run).filter_by(submission_id=submission_id, kind="static_checks", run_index=0).one_or_none()
+    )
+    if run is None:
+        run = Run(submission_id=submission_id, kind="static_checks", run_index=0)
+        db.add(run)
+    run.status = "pending"
+    db.commit()
+
+    await task_queue.submit(
+        f"{submission_id}:static_checks", task_runner.run_static_checks_stage(submission_id)
+    )
+    return {"status": "started"}
+
+
+@router.get("/submissions/{submission_id}/evidence")
+def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Response:
+    """C5: one downloadable bundle of the evidence a task review needs --
+    the Docker build log, the static checks output, and the harbor check
+    rubric review -- instead of a human pulling each one out of the UI/DB
+    by hand. Each section is null with a `not_run` note if that stage
+    hasn't been triggered yet, rather than silently omitted. Also includes
+    a C8 auto-filled summary/README rendered from the same data, so nothing
+    manually assembled from this bundle needs a [fill] placeholder."""
+    submission = db.get(Submission, submission_id)
+    if submission is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+
+    schema = submission_service.to_schema(submission)
+    total_cost_usd = db.query(func.sum(LlmSpend.cost_usd)).filter_by(
+        submission_id=submission_id
+    ).scalar()
+
+    def _json_or_raw(logs: str | None) -> dict | str | None:
+        if logs is None:
+            return None
+        try:
+            return json.loads(logs)
+        except json.JSONDecodeError:
+            return logs
+
+    bundle = {
+        "submission_id": submission_id,
+        "task_name": submission.task_name,
+        "checksum": schema.checksum.model_dump(),
+        "build": {
+            "status": schema.build.status,
+            "log": schema.build.logs,
+        },
+        "static_checks": {
+            "status": schema.static_checks.status,
+            "not_run": schema.static_checks.status == "not-run",
+            "report": _json_or_raw(schema.static_checks.logs),
+        },
+        "rubric_check": {
+            "status": schema.rubric_check.status,
+            "not_run": schema.rubric_check.status == "not-run",
+            "report": _json_or_raw(schema.rubric_check.logs),
+        },
+        "summary_markdown": submission_service.build_summary_markdown(schema, total_cost_usd),
+    }
+    # C10: strip host usernames from every absolute /Users|home/<user>/...
+    # path before this leaves the platform -- the raw versions are fine in
+    # the UI/DB, just never in something meant for outside reading.
+    bundle = submission_service.redact_host_paths(bundle)
+    body = json.dumps(bundle, indent=2)
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{submission_id}-evidence.json"'
+        },
+    )
