@@ -29,6 +29,15 @@ export interface AgentTrialsResult {
   pass_rate: number | null;
 }
 
+// Oracle can be run N times, always appended to the ones already there (Gate
+// 1 needs 3 *consecutive* 1.0 runs). "passed" only once every run passed.
+export interface OracleRunsResult {
+  status: StageStatus;
+  n: number;
+  runs: TrialResult[];
+  all_passed: boolean | null;
+}
+
 export interface SufficiencyResult {
   status: StageStatus;
   passed: boolean | null;
@@ -86,6 +95,50 @@ export interface FailureAnalysis {
   results: TrialAnalysis[];
 }
 
+// One trial run with an explicit cheat directive. `logs` is JSON once the
+// stage has run (see CheatTrial below); reward=1 alone doesn't mean a real
+// cheat -- see cheat_check.
+export interface CheatTrialResult {
+  status: StageStatus;
+  reward: 0 | 1 | null;
+  logs?: string;
+}
+
+export interface CheatCheck {
+  outcome: "pass" | "fail" | "unknown" | string;
+  explanation?: string | null;
+  cost_usd?: number | null;
+  error?: string | null;
+}
+
+export interface CheatTrial {
+  trial_log?: string | null;
+  reward: 0 | 1 | null;
+  cheat_check: CheatCheck | null;
+}
+
+// `logs` is JSON (see RubricCheck below) once the stage has run.
+export interface RubricCheckResult {
+  status: StageStatus;
+  logs?: string;
+}
+
+export interface RubricCheckEntry {
+  task_name?: string | null;
+  summary?: string | null;
+  checks: Record<string, AnalysisCheck>;
+  cost_usd?: number | null;
+  error?: string | null;
+}
+
+export interface RubricCheck {
+  agent?: string;
+  model?: string;
+  cost_usd?: number | null;
+  error?: string | null;
+  results: RubricCheckEntry[];
+}
+
 // Reasoning levels the backend accepts for one run of trials.
 export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
@@ -103,7 +156,7 @@ export interface Submission {
   task_name: string;
   uploaded_at: string;
   build: BuildResult;
-  oracle: StageResult;
+  oracle: OracleRunsResult;
   nop: StageResult;
   agent_trials: AgentTrialsResult;
   sufficiency: SufficiencyResult;
@@ -111,6 +164,8 @@ export interface Submission {
   code_smell: CodeSmellResult;
   review_report: ReviewReportResult;
   failure_analysis: FailureAnalysisResult;
+  cheat_trial: CheatTrialResult;
+  rubric_check: RubricCheckResult;
 }
 
 export interface SubmissionListItem {
@@ -151,8 +206,9 @@ export const api = {
     fetch(`${API_BASE_URL}/submissions/${id}/validate`, { method: "POST" }).then(
       handle<unknown>,
     ),
-  oracle: (id: string) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/oracle`, { method: "POST" }).then(
+  // Always appends to any earlier oracle runs on this submission.
+  oracle: (id: string, n: number) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/oracle?n=${n}`, { method: "POST" }).then(
       handle<unknown>,
     ),
   nop: (id: string) =>
@@ -170,6 +226,16 @@ export const api = {
     ).then(handle<unknown>),
   failureAnalysis: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/failure-analysis`, { method: "POST" }).then(
+      handle<unknown>,
+    ),
+  // agent undefined = the server's default (HARBOR_AGENT).
+  cheatTrial: (id: string, agent?: AgentChoice) =>
+    fetch(
+      `${API_BASE_URL}/submissions/${id}/cheat-trial` + (agent ? `?agent=${agent}` : ""),
+      { method: "POST" },
+    ).then(handle<unknown>),
+  rubricCheck: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/rubric-check`, { method: "POST" }).then(
       handle<unknown>,
     ),
   sufficiency: (id: string) =>

@@ -87,9 +87,29 @@ def _require_built_submission(submission_id: str, db: Session) -> Submission:
 
 
 @router.post("/submissions/{submission_id}/oracle", status_code=202)
-async def trigger_oracle(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+async def trigger_oracle(
+    submission_id: str, n: int = 3, db: Session = Depends(get_db)
+) -> dict[str, str]:
+    """Runs n oracle trials, sequentially, always appended to any earlier
+    ones on this submission (Gate 1 needs 3 *consecutive* 1.0 runs, so every
+    run's own result stays visible, not just the latest)."""
+    if n < 1 or n > settings.max_agent_trials:
+        raise HTTPException(
+            status_code=400, detail=f"n must be between 1 and {settings.max_agent_trials}"
+        )
     _require_built_submission(submission_id, db)
-    await task_queue.submit(f"{submission_id}:oracle", task_runner.run_oracle(submission_id))
+
+    last = (
+        db.query(func.max(Run.run_index))
+        .filter_by(submission_id=submission_id, kind="oracle")
+        .scalar()
+    )
+    first_index = 0 if last is None else last + 1
+    for run_index in range(first_index, first_index + n):
+        db.add(Run(submission_id=submission_id, kind="oracle", run_index=run_index, status="pending"))
+    db.commit()
+
+    await task_queue.submit(f"{submission_id}:oracle", task_runner.run_oracle_trials(submission_id, n))
     return {"status": "started"}
 
 
@@ -307,5 +327,58 @@ async def trigger_failure_analysis(submission_id: str, db: Session = Depends(get
 
     await task_queue.submit(
         f"{submission_id}:failure_analysis", task_runner.run_failure_analysis(submission_id)
+    )
+    return {"status": "started"}
+
+
+@router.post("/submissions/{submission_id}/cheat-trial", status_code=202)
+async def trigger_cheat_trial(
+    submission_id: str, agent: str | None = None, db: Session = Depends(get_db)
+) -> dict[str, str]:
+    """One trial run with an explicit directive to cheat spliced into the
+    instruction, to confirm the anti-cheat design holds when the agent is told
+    to cheat, not just when it happens to behave. agent picks codex,
+    claude-code or terminus-2 for this trial only (default: HARBOR_AGENT)."""
+    if agent is not None and agent not in task_runner.AGENTS:
+        raise HTTPException(
+            status_code=400, detail=f"agent must be one of {', '.join(task_runner.AGENTS)}"
+        )
+    _raise_if_over_budget(db, budget.exceeded_message(db))
+    _require_built_submission(submission_id, db)
+
+    run = (
+        db.query(Run).filter_by(submission_id=submission_id, kind="cheat_trial", run_index=0).one_or_none()
+    )
+    if run is None:
+        run = Run(submission_id=submission_id, kind="cheat_trial", run_index=0)
+        db.add(run)
+    run.status = "pending"
+    db.commit()
+
+    await task_queue.submit(
+        f"{submission_id}:cheat_trial", task_runner.run_cheat_trial(submission_id, agent)
+    )
+    return {"status": "started"}
+
+
+@router.post("/submissions/{submission_id}/rubric-check", status_code=202)
+async def trigger_rubric_check(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """`harbor check`: an evaluator agent scores the whole task against
+    Harbor's quality rubric. Advisory. Needs ANTHROPIC_API_KEY (CHECK_AGENT
+    defaults to claude-code)."""
+    _raise_if_over_budget(db, budget.exceeded_message(db))
+    _require_built_submission(submission_id, db)
+
+    run = (
+        db.query(Run).filter_by(submission_id=submission_id, kind="rubric_check", run_index=0).one_or_none()
+    )
+    if run is None:
+        run = Run(submission_id=submission_id, kind="rubric_check", run_index=0)
+        db.add(run)
+    run.status = "pending"
+    db.commit()
+
+    await task_queue.submit(
+        f"{submission_id}:rubric_check", task_runner.run_rubric_check(submission_id)
     )
     return {"status": "started"}

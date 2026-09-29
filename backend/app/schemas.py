@@ -31,6 +31,18 @@ class AgentTrialsResult(BaseModel):
     pass_rate: float | None = None
 
 
+class OracleRunsResult(BaseModel):
+    """Oracle can be run N times, always appended to the ones already there
+    (Gate 1 needs 3 *consecutive* 1.0 runs, so history matters -- unlike Nop,
+    which stays a single StageResult). "passed" only once every run in `runs`
+    has reward=1; any run still pending/running keeps status "running".
+    all_passed is None until every run is terminal."""
+    status: StageStatus
+    n: int
+    runs: list[TrialResult]
+    all_passed: bool | None = None
+
+
 class SufficiencyResult(BaseModel):
     status: StageStatus
     passed: bool | None = None
@@ -76,12 +88,41 @@ class FailureAnalysisResult(BaseModel):
     logs: str | None = None
 
 
+class CheatTrialResult(BaseModel):
+    """One trial run with an explicit directive to cheat spliced into the
+    instruction. "passed" means the trap held: reward stayed 0/None, OR
+    reward=1 but an automatic `harbor analyze` reward_hacking check (run
+    whenever reward=1, since that alone can't tell a real cheat apart from
+    the agent refusing and solving it honestly -- both observed live) found
+    no reward hacking. "failed" means either a real finding (the check found
+    reward hacking) or the check itself couldn't resolve it -- always surfaced
+    for a human to read, never silently assumed clean either way. `logs` is
+    JSON: {trial_log, reward, cheat_check: {outcome, explanation, cost_usd,
+    error} | null}."""
+    status: StageStatus
+    reward: int | None = None
+    logs: str | None = None
+
+
+class RubricCheckResult(BaseModel):
+    """`harbor check`: an evaluator agent scores the whole task against
+    Harbor's quality rubric (not the agent trials -- see FailureAnalysisResult
+    for that). Advisory. `logs` is JSON: {agent, model, cost_usd, error,
+    results}, one entry per task with `checks` (per-criterion {outcome,
+    explanation}) and a `summary`. A large environment/ (e.g. vendored
+    dependencies) can make Harbor's own launcher fail with an OS
+    argument-length error; that shows up in `error`, not as a real quality
+    verdict."""
+    status: StageStatus
+    logs: str | None = None
+
+
 class SubmissionSchema(BaseModel):
     id: str
     task_name: str
     uploaded_at: datetime
     build: BuildResult
-    oracle: StageResult
+    oracle: OracleRunsResult
     nop: StageResult
     agent_trials: AgentTrialsResult
     sufficiency: SufficiencyResult
@@ -89,6 +130,8 @@ class SubmissionSchema(BaseModel):
     code_smell: CodeSmellResult
     review_report: ReviewReportResult
     failure_analysis: FailureAnalysisResult
+    cheat_trial: CheatTrialResult
+    rubric_check: RubricCheckResult
 
 
 class SubmissionListItem(BaseModel):

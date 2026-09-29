@@ -92,6 +92,11 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
   empty on a normal network.
 - **Adding trials without replacing the old ones**: `POST /submissions/{id}/agent-trials?n=3&append=true`
   (API only; the UI button replaces).
+- **Oracle runs N times, always kept**: the Run Oracle card has an N field (default 3). Every click
+  appends N more runs to whatever's already there and shows each one's own status/reward/logs — the
+  old behavior silently overwrote the single previous run, which meant you could never actually see
+  whether the 3 consecutive runs Gate 1 wants had all passed, only the most recent one. "passed" on
+  the card means every run so far has reward=1, not just the latest.
 - **Agent timeout and run cost cap**: `AGENT_TIMEOUT_SEC` forces one agent timeout on every task
   (Terminal-Bench 4.0 uses 8 hours, `28800`); empty keeps each task's own. `AGENT_RUN_BUDGET_USD`
   (default $5) stops an agent-trials run once its own cost reaches it, and a run is also stopped
@@ -117,6 +122,23 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
   cents per run) through `ANALYZE_AGENT` (Terminus-2), needs `OPENAI_API_KEY`, and is advisory. The
   evaluator sees the task's tests and the trajectories, so use keys with no-training / zero-retention
   terms. Its labels are Harbor's trial folder names, not the "Trial #N" numbers.
+- **Rubric check**: the Rubric Check card's "Run Rubric Check" button runs `harbor check` — a
+  different command from `harbor analyze` above: it scores the *task itself* (instruction, tests,
+  environment) against Harbor's quality rubric, not agent trials. Uses `CHECK_MODEL` (default
+  `anthropic/claude-fable-5-1`) through `CHECK_AGENT` (Claude Code), needs `ANTHROPIC_API_KEY`, and
+  is advisory. A task with a very large `environment/` (e.g. vendored dependencies) can make
+  Harbor's own launcher fail with an OS argument-length error; that shows up as an error in the
+  stage's logs, not a real quality verdict — strip large vendor directories before checking if you
+  hit this.
+- **Cheat trial**: the Cheat Trial card's "Run Cheat Trial" button runs one agent trial with an
+  explicit directive to cheat spliced into the instruction (edit the verifier, hardcode outputs,
+  read the reference solution). It uses the same Agent/Reasoning choice as a normal run. A pass
+  (reward stays 0) means the anti-cheat design held even when told to cheat. reward=1 alone doesn't
+  say the agent found a real cheat — confirmed live on two different harnesses, both got reward 1
+  after refusing the directive and solving the task honestly instead — so a reward=1 trial
+  automatically runs a `harbor analyze` `reward_hacking` check on itself, and only passes if that
+  check positively clears it; a real finding, or a check that can't resolve it, stays failed for a
+  human to read.
 - **Tasks with a docker-compose.yaml**: the Codex bake is skipped for them, so Harbor installs Codex
   inside each trial (10-16 minutes per trial instead of about 4). Results are unaffected.
 - **Judge file limits**: Sufficiency and Code Smell read up to `JUDGE_MAX_FILE_CHARS` (150000) per

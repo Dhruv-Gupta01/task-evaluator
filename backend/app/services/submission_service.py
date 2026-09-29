@@ -3,8 +3,11 @@ from app.schemas import (
     AgentTrialsResult,
     BuildResult,
     CodeSmellResult,
+    CheatTrialResult,
     FailureAnalysisResult,
+    RubricCheckResult,
     LeakageScanResult,
+    OracleRunsResult,
     ReviewReportResult,
     StageResult,
     StageStatus,
@@ -51,6 +54,28 @@ def _nop_stage_result(run: Run | None) -> StageResult:
     return result.model_copy(update={"status": _invert_status(result.status)})
 
 
+def _oracle_runs_result(submission: Submission) -> OracleRunsResult:
+    oracle_runs = sorted(
+        (r for r in submission.runs if r.kind == "oracle"), key=lambda r: r.run_index
+    )
+    n = len(oracle_runs)
+    if n == 0:
+        return OracleRunsResult(status="not-run", n=0, runs=[], all_passed=None)
+
+    statuses = {r.status for r in oracle_runs}
+    all_terminal = statuses <= _TERMINAL
+
+    all_passed = None
+    if all_terminal:
+        all_passed = all(r.reward == 1 for r in oracle_runs)
+        status: StageStatus = "passed" if all_passed else "failed"
+    else:
+        status = "running"
+
+    runs = [TrialResult(index=r.run_index, reward=r.reward, logs=r.logs) for r in oracle_runs]
+    return OracleRunsResult(status=status, n=n, runs=runs, all_passed=all_passed)
+
+
 def _agent_trials_result(submission: Submission) -> AgentTrialsResult:
     agent_runs = sorted(
         (r for r in submission.runs if r.kind == "agent"), key=lambda r: r.run_index
@@ -94,6 +119,18 @@ def _failure_analysis_result(run: Run | None) -> FailureAnalysisResult:
     return FailureAnalysisResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
 
 
+def _cheat_trial_result(run: Run | None) -> CheatTrialResult:
+    if run is None:
+        return CheatTrialResult(status="not-run", reward=None, logs=None)
+    return CheatTrialResult(status=run.status, reward=run.reward, logs=run.logs)  # type: ignore[arg-type]
+
+
+def _rubric_check_result(run: Run | None) -> RubricCheckResult:
+    if run is None:
+        return RubricCheckResult(status="not-run", logs=None)
+    return RubricCheckResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
+
+
 def _review_report_result(run: Run | None) -> ReviewReportResult:
     if run is None:
         return ReviewReportResult(status="not-run", passed=None, logs=None)
@@ -107,7 +144,6 @@ def _code_smell_result(run: Run | None) -> CodeSmellResult:
 
 
 def to_schema(submission: Submission) -> SubmissionSchema:
-    oracle_run = _get_run(submission, "oracle")
     nop_run = _get_run(submission, "nop")
     sufficiency_run = _get_run(submission, "sufficiency")
     leakage_scan_run = _get_run(submission, "leakage_scan")
@@ -122,7 +158,7 @@ def to_schema(submission: Submission) -> SubmissionSchema:
             logs=submission.build_logs,
             image_tag=submission.image_tag,
         ),
-        oracle=_stage_result(oracle_run),
+        oracle=_oracle_runs_result(submission),
         nop=_nop_stage_result(nop_run),
         agent_trials=_agent_trials_result(submission),
         sufficiency=_sufficiency_result(sufficiency_run),
@@ -130,11 +166,12 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         code_smell=_code_smell_result(code_smell_run),
         review_report=_review_report_result(review_report_run),
         failure_analysis=_failure_analysis_result(_get_run(submission, "failure_analysis")),
+        cheat_trial=_cheat_trial_result(_get_run(submission, "cheat_trial")),
+        rubric_check=_rubric_check_result(_get_run(submission, "rubric_check")),
     )
 
 
 def to_list_item(submission: Submission) -> SubmissionListItem:
-    oracle_run = _get_run(submission, "oracle")
     nop_run = _get_run(submission, "nop")
     sufficiency_run = _get_run(submission, "sufficiency")
     leakage_scan_run = _get_run(submission, "leakage_scan")
@@ -146,7 +183,7 @@ def to_list_item(submission: Submission) -> SubmissionListItem:
         task_name=submission.task_name,
         uploaded_at=submission.uploaded_at,
         build_status=submission.build_status,  # type: ignore[arg-type]
-        oracle_status=(oracle_run.status if oracle_run else "not-run"),  # type: ignore[arg-type]
+        oracle_status=_oracle_runs_result(submission).status,
         nop_status=_nop_stage_result(nop_run).status,
         agent_status=agent_trials.status,
         sufficiency_status=(sufficiency_run.status if sufficiency_run else "not-run"),  # type: ignore[arg-type]

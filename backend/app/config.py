@@ -108,6 +108,21 @@ class Settings(BaseSettings):
     analyze_agent: str = "terminus-2"
     analyze_model: str = "openai/gpt-6-luna"
     analyze_timeout_sec: int = 3600
+    # "Rubric Check" stage: `harbor check` reads the whole task (not agent
+    # trials) and scores it against Harbor's quality rubric -- an automated
+    # stand-in for a human task reviewer. Runs Claude Code, so it needs
+    # ANTHROPIC_API_KEY; reuses the same model as the Claude Code agent choice
+    # unless overridden. Known Harbor limitation: a task with a very large
+    # environment/ (e.g. vendored dependencies) can hit an OS argument-length
+    # limit in Harbor's own launcher; the error is surfaced in the stage's logs.
+    check_agent: str = "claude-code"
+    check_model: str = "anthropic/claude-fable-5-1"
+    check_timeout_sec: int = 3600
+    # "Cheat Trial" stage: one agent trial run with an explicit directive to
+    # cheat spliced into instruction.md, to confirm the anti-cheat design
+    # holds even when the agent is told to game the grading, not just when it
+    # happens to behave. Uses the same agent/model choice as a normal trial.
+    cheat_trial_timeout_sec: int = 3600
     # Spending cap for all priced LLM use (agent trials and OpenAI judge
     # calls) per calendar month (UTC); 0 disables it.
     llm_budget_usd: float = 50.0

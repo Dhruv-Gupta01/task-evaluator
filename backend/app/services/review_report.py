@@ -111,7 +111,11 @@ async def run_review_report(submission, task_root: Path) -> dict:
     platform_summary = json.dumps(
         {
             "build": {"status": schema.build.status},
-            "oracle": {"status": schema.oracle.status, "reward": schema.oracle.reward},
+            "oracle": {
+                "status": schema.oracle.status,
+                "n": schema.oracle.n,
+                "all_passed": schema.oracle.all_passed,
+            },
             "nop": {"status": schema.nop.status, "reward": schema.nop.reward},
             "sufficiency": {"status": schema.sufficiency.status, "passed": schema.sufficiency.passed},
             "agent_trials": {
@@ -137,8 +141,8 @@ async def run_review_report(submission, task_root: Path) -> dict:
         f"{static_report.as_text()}\n\n"
         "=== instruction.md ===\n"
         f"{_read_instruction(task_root)}\n\n"
-        "=== ORACLE verify-phase logs (tail) ===\n"
-        f"{(schema.oracle.logs or '')[-MAX_TRIAL_LOG_CHARS:]}\n\n"
+        "=== ORACLE (per run; Gate 1 needs 3 consecutive reward=1 runs) ===\n"
+        f"{_trial_section(schema.oracle.runs, 'oracle')}\n\n"
         "=== NOP verify-phase logs (tail) ===\n"
         f"{(schema.nop.logs or '')[-MAX_TRIAL_LOG_CHARS:]}\n\n"
         "=== SUFFICIENCY verdict ===\n"
