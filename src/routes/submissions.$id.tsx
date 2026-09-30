@@ -19,6 +19,7 @@ import {
   type StageStatus,
   type StaticCheckReport,
   type TbStaticCheckReport,
+  type AiDetectionReport,
 } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogPanel } from "@/components/LogPanel";
@@ -157,6 +158,14 @@ function SubmissionDetail() {
     mutationFn: () => api.tbStaticChecks(id),
     onSuccess: () => {
       toast.success("TB static checks started");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const mAiDetection = useMutation({
+    mutationFn: () => api.aiDetection(id),
+    onSuccess: () => {
+      toast.success("AI detection started");
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -618,6 +627,68 @@ function SubmissionDetail() {
                     {report.pass_count} pass, {report.fail_count} fail
                   </div>
                   <LogPanel logs={report.text} title="TB check findings" />
+                </>
+              );
+            })()}
+        </StageCard>
+
+        {/* AI Detection */}
+        <StageCard
+          title="AI Detection"
+          description="Advisory — Terminal-Bench's own Layer 3 AI-usage detection (vendor/tb_checks/): calls the real GPTZero API against instruction.md and solution/solve.sh. Genuinely optional in Terminal-Bench's own workflow too. Requires GPTZERO_API_KEY; runs a graceful no-op without it."
+          status={data.ai_detection.status}
+        >
+          <RunButton
+            label="Run AI Detection"
+            runningLabel="Checking…"
+            onClick={() => mAiDetection.mutate()}
+            running={
+              data.ai_detection.status === "running" || data.ai_detection.status === "pending"
+            }
+            pending={mAiDetection.isPending}
+            disabled={!validated}
+            disabledReason="Validate the submission first"
+          />
+          {data.ai_detection.logs &&
+            (() => {
+              let report: AiDetectionReport | null = null;
+              try {
+                report = JSON.parse(data.ai_detection.logs) as AiDetectionReport;
+              } catch {
+                report = null;
+              }
+              if (!report) return null;
+              if (report.skipped) {
+                return (
+                  <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-700 dark:text-amber-400">
+                    Skipped — {report.api_key_configured
+                      ? "GPTZero returned a network error"
+                      : "GPTZERO_API_KEY not configured"}
+                    . Not a pass/fail result.
+                  </div>
+                );
+              }
+              return (
+                <>
+                  {report.error && (
+                    <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs whitespace-pre-wrap max-h-48 overflow-y-auto">
+                      {report.error}
+                    </div>
+                  )}
+                  {report.passed != null && (
+                    <div
+                      className={`rounded-md border p-2.5 text-xs ${
+                        report.passed
+                          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                          : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
+                      }`}
+                    >
+                      {report.passed
+                        ? "Below the AI-generated threshold."
+                        : "Flagged — at or above the 70% AI-generated threshold."}
+                    </div>
+                  )}
+                  <LogPanel logs={report.output ?? undefined} title="GPTZero output" />
                 </>
               );
             })()}

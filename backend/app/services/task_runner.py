@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.models import Run, Submission
 from app.services import (
+    ai_detection,
     budget,
     code_smell_judge,
     docker_orchestrator,
@@ -901,6 +902,79 @@ async def run_tb_static_checks_stage(submission_id: str) -> None:
             run.status = "failed"
             run.reward = None
             run.logs = traceback.format_exc()
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+    finally:
+        db.close()
+
+
+async def run_ai_detection_stage(submission_id: str) -> None:
+    """Advisory: Terminal-Bench's own Layer 3 AI-usage detection (vendor/
+    tb_checks/scripts/check_ai_detection.py, see PROVENANCE.md there) --
+    calls the real GPTZero API against instruction.md and solution/solve.sh.
+    Genuinely optional in Terminal-Bench's own workflow too, not something
+    this platform is more or less strict about than upstream. Persisted as
+    its own Run (kind="ai_detection"). "passed" covers both a genuine pass
+    and a graceful skip (no GPTZERO_API_KEY, or a GPTZero network error --
+    the vendored script's own behavior, not something this platform added);
+    "failed" means the script itself determined the content is likely
+    AI-generated, or hit an unexpected error. `logs` is JSON: {skipped,
+    passed, output, error, api_key_configured}."""
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+
+        run = _get_or_create_run(db, submission_id, "ai_detection", 0)
+        run.status = "running"
+        run.reward = None
+        run.logs = None
+        run.started_at = datetime.now(UTC)
+        db.commit()
+
+        try:
+            result = ai_detection.run_ai_detection(Path(submission.extracted_path))
+        except Exception:
+            run.status = "failed"
+            run.reward = None
+            run.logs = json.dumps({"error": traceback.format_exc()})
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+            return
+
+        if not result.ran:
+            run.status = "failed"
+            run.reward = None
+        elif result.error:
+            run.status = "failed"
+            run.reward = None
+        elif result.skipped:
+            run.status = "passed"
+            run.reward = None
+        else:
+            run.status = "passed" if result.passed else "failed"
+            run.reward = 1 if result.passed else 0
+
+        run.logs = json.dumps(
+            {
+                "skipped": result.skipped if result.ran else None,
+                "passed": result.passed if result.ran else None,
+                "output": result.output if result.ran else None,
+                "error": result.error,
+                "api_key_configured": bool(settings.gptzero_api_key),
+            }
+        )
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    except Exception:
+        run = db.query(Run).filter_by(
+            submission_id=submission_id, kind="ai_detection", run_index=0
+        ).one_or_none()
+        if run is not None:
+            run.status = "failed"
+            run.reward = None
+            run.logs = json.dumps({"error": traceback.format_exc()})
             run.finished_at = datetime.now(UTC)
             db.commit()
     finally:

@@ -43,7 +43,7 @@ class Run(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     submission_id: Mapped[str] = mapped_column(ForeignKey("submissions.id"))
-    kind: Mapped[str] = mapped_column(String)  # "oracle" | "nop" | "agent" | "cheat_trial" | "rubric_check" | "static_checks" | "tb_static_checks"
+    kind: Mapped[str] = mapped_column(String)  # "oracle" | "nop" | "agent" | "cheat_trial" | "rubric_check" | "static_checks" | "tb_static_checks" | "ai_detection"
     run_index: Mapped[int] = mapped_column(Integer, default=0)
 
     status: Mapped[str] = mapped_column(String, default="pending")

@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     groq_api_key: str | None = None
     fireworks_api_key: str | None = None
+    # Terminal-Bench's own optional AI-detection check (vendor/tb_checks/
+    # scripts/check_ai_detection.py) -- empty means that check no-ops
+    # (prints a warning, passes) rather than erroring.
+    gptzero_api_key: str | None = None
 
     # Defaults applied when a task.toml omits a section
     default_cpus: float = 1.0

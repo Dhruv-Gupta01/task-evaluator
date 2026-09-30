@@ -18,6 +18,7 @@ from app.schemas import (
     StageStatus,
     StaticChecksResult,
     TbStaticChecksResult,
+    AiDetectionResult,
     SubmissionListItem,
     SubmissionSchema,
     SufficiencyResult,
@@ -219,6 +220,12 @@ def _tb_static_checks_result(run: Run | None) -> TbStaticChecksResult:
     return TbStaticChecksResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
 
 
+def _ai_detection_result(run: Run | None) -> AiDetectionResult:
+    if run is None:
+        return AiDetectionResult(status="not-run", logs=None)
+    return AiDetectionResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
+
+
 def _rubric_check_result(run: Run | None) -> RubricCheckResult:
     if run is None:
         return RubricCheckResult(status="not-run", logs=None)
@@ -264,6 +271,7 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         rubric_check=_rubric_check_result(_get_run(submission, "rubric_check")),
         static_checks=_static_checks_result(_get_run(submission, "static_checks")),
         tb_static_checks=_tb_static_checks_result(_get_run(submission, "tb_static_checks")),
+        ai_detection=_ai_detection_result(_get_run(submission, "ai_detection")),
         checksum=_checksum_info(submission),
     )
 

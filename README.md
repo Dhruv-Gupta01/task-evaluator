@@ -179,6 +179,13 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
   checks framework compliance: canary, dockerfile platform/sanity, separate verifier, task fields,
   absolute paths; ours checks platform-specific hygiene: instruction word count, Dockerfile digest
   pinning) -- so both run. No Docker, no LLM cost. Advisory.
+- **AI Detection**: Terminal-Bench's own Layer 3 AI-usage detection (`backend/vendor/tb_checks/`,
+  `check_ai_detection.py`, same pinned commit) -- calls the real GPTZero API against
+  `instruction.md` and `solution/solve.sh`, flagging anything at or above 70% AI-generated
+  probability. Needs `GPTZERO_API_KEY` (a paid third-party subscription, not an Anthropic/OpenAI
+  key); without it, the check runs a graceful no-op (prints a note, passes) exactly like it does
+  in Terminal-Bench's own workflow, where this layer is genuinely optional too -- it's not wired
+  into any of their automatic CI, only enabled on request with that secret configured. No Docker.
 - **Evidence bundle & auto-filled summary**: `GET /submissions/{id}/evidence` downloads one JSON file
   with the Docker build log, the Static Checks report, and the Rubric Check report, plus a
   `summary_markdown` field (C8) rendered straight from that same run data — task name, checksum

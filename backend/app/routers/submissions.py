@@ -478,6 +478,35 @@ async def trigger_tb_static_checks(submission_id: str, db: Session = Depends(get
     return {"status": "started"}
 
 
+@router.post("/submissions/{submission_id}/ai-detection", status_code=202)
+async def trigger_ai_detection(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """Terminal-Bench's own Layer 3 AI-usage detection (vendor/tb_checks/,
+    calls the real GPTZero API). No Docker, no LLM budget -- only needs the
+    submission extracted. Genuinely optional in Terminal-Bench's own
+    workflow too; runs a graceful no-op if GPTZERO_API_KEY isn't set."""
+    submission = db.get(Submission, submission_id)
+    if submission is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if submission.extracted_path is None:
+        raise HTTPException(
+            status_code=400, detail="validate the submission first (files must be extracted)"
+        )
+
+    run = (
+        db.query(Run).filter_by(submission_id=submission_id, kind="ai_detection", run_index=0).one_or_none()
+    )
+    if run is None:
+        run = Run(submission_id=submission_id, kind="ai_detection", run_index=0)
+        db.add(run)
+    run.status = "pending"
+    db.commit()
+
+    await task_queue.submit(
+        f"{submission_id}:ai_detection", task_runner.run_ai_detection_stage(submission_id)
+    )
+    return {"status": "started"}
+
+
 @router.get("/submissions/{submission_id}/evidence")
 def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Response:
     """C5: one downloadable bundle of the evidence a task review needs --

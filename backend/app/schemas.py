@@ -135,6 +135,18 @@ class TbStaticChecksResult(BaseModel):
     logs: str | None = None
 
 
+class AiDetectionResult(BaseModel):
+    """Terminal-Bench's own Layer 3 AI-usage detection (vendor/tb_checks/
+    scripts/check_ai_detection.py) -- calls the real GPTZero API. Advisory,
+    and genuinely optional in Terminal-Bench's own workflow too. `logs` is
+    JSON: {skipped, passed, output, error, api_key_configured}. "passed"
+    covers both a genuine pass and a graceful skip (no API key, or a
+    GPTZero network error); "failed" means GPTZero flagged the content as
+    likely AI-generated, or an unexpected error occurred."""
+    status: StageStatus
+    logs: str | None = None
+
+
 class RubricCheckResult(BaseModel):
     """`harbor check`: an evaluator agent scores the whole task against
     Harbor's quality rubric (not the agent trials -- see FailureAnalysisResult
@@ -182,6 +194,7 @@ class SubmissionSchema(BaseModel):
     rubric_check: RubricCheckResult
     static_checks: StaticChecksResult
     tb_static_checks: TbStaticChecksResult
+    ai_detection: AiDetectionResult
     checksum: ChecksumInfo
 
 

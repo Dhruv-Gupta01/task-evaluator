@@ -211,6 +211,22 @@ export interface TbStaticCheckReport {
   text: string;
 }
 
+// `logs` is JSON (see AiDetectionReport below) once the stage has run.
+// Terminal-Bench's own Layer 3 AI-usage detection -- calls the real
+// GPTZero API. Genuinely optional in Terminal-Bench's own workflow too.
+export interface AiDetectionResult {
+  status: StageStatus;
+  logs?: string;
+}
+
+export interface AiDetectionReport {
+  skipped: boolean | null;
+  passed: boolean | null;
+  output: string | null;
+  error: string | null;
+  api_key_configured: boolean;
+}
+
 // Reasoning levels the backend accepts for one run of trials.
 export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
@@ -254,6 +270,7 @@ export interface Submission {
   rubric_check: RubricCheckResult;
   static_checks: StaticChecksResult;
   tb_static_checks: TbStaticChecksResult;
+  ai_detection: AiDetectionResult;
   checksum: ChecksumInfo;
 }
 
@@ -367,6 +384,10 @@ export const api = {
     ),
   tbStaticChecks: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/tb-static-checks`, { method: "POST" }).then(
+      handle<unknown>,
+    ),
+  aiDetection: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/ai-detection`, { method: "POST" }).then(
       handle<unknown>,
     ),
   // C5: one downloadable bundle of the build log, static checks and rubric
