@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     # linux/amd64 works too but is emulated there and much slower.
     docker_platform: str = "linux/arm64"
 
-    # How much of the task's files the judges (Sufficiency, Code Smell) read.
+    # How much of the task's files the judges (Sufficiency, etc.) read.
     # A task can keep its rules in long documents (one task had 324k characters of
     # dossier), and a judge that sees only the start of each file reports the
     # rest as missing, so these are generous; a file cut at the limit is still

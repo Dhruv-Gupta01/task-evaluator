@@ -7,7 +7,6 @@ from app.schemas import (
     AgentTrialsResult,
     BuildResult,
     ChecksumInfo,
-    CodeSmellResult,
     CheatTrialResult,
     FailureAnalysisResult,
     RubricCheckResult,
@@ -238,17 +237,10 @@ def _review_report_result(run: Run | None) -> ReviewReportResult:
     return ReviewReportResult(status=run.status, passed=(run.reward == 1) if run.reward is not None else None, logs=run.logs)  # type: ignore[arg-type]
 
 
-def _code_smell_result(run: Run | None) -> CodeSmellResult:
-    if run is None:
-        return CodeSmellResult(status="not-run", passed=None, logs=None)
-    return CodeSmellResult(status=run.status, passed=(run.reward == 1) if run.reward is not None else None, logs=run.logs)  # type: ignore[arg-type]
-
-
 def to_schema(submission: Submission) -> SubmissionSchema:
     nop_run = _get_run(submission, "nop")
     sufficiency_run = _get_run(submission, "sufficiency")
     leakage_scan_run = _get_run(submission, "leakage_scan")
-    code_smell_run = _get_run(submission, "code_smell")
     review_report_run = _get_run(submission, "review_report")
     return SubmissionSchema(
         id=submission.id,
@@ -264,7 +256,6 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         agent_trials=_agent_trials_result(submission),
         sufficiency=_sufficiency_result(sufficiency_run),
         leakage_scan=_leakage_scan_result(leakage_scan_run),
-        code_smell=_code_smell_result(code_smell_run),
         review_report=_review_report_result(review_report_run),
         failure_analysis=_failure_analysis_result(_get_run(submission, "failure_analysis")),
         cheat_trial=_cheat_trial_result(_get_run(submission, "cheat_trial")),
@@ -280,7 +271,6 @@ def to_list_item(submission: Submission) -> SubmissionListItem:
     nop_run = _get_run(submission, "nop")
     sufficiency_run = _get_run(submission, "sufficiency")
     leakage_scan_run = _get_run(submission, "leakage_scan")
-    code_smell_run = _get_run(submission, "code_smell")
     review_report_run = _get_run(submission, "review_report")
     agent_trials = _agent_trials_result(submission)
     return SubmissionListItem(
@@ -293,7 +283,6 @@ def to_list_item(submission: Submission) -> SubmissionListItem:
         agent_status=agent_trials.status,
         sufficiency_status=(sufficiency_run.status if sufficiency_run else "not-run"),  # type: ignore[arg-type]
         leakage_scan_status=(leakage_scan_run.status if leakage_scan_run else "not-run"),  # type: ignore[arg-type]
-        code_smell_status=(code_smell_run.status if code_smell_run else "not-run"),  # type: ignore[arg-type]
         review_report_status=(review_report_run.status if review_report_run else "not-run"),  # type: ignore[arg-type]
     )
 
@@ -365,7 +354,6 @@ def build_summary_markdown(schema: SubmissionSchema, total_cost_usd: float | Non
         "",
         "## Advisory checks",
         f"- Leakage Scan: {_fmt_status(schema.leakage_scan.status)}",
-        f"- Code Smell: {_fmt_status(schema.code_smell.status)}",
         (
             f"- Static Checks: {_fmt_status(schema.static_checks.status)}"
             + (

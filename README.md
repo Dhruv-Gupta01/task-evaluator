@@ -212,7 +212,7 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
   human to read.
 - **Tasks with a docker-compose.yaml**: the Codex bake is skipped for them, so Harbor installs Codex
   inside each trial (10-16 minutes per trial instead of about 4). Results are unaffected.
-- **Judge file limits**: Sufficiency and Code Smell read up to `JUDGE_MAX_FILE_CHARS` (150000) per
+- **Judge file limits**: Sufficiency reads up to `JUDGE_MAX_FILE_CHARS` (150000) per
   file and `JUDGE_MAX_TOTAL_CHARS` (500000) in all; a judge that sees only part of a long dossier
   reports the rest as missing.
 - **Task network policy**: Harbor 0.23+ only enforces `no-network` when Docker's kernel supports
