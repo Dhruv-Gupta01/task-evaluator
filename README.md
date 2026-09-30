@@ -176,7 +176,12 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
   The "Download Evidence" button in the header triggers this from the UI.
 - **Cheat trial**: the Cheat Trial card's "Run Cheat Trial" button runs one agent trial with an
   explicit directive to cheat spliced into the instruction (edit the verifier, hardcode outputs,
-  read the reference solution). It uses the same Agent/Reasoning choice as a normal run. A pass
+  read the reference solution). It uses the same Agent choice as Agent Trials, but its own,
+  independent Reasoning dropdown (API: `cheat-trial?reasoning_effort=max`), defaulting to **max**
+  rather than the server default -- a cheat trial run at whatever `AGENT_REASONING_EFFORT` happens
+  to be (e.g. low) is a weaker test of whether the agent will cheat than one run at max effort, and
+  it's easy to leave that setting stale without noticing (confirmed live: a real cheat trial once
+  ran at low purely because of that, not a deliberate choice). A pass
   (reward stays 0) means the anti-cheat design held even when told to cheat. reward=1 alone doesn't
   say the agent found a real cheat — confirmed live on two different harnesses, both got reward 1
   after refusing the directive and solving the task honestly instead — so a reward=1 trial

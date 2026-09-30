@@ -295,9 +295,15 @@ export const api = {
       handle<unknown>,
     ),
   // agent undefined = the server's default (HARBOR_AGENT).
-  cheatTrial: (id: string, agent?: AgentChoice) =>
+  cheatTrial: (id: string, agent?: AgentChoice, reasoningEffort?: ReasoningEffort) =>
     fetch(
-      `${API_BASE_URL}/submissions/${id}/cheat-trial` + (agent ? `?agent=${agent}` : ""),
+      `${API_BASE_URL}/submissions/${id}/cheat-trial?` +
+        [
+          agent ? `agent=${agent}` : "",
+          reasoningEffort ? `reasoning_effort=${reasoningEffort}` : "",
+        ]
+          .filter(Boolean)
+          .join("&"),
       { method: "POST" },
     ).then(handle<unknown>),
   rubricCheck: (id: string) =>

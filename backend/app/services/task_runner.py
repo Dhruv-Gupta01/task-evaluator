@@ -1073,7 +1073,9 @@ async def run_failure_analysis(submission_id: str) -> None:
         db.close()
 
 
-async def run_cheat_trial(submission_id: str, agent: str | None = None) -> None:
+async def run_cheat_trial(
+    submission_id: str, agent: str | None = None, reasoning_effort: str | None = None
+) -> None:
     """One trial run with an explicit cheat directive spliced into
     instruction.md (harbor_runner._prepare_task, cheat_instruction=True), to
     test whether the anti-cheat design (separate verifier image, tests/ copied
@@ -1122,7 +1124,7 @@ async def run_cheat_trial(submission_id: str, agent: str | None = None) -> None:
             + max(_AGENT_SETUP_ALLOWANCE_SEC, _agent_setup_timeout_sec(agent))
             + _HARBOR_TIMEOUT_BUFFER_SEC
         )
-        agent_kwargs = _agent_kwargs(agent)
+        agent_kwargs = _agent_kwargs(agent, reasoning_effort)
         model = _agent_model(agent)
         jobs_dir = settings.storage_dir / "submissions" / submission_id / "runs" / "cheat_trial" / "harbor"
         if jobs_dir.exists():

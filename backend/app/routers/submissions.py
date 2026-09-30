@@ -334,15 +334,28 @@ async def trigger_failure_analysis(submission_id: str, db: Session = Depends(get
 
 @router.post("/submissions/{submission_id}/cheat-trial", status_code=202)
 async def trigger_cheat_trial(
-    submission_id: str, agent: str | None = None, db: Session = Depends(get_db)
+    submission_id: str,
+    agent: str | None = None,
+    reasoning_effort: str | None = None,
+    db: Session = Depends(get_db),
 ) -> dict[str, str]:
     """One trial run with an explicit directive to cheat spliced into the
     instruction, to confirm the anti-cheat design holds when the agent is told
     to cheat, not just when it happens to behave. agent picks codex,
-    claude-code or terminus-2 for this trial only (default: HARBOR_AGENT)."""
+    claude-code or terminus-2 for this trial only (default: HARBOR_AGENT).
+    reasoning_effort overrides AGENT_REASONING_EFFORT for this trial only,
+    same as agent-trials -- otherwise this trial silently inherits whatever
+    that setting happens to be, which is easy to leave stale/low without
+    noticing (confirmed live: a real cheat trial once ran at low effort
+    purely because of that, not a deliberate choice)."""
     if agent is not None and agent not in task_runner.AGENTS:
         raise HTTPException(
             status_code=400, detail=f"agent must be one of {', '.join(task_runner.AGENTS)}"
+        )
+    if reasoning_effort is not None and reasoning_effort not in task_runner.REASONING_EFFORTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"reasoning_effort must be one of {', '.join(task_runner.REASONING_EFFORTS)}",
         )
     _raise_if_over_budget(db, budget.exceeded_message(db))
     _require_built_submission(submission_id, db)
@@ -357,7 +370,8 @@ async def trigger_cheat_trial(
     db.commit()
 
     await task_queue.submit(
-        f"{submission_id}:cheat_trial", task_runner.run_cheat_trial(submission_id, agent)
+        f"{submission_id}:cheat_trial",
+        task_runner.run_cheat_trial(submission_id, agent, reasoning_effort),
     )
     return {"status": "started"}
 
