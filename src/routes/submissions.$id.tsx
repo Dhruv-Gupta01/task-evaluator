@@ -20,6 +20,7 @@ import {
   type StaticCheckReport,
   type TbStaticCheckReport,
   type AiDetectionReport,
+  type AnalysisCheck,
 } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogPanel } from "@/components/LogPanel";
@@ -694,6 +695,12 @@ function SubmissionDetail() {
             })()}
         </StageCard>
 
+        {/* AI Usage Detection -- all 3 TB layers, shown side by side, never
+            merged into one score. This is a read-only view over data from
+            Rubric Check (TB rubric) and AI Detection above, not its own
+            runnable check -- no run button, no status badge of its own. */}
+        <AiLayersOverview rubricCheck={data.rubric_check} aiDetection={data.ai_detection} />
+
         {/* Leakage Scan */}
         <StageCard
           title="Leakage Scan"
@@ -966,6 +973,117 @@ function AnalysisView({ logs }: { logs?: string }) {
           )}
         </div>
       ))}
+    </div>
+  );
+}
+
+function LayerBadge({ outcome }: { outcome: string }) {
+  return (
+    <span
+      className={`rounded px-1.5 py-0.5 text-xs font-medium ${
+        outcome === "pass"
+          ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+          : outcome === "fail"
+          ? "bg-red-500/15 text-red-700 dark:text-red-400"
+          : "bg-muted text-muted-foreground"
+      }`}
+    >
+      {outcome}
+    </span>
+  );
+}
+
+// Read-only summary of Terminal-Bench's three AI-usage detection layers,
+// pulled from data already gathered by Rubric Check (TB rubric) and AI
+// Detection above -- shown side by side, never merged into one score.
+// Layer 1 is a written policy (no check to run). Layer 2 is one criterion
+// (instruction_concision) inside the 35-criteria rubric -- an LLM's
+// subjective opinion. Layer 3 is a real GPTZero measurement, entirely
+// independent of Layer 2's opinion.
+function AiLayersOverview({
+  rubricCheck,
+  aiDetection,
+}: {
+  rubricCheck: Submission["rubric_check"];
+  aiDetection: Submission["ai_detection"];
+}) {
+  let layer2: AnalysisCheck | null = null;
+  if (rubricCheck.logs) {
+    try {
+      const parsed = JSON.parse(rubricCheck.logs) as RubricCheck;
+      layer2 = parsed.results?.[0]?.checks?.instruction_concision ?? null;
+    } catch {
+      // leave layer2 null -- unparseable logs, nothing to show
+    }
+  }
+
+  let layer3: AiDetectionReport | null = null;
+  if (aiDetection.logs) {
+    try {
+      layer3 = JSON.parse(aiDetection.logs) as AiDetectionReport;
+    } catch {
+      // leave layer3 null
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4 md:col-span-2">
+      <div>
+        <h3 className="text-base font-semibold">AI Usage Detection — All Layers</h3>
+        <p className="text-xs text-muted-foreground">
+          Terminal-Bench's three AI-usage detection layers, side by side — never merged into one
+          score, since Layer 2 is an LLM's opinion and Layer 3 is a real measurement. This is a
+          view, not its own check: run Rubric Check (TB rubric) and AI Detection above to fill it in.
+        </p>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-3">
+        <div className="rounded-md border border-border p-3 text-xs">
+          <div className="mb-1 font-medium">Layer 1 — Policy</div>
+          <p className="text-muted-foreground">
+            Task files (instruction.md, README sections) must be written by a human, without AI
+            assistance. This is a written rule, not code — nothing runs for it.
+          </p>
+        </div>
+
+        <div className="rounded-md border border-border p-3 text-xs">
+          <div className="mb-1 font-medium">Layer 2 — Rubric opinion</div>
+          {layer2 ? (
+            <>
+              <LayerBadge outcome={layer2.outcome} />
+              <p className="mt-1 text-muted-foreground">{layer2.explanation}</p>
+            </>
+          ) : (
+            <p className="text-muted-foreground">
+              Not available — run Rubric Check with the "TB" rubric to populate this
+              (instruction_concision).
+            </p>
+          )}
+        </div>
+
+        <div className="rounded-md border border-border p-3 text-xs">
+          <div className="mb-1 font-medium">Layer 3 — GPTZero measurement</div>
+          {layer3 ? (
+            layer3.skipped ? (
+              <p className="text-muted-foreground">
+                Skipped —{" "}
+                {layer3.api_key_configured
+                  ? "GPTZero returned a network error."
+                  : "GPTZERO_API_KEY not configured."}
+              </p>
+            ) : layer3.passed != null ? (
+              <>
+                <LayerBadge outcome={layer3.passed ? "pass" : "fail"} />
+                <p className="mt-1 whitespace-pre-wrap text-muted-foreground">{layer3.output}</p>
+              </>
+            ) : (
+              <p className="text-muted-foreground">{layer3.error ?? "No result."}</p>
+            )
+          ) : (
+            <p className="text-muted-foreground">Not available — run AI Detection above.</p>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
