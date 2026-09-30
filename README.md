@@ -115,7 +115,12 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
   to run trials with OpenAI's Codex instead of Terminus-2. Codex is baked into each task's image at build time (`CODEX_BAKE_INTO_IMAGE`, default on;
   the first build of a task takes about a minute longer, later trials start in seconds), needs the network (`HARBOR_NETWORK_MODE=public`,
   the default), has the OpenAI key inside the container, and has no turn cap: only the task's
-  agent timeout bounds its cost. Pin its version with `CODEX_VERSION`.
+  agent timeout bounds its cost. Pin its version with `CODEX_VERSION`. Leave it empty and the
+  platform now also cache-busts the install layer once a day, so "latest" actually stays latest
+  instead of silently freezing at whatever was newest the first time a task's image was built --
+  a real risk of Docker's own build caching, separate from (and in addition to) the other real
+  incident this project hit: `CODEX_VERSION` getting explicitly pinned by a stray shell
+  environment variable, invisible in `.env`, that stayed set for days without anyone noticing.
 - **Agent per run**: the Agent Trials card has an Agent dropdown: "Codex · GPT-6 Astra" (model
   `AGENT_MODEL`, needs `OPENAI_API_KEY`) or "Claude Code · Fable 5.1" (model `CLAUDE_AGENT_MODEL`,
   default `anthropic/claude-fable-5-1`, needs `ANTHROPIC_API_KEY`). API: `agent-trials?agent=claude-code`.

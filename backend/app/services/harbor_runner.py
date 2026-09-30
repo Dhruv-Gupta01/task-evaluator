@@ -13,6 +13,7 @@ import subprocess
 import tomllib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from app.config import docker_add_host_pairs, get_settings, host_env_for_subprocess
@@ -155,7 +156,20 @@ def _bake_codex_into_environment(env_dir: Path, version: str) -> bool:
     """Adds a Codex install layer to the environment/ of a task *copy*. The
     layer is best-effort: if it fails the build still succeeds and Harbor
     falls back to installing Codex at trial time. Returns False when the
-    environment can't take it (no Dockerfile, or a compose-based one)."""
+    environment can't take it (no Dockerfile, or a compose-based one).
+
+    When version=="latest" (CODEX_VERSION empty), a same-content Dockerfile
+    would otherwise cache-hit this RUN forever after the first build, so
+    "latest" silently means "whatever was newest on day one" for the whole
+    lifetime of that task's image -- confirmed live: a real submission's
+    Codex stayed pinned to a build from days earlier purely from Docker's
+    own layer cache, no CODEX_VERSION setting involved at all. A date stamp
+    baked into the RUN command's own text (not a --build-arg, which would
+    need Harbor's own build invocation to pass one) changes that layer's
+    cache key once a day, forcing npm to actually re-resolve "latest" -- and
+    since every later layer's cache key chains from this one, the real
+    install command below rebuilds fresh too. Only applies when unpinned;
+    an explicit CODEX_VERSION is a deliberate pin and shouldn't be disturbed."""
     dockerfile = env_dir / "Dockerfile"
     if not dockerfile.is_file() or any(
         (env_dir / name).exists()
@@ -168,6 +182,12 @@ def _bake_codex_into_environment(env_dir: Path, version: str) -> bool:
         "",
         "# --- added by the platform (CODEX_BAKE_INTO_IMAGE): Codex installed at build time ---",
         "USER root",
+    ]
+    if version == "latest":
+        lines.append(
+            f'RUN echo "codex latest cache-bust: {date.today().isoformat()}" > /dev/null'
+        )
+    lines += [
         f"COPY {_CODEX_BAKE_SCRIPT_NAME} /tmp/{_CODEX_BAKE_SCRIPT_NAME}",
         f"RUN sh /tmp/{_CODEX_BAKE_SCRIPT_NAME} {version} "
         '|| echo "NOTE: could not bake Codex into the image; Harbor will install it at trial time"',
