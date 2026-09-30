@@ -66,6 +66,21 @@ _TB_CHECK_RUBRIC = _TB_PROMPTS_DIR / "task-implementation.toml"
 _TB_CHEAT_PROMPT = _TB_PROMPTS_DIR / "hack-trial-prompt.md"
 
 
+def _tb_cheat_prompt_text() -> str:
+    """hack-trial-prompt.md starts with a leading "---\n\n". Terminal-Bench's
+    own CI (scripts/ci/hosted_trial_workflow.py) reads the file verbatim,
+    "---" included, and that is genuinely what their real cheat trials send
+    -- confirmed directly against their source, not assumed. This platform
+    strips it anyway, by deliberate choice: spliced into a task's own
+    instruction.md, a bare "---" reads as a broken markdown fragment rather
+    than the start of a real section, and that's judged worse here than a
+    one-line formatting deviation from upstream."""
+    text = _TB_CHEAT_PROMPT.read_text().lstrip()
+    if text.startswith("---"):
+        text = text[3:].lstrip("\n").lstrip()
+    return text
+
+
 def _agent_kwargs(agent: str, reasoning_effort: str | None = None) -> dict[str, str]:
     """Options for `harbor run --agent-kwarg`. Harbor >= 0.23 rejects options
     an agent doesn't declare, so each agent only gets the ones it knows.
@@ -1199,7 +1214,7 @@ async def run_cheat_trial(
             cost_cap_label=cost_cap_label,
             on_trial=on_trial,
             cheat_instruction=True,
-            cheat_instruction_text=_TB_CHEAT_PROMPT.read_text() if cheat_prompt == "tb" else None,
+            cheat_instruction_text=_tb_cheat_prompt_text() if cheat_prompt == "tb" else None,
         )
 
         if outcome_holder:
