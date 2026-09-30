@@ -412,6 +412,35 @@ async def trigger_static_checks(submission_id: str, db: Session = Depends(get_db
     return {"status": "started"}
 
 
+@router.post("/submissions/{submission_id}/tb-static-checks", status_code=202)
+async def trigger_tb_static_checks(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """Terminal-Bench's own official static checks (vendor/tb_checks/). No
+    Docker, no LLM budget -- only needs the submission extracted. Separate
+    from static-checks above, which runs a different, platform-specific rule
+    set -- neither replaces the other."""
+    submission = db.get(Submission, submission_id)
+    if submission is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if submission.extracted_path is None:
+        raise HTTPException(
+            status_code=400, detail="validate the submission first (files must be extracted)"
+        )
+
+    run = (
+        db.query(Run).filter_by(submission_id=submission_id, kind="tb_static_checks", run_index=0).one_or_none()
+    )
+    if run is None:
+        run = Run(submission_id=submission_id, kind="tb_static_checks", run_index=0)
+        db.add(run)
+    run.status = "pending"
+    db.commit()
+
+    await task_queue.submit(
+        f"{submission_id}:tb_static_checks", task_runner.run_tb_static_checks_stage(submission_id)
+    )
+    return {"status": "started"}
+
+
 @router.get("/submissions/{submission_id}/evidence")
 def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Response:
     """C5: one downloadable bundle of the evidence a task review needs --
@@ -450,6 +479,11 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
             "status": schema.static_checks.status,
             "not_run": schema.static_checks.status == "not-run",
             "report": _json_or_raw(schema.static_checks.logs),
+        },
+        "tb_static_checks": {
+            "status": schema.tb_static_checks.status,
+            "not_run": schema.tb_static_checks.status == "not-run",
+            "report": _json_or_raw(schema.tb_static_checks.logs),
         },
         "rubric_check": {
             "status": schema.rubric_check.status,

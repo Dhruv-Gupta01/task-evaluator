@@ -14,6 +14,7 @@ import {
   type Submission,
   type StageStatus,
   type StaticCheckReport,
+  type TbStaticCheckReport,
 } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogPanel } from "@/components/LogPanel";
@@ -137,6 +138,14 @@ function SubmissionDetail() {
     mutationFn: () => api.staticChecks(id),
     onSuccess: () => {
       toast.success("Static checks started");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const mTbStaticChecks = useMutation({
+    mutationFn: () => api.tbStaticChecks(id),
+    onSuccess: () => {
+      toast.success("TB static checks started");
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -546,6 +555,50 @@ function SubmissionDetail() {
                     checks total
                   </div>
                   <LogPanel logs={report.text} title="Static check findings" />
+                </>
+              );
+            })()}
+        </StageCard>
+
+        {/* TB Static Checks */}
+        <StageCard
+          title="TB Static Checks"
+          description="Advisory — Terminal-Bench's own official static checks (vendor/tb_checks/), a different rule set from the platform's own Static Checks above. Not a pass/fail gate."
+          status={data.tb_static_checks.status}
+        >
+          <RunButton
+            label="Run TB Static Checks"
+            runningLabel="Checking…"
+            onClick={() => mTbStaticChecks.mutate()}
+            running={
+              data.tb_static_checks.status === "running" ||
+              data.tb_static_checks.status === "pending"
+            }
+            pending={mTbStaticChecks.isPending}
+            disabled={!validated}
+            disabledReason="Validate the submission first"
+          />
+          {data.tb_static_checks.logs &&
+            (() => {
+              let report: TbStaticCheckReport | null = null;
+              try {
+                report = JSON.parse(data.tb_static_checks.logs) as TbStaticCheckReport;
+              } catch {
+                report = null;
+              }
+              if (!report) return null;
+              return (
+                <>
+                  <div
+                    className={`rounded-md border p-2.5 text-xs ${
+                      report.fail_count === 0
+                        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                        : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
+                    }`}
+                  >
+                    {report.pass_count} pass, {report.fail_count} fail
+                  </div>
+                  <LogPanel logs={report.text} title="TB check findings" />
                 </>
               );
             })()}

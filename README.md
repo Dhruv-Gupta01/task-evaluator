@@ -157,6 +157,13 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
   LLM-free checks (word counts, formatting, Dockerfile/test.sh/zip hygiene) that Review Report already
   used internally, but persists the result as its own stage so it's independently visible and part of
   the evidence bundle below. No Docker, no LLM cost. Advisory.
+- **TB Static Checks**: a second, separate stage running Terminal-Bench's own official static checks
+  (`backend/vendor/tb_checks/`, 26 `check-*.sh` scripts vendored verbatim from
+  `harbor-framework/terminal-bench` at a pinned commit -- see `PROVENANCE.md` there). This is not a
+  replacement for the platform's own Static Checks above -- the two rule sets barely overlap (TB's
+  checks framework compliance: canary, dockerfile platform/sanity, separate verifier, task fields,
+  absolute paths; ours checks platform-specific hygiene: instruction word count, Dockerfile digest
+  pinning) -- so both run. No Docker, no LLM cost. Advisory.
 - **Evidence bundle & auto-filled summary**: `GET /submissions/{id}/evidence` downloads one JSON file
   with the Docker build log, the Static Checks report, and the Rubric Check report, plus a
   `summary_markdown` field (C8) rendered straight from that same run data — task name, checksum

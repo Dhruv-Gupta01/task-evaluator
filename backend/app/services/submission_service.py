@@ -17,6 +17,7 @@ from app.schemas import (
     StageResult,
     StageStatus,
     StaticChecksResult,
+    TbStaticChecksResult,
     SubmissionListItem,
     SubmissionSchema,
     SufficiencyResult,
@@ -212,6 +213,12 @@ def _static_checks_result(run: Run | None) -> StaticChecksResult:
     return StaticChecksResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
 
 
+def _tb_static_checks_result(run: Run | None) -> TbStaticChecksResult:
+    if run is None:
+        return TbStaticChecksResult(status="not-run", logs=None)
+    return TbStaticChecksResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
+
+
 def _rubric_check_result(run: Run | None) -> RubricCheckResult:
     if run is None:
         return RubricCheckResult(status="not-run", logs=None)
@@ -256,6 +263,7 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         cheat_trial=_cheat_trial_result(_get_run(submission, "cheat_trial")),
         rubric_check=_rubric_check_result(_get_run(submission, "rubric_check")),
         static_checks=_static_checks_result(_get_run(submission, "static_checks")),
+        tb_static_checks=_tb_static_checks_result(_get_run(submission, "tb_static_checks")),
         checksum=_checksum_info(submission),
     )
 
@@ -356,6 +364,15 @@ def build_summary_markdown(schema: SubmissionSchema, total_cost_usd: float | Non
                 f" ({json.loads(schema.static_checks.logs)['fail_count']} fail, "
                 f"{json.loads(schema.static_checks.logs)['warn_count']} warn)"
                 if schema.static_checks.logs
+                else ""
+            )
+        ),
+        (
+            f"- TB Static Checks: {_fmt_status(schema.tb_static_checks.status)}"
+            + (
+                f" ({json.loads(schema.tb_static_checks.logs)['pass_count']} pass, "
+                f"{json.loads(schema.tb_static_checks.logs)['fail_count']} fail)"
+                if schema.tb_static_checks.logs
                 else ""
             )
         ),

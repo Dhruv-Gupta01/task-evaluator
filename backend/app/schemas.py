@@ -126,6 +126,15 @@ class StaticChecksResult(BaseModel):
     logs: str | None = None
 
 
+class TbStaticChecksResult(BaseModel):
+    """Terminal-Bench's own official static checks (vendor/tb_checks/,
+    maintained upstream, not by us) -- a different, mostly non-overlapping
+    rule set from StaticChecksResult. Advisory. `logs` is JSON: {pass_count,
+    fail_count, results: [{name, passed, output}], text}."""
+    status: StageStatus
+    logs: str | None = None
+
+
 class RubricCheckResult(BaseModel):
     """`harbor check`: an evaluator agent scores the whole task against
     Harbor's quality rubric (not the agent trials -- see FailureAnalysisResult
@@ -172,6 +181,7 @@ class SubmissionSchema(BaseModel):
     cheat_trial: CheatTrialResult
     rubric_check: RubricCheckResult
     static_checks: StaticChecksResult
+    tb_static_checks: TbStaticChecksResult
     checksum: ChecksumInfo
 
 

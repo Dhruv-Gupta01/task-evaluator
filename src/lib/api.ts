@@ -181,6 +181,27 @@ export interface StaticCheckReport {
   text: string;
 }
 
+// `logs` is JSON (see TbStaticCheckReport below) once the stage has run.
+// A separate, mostly non-overlapping rule set from StaticChecksResult above
+// -- Terminal-Bench's own official checks, not this platform's own.
+export interface TbStaticChecksResult {
+  status: StageStatus;
+  logs?: string;
+}
+
+export interface TbCheckFinding {
+  name: string;
+  passed: boolean;
+  output: string;
+}
+
+export interface TbStaticCheckReport {
+  pass_count: number;
+  fail_count: number;
+  results: TbCheckFinding[];
+  text: string;
+}
+
 // Reasoning levels the backend accepts for one run of trials.
 export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
@@ -209,6 +230,7 @@ export interface Submission {
   cheat_trial: CheatTrialResult;
   rubric_check: RubricCheckResult;
   static_checks: StaticChecksResult;
+  tb_static_checks: TbStaticChecksResult;
   checksum: ChecksumInfo;
 }
 
@@ -300,6 +322,10 @@ export const api = {
     ),
   staticChecks: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/static-checks`, { method: "POST" }).then(
+      handle<unknown>,
+    ),
+  tbStaticChecks: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/tb-static-checks`, { method: "POST" }).then(
       handle<unknown>,
     ),
   // C5: one downloadable bundle of the build log, static checks and rubric

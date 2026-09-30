@@ -20,6 +20,7 @@ from app.services import (
     review_report,
     static_checks,
     sufficiency_judge,
+    tb_static_checks,
     validation_service,
 )
 from app.services.llm import usage as llm_usage
@@ -807,6 +808,65 @@ async def run_static_checks_stage(submission_id: str) -> None:
     except Exception:
         run = db.query(Run).filter_by(
             submission_id=submission_id, kind="static_checks", run_index=0
+        ).one_or_none()
+        if run is not None:
+            run.status = "failed"
+            run.reward = None
+            run.logs = traceback.format_exc()
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+    finally:
+        db.close()
+
+
+async def run_tb_static_checks_stage(submission_id: str) -> None:
+    """Advisory-only: Terminal-Bench's own official static checks
+    (vendor/tb_checks/, see PROVENANCE.md there) -- framework-compliance
+    rules maintained upstream, not by us. Persisted as its own Run
+    (kind="tb_static_checks"), separate from and not a replacement for
+    "static_checks" (services/static_checks.py), which checks a different,
+    platform-specific rule set with almost no overlap."""
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+
+        run = _get_or_create_run(db, submission_id, "tb_static_checks", 0)
+        run.status = "running"
+        run.reward = None
+        run.logs = None
+        run.started_at = datetime.now(UTC)
+        db.commit()
+
+        try:
+            report = tb_static_checks.run_tb_static_checks(Path(submission.extracted_path))
+        except Exception:
+            run.status = "failed"
+            run.reward = None
+            run.logs = traceback.format_exc()
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+            return
+
+        run.status = "passed" if report.fail_count == 0 else "failed"
+        run.reward = 1 if report.fail_count == 0 else 0
+        run.logs = json.dumps(
+            {
+                "pass_count": report.pass_count,
+                "fail_count": report.fail_count,
+                "results": [
+                    {"name": r.name, "passed": r.passed, "output": r.output}
+                    for r in report.results
+                ],
+                "text": report.as_text(),
+            }
+        )
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    except Exception:
+        run = db.query(Run).filter_by(
+            submission_id=submission_id, kind="tb_static_checks", run_index=0
         ).one_or_none()
         if run is not None:
             run.status = "failed"
