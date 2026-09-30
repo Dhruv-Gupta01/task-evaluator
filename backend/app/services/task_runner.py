@@ -23,7 +23,9 @@ from app.services import (
     tb_static_checks,
     validation_service,
 )
+from app.services.llm import factory as llm_factory
 from app.services.llm import usage as llm_usage
+from app.services.llm.base import Message
 from app.services.task_config import TaskConfig
 
 settings = get_settings()
@@ -50,6 +52,18 @@ _LITELLM_PREFIX = {
 REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # Agents a run of trials can pick (default: HARBOR_AGENT).
 AGENTS = ("codex", "claude-code", "terminus-2")
+
+# Vendored Terminal-Bench prompts/rubrics (backend/vendor/tb_prompts/, see
+# PROVENANCE.md there) -- an alternate, richer rubric a run can opt into,
+# never the default. "default" = Harbor's own built-in rubric/prompt.
+RUBRICS = ("default", "tb")
+CHEAT_PROMPTS = ("default", "tb")
+_TB_PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "vendor" / "tb_prompts"
+_TB_ANALYZE_RUBRIC = _TB_PROMPTS_DIR / "trial-analysis.toml"
+_TB_ANALYZE_PROMPT = _TB_PROMPTS_DIR / "trial-analysis.txt"
+_TB_ANALYZE_JOB_PROMPT = _TB_PROMPTS_DIR / "trial-analysis-job.txt"
+_TB_CHECK_RUBRIC = _TB_PROMPTS_DIR / "task-implementation.toml"
+_TB_CHEAT_PROMPT = _TB_PROMPTS_DIR / "hack-trial-prompt.md"
 
 
 def _agent_kwargs(agent: str, reasoning_effort: str | None = None) -> dict[str, str]:
@@ -1007,10 +1021,16 @@ async def run_review_report(submission_id: str) -> None:
         db.close()
 
 
-async def run_failure_analysis(submission_id: str) -> None:
+async def run_failure_analysis(submission_id: str, rubric: str = "default") -> None:
     """`harbor analyze` over every agent job of this submission (append=true
-    leaves several). The result is stored as JSON in the Run's logs:
-    {"agent", "model", "cost_usd", "error", "results": [per-trial analysis]}."""
+    leaves several). rubric="tb" swaps in the vendored, richer 6-criterion
+    Terminal-Bench rubric+prompt (vendor/tb_prompts/, see PROVENANCE.md)
+    instead of Harbor's own default 2-criterion one, and additionally
+    synthesizes a job-level summary (Harbor's analyze has no such step
+    itself) via one extra LLM call using trial-analysis-job.txt's template.
+    The result is stored as JSON in the Run's logs: {"agent", "model",
+    "cost_usd", "error", "results": [per-trial analysis], "rubric",
+    "job_summary": str | None}."""
     db = SessionLocal()
     try:
         run = _get_or_create_run(db, submission_id, "failure_analysis")
@@ -1028,6 +1048,7 @@ async def run_failure_analysis(submission_id: str) -> None:
         total_cost: float | None = None
         analysis_root = settings.storage_dir / "submissions" / submission_id / "runs" / "analysis"
         stamp = uuid.uuid4().hex[:8]
+        use_tb = rubric == "tb"
         for job_dir in job_dirs:
             outcome = await harbor_runner.run_analyze(
                 job_dir,
@@ -1036,6 +1057,8 @@ async def run_failure_analysis(submission_id: str) -> None:
                 settings.analyze_agent,
                 settings.analyze_model,
                 settings.analyze_timeout_sec,
+                rubric_path=_TB_ANALYZE_RUBRIC if use_tb else None,
+                prompt_path=_TB_ANALYZE_PROMPT if use_tb else None,
             )
             if outcome.error:
                 errors.append(f"{job_dir.name}: {outcome.error}")
@@ -1048,6 +1071,18 @@ async def run_failure_analysis(submission_id: str) -> None:
                     outcome.cost_usd, None, None, None,
                 )
 
+        job_summary = None
+        if use_tb and results:
+            template = _TB_ANALYZE_JOB_PROMPT.read_text()
+            prompt = template.replace("{trial_results}", json.dumps(results, indent=2))
+            try:
+                with _track_llm_spend(db, submission_id, "failure_analysis"):
+                    client = llm_factory.get_llm_client()
+                    resp = await client.complete([Message(role="user", content=prompt)], tools=[])
+                job_summary = resp.text
+            except Exception:
+                job_summary = None
+
         run.logs = json.dumps(
             {
                 "agent": settings.analyze_agent,
@@ -1055,6 +1090,8 @@ async def run_failure_analysis(submission_id: str) -> None:
                 "cost_usd": total_cost,
                 "error": "\n\n".join(errors) or None,
                 "results": results,
+                "rubric": rubric,
+                "job_summary": job_summary,
             }
         )
         # "passed" = the analysis ran and produced results; it's advisory, not a verdict.
@@ -1074,7 +1111,10 @@ async def run_failure_analysis(submission_id: str) -> None:
 
 
 async def run_cheat_trial(
-    submission_id: str, agent: str | None = None, reasoning_effort: str | None = None
+    submission_id: str,
+    agent: str | None = None,
+    reasoning_effort: str | None = None,
+    cheat_prompt: str = "default",
 ) -> None:
     """One trial run with an explicit cheat directive spliced into
     instruction.md (harbor_runner._prepare_task, cheat_instruction=True), to
@@ -1159,6 +1199,7 @@ async def run_cheat_trial(
             cost_cap_label=cost_cap_label,
             on_trial=on_trial,
             cheat_instruction=True,
+            cheat_instruction_text=_TB_CHEAT_PROMPT.read_text() if cheat_prompt == "tb" else None,
         )
 
         if outcome_holder:
@@ -1210,7 +1251,12 @@ async def run_cheat_trial(
                 else "failed"
             )
             run.logs = json.dumps(
-                {"trial_log": outcome.logs, "reward": run.reward, "cheat_check": cheat_check}
+                {
+                    "trial_log": outcome.logs,
+                    "reward": run.reward,
+                    "cheat_check": cheat_check,
+                    "cheat_prompt": cheat_prompt,
+                }
             )
             # Not update_canonical: this trial's task copy always has an
             # intentionally edited instruction.md, so its checksum never
@@ -1225,6 +1271,7 @@ async def run_cheat_trial(
                     "trial_log": result.error or "harbor produced no result for the cheat trial",
                     "reward": None,
                     "cheat_check": None,
+                    "cheat_prompt": cheat_prompt,
                 }
             )
         run.finished_at = datetime.now(UTC)
@@ -1241,11 +1288,14 @@ async def run_cheat_trial(
         db.close()
 
 
-async def run_rubric_check(submission_id: str) -> None:
+async def run_rubric_check(submission_id: str, rubric: str = "default") -> None:
     """`harbor check`: an evaluator agent reads the whole task and scores it
-    against Harbor's quality rubric -- an automated stand-in for a human task
-    reviewer. Advisory, like Failure Analysis. Result stored as JSON in the
-    Run's logs: {"agent", "model", "cost_usd", "error", "results": [...]}."""
+    against a rubric -- Harbor's own default (an automated stand-in for a
+    human task reviewer) unless rubric="tb", which swaps in the vendored,
+    richer 35-criterion Terminal-Bench rubric (vendor/tb_prompts/, see
+    PROVENANCE.md) instead. Advisory, like Failure Analysis. Result stored
+    as JSON in the Run's logs: {"agent", "model", "cost_usd", "error",
+    "results": [...], "rubric"}."""
     db = SessionLocal()
     try:
         submission = db.get(Submission, submission_id)
@@ -1266,6 +1316,7 @@ async def run_rubric_check(submission_id: str) -> None:
             settings.check_agent,
             settings.check_model,
             settings.check_timeout_sec,
+            rubric_path=_TB_CHECK_RUBRIC if rubric == "tb" else None,
         )
         if outcome.cost_usd is not None:
             budget.record(
@@ -1281,6 +1332,7 @@ async def run_rubric_check(submission_id: str) -> None:
                 "cost_usd": outcome.cost_usd,
                 "error": outcome.error,
                 "results": results,
+                "rubric": rubric,
             }
         )
         has_checks = any(r.get("checks") for r in results)

@@ -6,11 +6,15 @@ import {
   api,
   AGENT_CHOICES,
   REASONING_EFFORTS,
+  RUBRIC_CHOICES,
+  CHEAT_PROMPT_CHOICES,
   type AgentChoice,
   type CheatTrial,
   type FailureAnalysis,
   type RubricCheck,
   type ReasoningEffort,
+  type RubricChoice,
+  type CheatPromptChoice,
   type Submission,
   type StageStatus,
   type StaticCheckReport,
@@ -109,6 +113,9 @@ function SubmissionDetail() {
   // AGENT_REASONING_EFFORT happens to be (e.g. low) is a weaker test of
   // whether the agent will cheat than one run at max effort.
   const [cheatEffort, setCheatEffort] = useState<ReasoningEffort | "default">("max");
+  const [cheatPrompt, setCheatPrompt] = useState<CheatPromptChoice>("default");
+  const [analysisRubric, setAnalysisRubric] = useState<RubricChoice>("default");
+  const [checkRubric, setCheckRubric] = useState<RubricChoice>("default");
   const [agentChoice, setAgentChoice] = useState<AgentChoice>("codex");
   const mAgent = useMutation({
     mutationFn: () =>
@@ -167,28 +174,33 @@ function SubmissionDetail() {
     onError: (e: Error) => toast.error(e.message),
   });
   const mAnalysis = useMutation({
-    mutationFn: () => api.failureAnalysis(id),
+    mutationFn: () => api.failureAnalysis(id, analysisRubric),
     onSuccess: () => {
-      toast.success("Failure analysis started");
+      toast.success(`Failure analysis (${analysisRubric} rubric) started`);
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
   });
   const mCheatTrial = useMutation({
     mutationFn: () =>
-      api.cheatTrial(id, agentChoice, cheatEffort === "default" ? undefined : cheatEffort),
+      api.cheatTrial(
+        id,
+        agentChoice,
+        cheatEffort === "default" ? undefined : cheatEffort,
+        cheatPrompt,
+      ),
     onSuccess: () => {
       toast.success(
-        `Cheat trial (reasoning ${cheatEffort === "default" ? "server default" : cheatEffort}) started`,
+        `Cheat trial (reasoning ${cheatEffort === "default" ? "server default" : cheatEffort}, ${cheatPrompt} prompt) started`,
       );
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
   });
   const mRubricCheck = useMutation({
-    mutationFn: () => api.rubricCheck(id),
+    mutationFn: () => api.rubricCheck(id, checkRubric),
     onSuccess: () => {
-      toast.success("Rubric check started");
+      toast.success(`Rubric check (${checkRubric} rubric) started`);
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -683,15 +695,30 @@ function SubmissionDetail() {
           description="harbor analyze over the agent trials: a cheap model reads each trajectory and checks for reward hacking and for failures caused by an unclear instruction. Advisory."
           status={data.failure_analysis.status}
         >
-          <RunButton
-            label="Analyze Trials"
-            runningLabel="Analyzing…"
-            onClick={() => mAnalysis.mutate()}
-            running={isActive(data.failure_analysis.status)}
-            pending={mAnalysis.isPending}
-            disabled={!agentDone}
-            disabledReason="Run the agent trials to completion first"
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-sm text-muted-foreground">Rubric</label>
+            <Select value={analysisRubric} onValueChange={(v) => setAnalysisRubric(v as RubricChoice)}>
+              <SelectTrigger className="w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {RUBRIC_CHOICES.map((r) => (
+                  <SelectItem key={r.value} value={r.value}>
+                    {r.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <RunButton
+              label="Analyze Trials"
+              runningLabel="Analyzing…"
+              onClick={() => mAnalysis.mutate()}
+              running={isActive(data.failure_analysis.status)}
+              pending={mAnalysis.isPending}
+              disabled={!agentDone}
+              disabledReason="Run the agent trials to completion first"
+            />
+          </div>
           <AnalysisView logs={data.failure_analysis.logs} />
         </StageCard>
 
@@ -719,6 +746,19 @@ function SubmissionDetail() {
                 ))}
               </SelectContent>
             </Select>
+            <label className="text-sm text-muted-foreground">Prompt</label>
+            <Select value={cheatPrompt} onValueChange={(v) => setCheatPrompt(v as CheatPromptChoice)}>
+              <SelectTrigger className="w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {CHEAT_PROMPT_CHOICES.map((p) => (
+                  <SelectItem key={p.value} value={p.value}>
+                    {p.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <RunButton
               label="Run Cheat Trial"
               runningLabel="Running…"
@@ -738,15 +778,30 @@ function SubmissionDetail() {
           description="harbor check: an evaluator agent reads the whole task and scores it against Harbor's quality rubric — an automated stand-in for a human task reviewer. Advisory; needs ANTHROPIC_API_KEY. A very large environment/ (e.g. vendored dependencies) can hit an OS argument-length limit in Harbor's own launcher — that shows up as an error here, not a real quality verdict."
           status={data.rubric_check.status}
         >
-          <RunButton
-            label="Run Rubric Check"
-            runningLabel="Checking…"
-            onClick={() => mRubricCheck.mutate()}
-            running={isActive(data.rubric_check.status)}
-            pending={mRubricCheck.isPending}
-            disabled={!buildReady}
-            disabledReason="Build the image first"
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-sm text-muted-foreground">Rubric</label>
+            <Select value={checkRubric} onValueChange={(v) => setCheckRubric(v as RubricChoice)}>
+              <SelectTrigger className="w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {RUBRIC_CHOICES.map((r) => (
+                  <SelectItem key={r.value} value={r.value}>
+                    {r.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <RunButton
+              label="Run Rubric Check"
+              runningLabel="Checking…"
+              onClick={() => mRubricCheck.mutate()}
+              running={isActive(data.rubric_check.status)}
+              pending={mRubricCheck.isPending}
+              disabled={!buildReady}
+              disabledReason="Build the image first"
+            />
+          </div>
           <RubricCheckView logs={data.rubric_check.logs} />
         </StageCard>
 
@@ -795,10 +850,17 @@ function AnalysisView({ logs }: { logs?: string }) {
       <div className="text-xs text-muted-foreground">
         {parsed.agent} · {parsed.model}
         {parsed.cost_usd != null && <> · ${parsed.cost_usd.toFixed(3)}</>}
+        {parsed.rubric && <> · {parsed.rubric} rubric</>}
       </div>
       {parsed.error && (
         <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs whitespace-pre-wrap max-h-48 overflow-y-auto">
           {parsed.error}
+        </div>
+      )}
+      {parsed.job_summary && (
+        <div className="rounded-md border border-border bg-muted/40 p-3 text-sm whitespace-pre-wrap">
+          <div className="mb-1 text-xs font-medium text-muted-foreground">Job summary</div>
+          {parsed.job_summary}
         </div>
       )}
       {parsed.results.map((r, i) => (
@@ -888,6 +950,7 @@ function RubricCheckView({ logs }: { logs?: string }) {
       <div className="text-xs text-muted-foreground">
         {parsed.agent} · {parsed.model}
         {parsed.cost_usd != null && <> · ${parsed.cost_usd.toFixed(3)}</>}
+        {parsed.rubric && <> · {parsed.rubric} rubric</>}
       </div>
       {parsed.error && (
         <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs whitespace-pre-wrap max-h-48 overflow-y-auto">

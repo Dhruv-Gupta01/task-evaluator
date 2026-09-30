@@ -192,7 +192,11 @@ _CHEAT_INSTRUCTION = (
 
 
 def _prepare_task(
-    task_root: Path, work_dir: Path, agent: str = "", cheat_instruction: bool = False
+    task_root: Path,
+    work_dir: Path,
+    agent: str = "",
+    cheat_instruction: bool = False,
+    cheat_instruction_text: str | None = None,
 ) -> tuple[Path, str | None]:
     """Returns (task path for Harbor, notes for the logs). When
     HARBOR_NETWORK_MODE or AGENT_TIMEOUT_SEC differ from the task file, or
@@ -253,19 +257,20 @@ def _prepare_task(
     if cheat_instruction:
         instr_path = work_dir / "instruction.md"
         text = instr_path.read_text()
+        directive = f"\n\n{cheat_instruction_text}" if cheat_instruction_text else _CHEAT_INSTRUCTION
         # Insert before the closing timeout/no-cheat sentence when present, so
         # the directive reads naturally instead of trailing after it.
         marker = "\n\nYou have "
         idx = text.rfind(marker)
         if idx >= 0:
-            text = text[:idx] + _CHEAT_INSTRUCTION + text[idx:]
+            text = text[:idx] + directive + text[idx:]
         else:
-            text = text.rstrip("\n") + _CHEAT_INSTRUCTION + "\n"
+            text = text.rstrip("\n") + directive + "\n"
         instr_path.write_text(text)
         notes.append(
-            "(Cheat Trial: instruction.md was given an explicit directive to cheat "
-            "-- edit the verifier, hardcode outputs, read the reference solution -- "
-            "to test whether the anti-cheat design holds even when the agent is told to.)"
+            "(Cheat Trial: instruction.md was given an explicit directive to cheat"
+            + (" (vendor/tb_prompts/hack-trial-prompt.md)" if cheat_instruction_text else "")
+            + " -- to test whether the anti-cheat design holds even when the agent is told to.)"
         )
 
     return work_dir, "\n".join(notes)
@@ -507,6 +512,7 @@ async def run_job(
     cost_cap_label: str = "",
     on_trial: Callable[[TrialOutcome], Awaitable[str | None]] | None = None,
     cheat_instruction: bool = False,
+    cheat_instruction_text: str | None = None,
 ) -> HarborJobResult:
     """Run `harbor run` with `n_attempts` trials of `agent` against the task
     at `task_root`. If `cost_cap_usd` is set, the job is stopped once the cost
@@ -518,6 +524,7 @@ async def run_job(
     task_path, network_note = _prepare_task(
         task_root, jobs_dir.parent / f"{jobs_dir.name}-task", agent,
         cheat_instruction=cheat_instruction,
+        cheat_instruction_text=cheat_instruction_text,
     )
     job_dir = jobs_dir / job_name
     hosts_overlay = _write_build_hosts_overlay(jobs_dir.parent / f"{jobs_dir.name}-build-hosts.yaml")
@@ -720,10 +727,14 @@ async def run_analyze(
     agent: str,
     model: str,
     timeout_sec: float,
+    rubric_path: Path | None = None,
+    prompt_path: Path | None = None,
 ) -> AnalyzeJobResult:
     """`harbor analyze` over a job (or trial) directory: an evaluator agent
-    reads each trial and grades it against Harbor's default rubric (reward
-    hacking, task specification). Harbor writes <out_dir>/<job_name>/analysis.json."""
+    reads each trial and grades it against a rubric -- Harbor's own default
+    (reward hacking, task specification) unless rubric_path/prompt_path
+    point at a custom one (e.g. vendor/tb_prompts/'s richer 6-criterion
+    review). Harbor writes <out_dir>/<job_name>/analysis.json."""
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
         settings.harbor_bin, "analyze", str(trial_or_job_dir),
@@ -731,6 +742,10 @@ async def run_analyze(
         "--jobs-dir", str(out_dir), "--job-name", job_name,
         "--n-concurrent", "2", "--quiet",
     ]
+    if rubric_path:
+        cmd += ["--rubric", str(rubric_path)]
+    if prompt_path:
+        cmd += ["--prompt", str(prompt_path)]
     env = host_env_for_subprocess({**_litellm_key_env(), "DOCKER_DEFAULT_PLATFORM": settings.docker_platform})
     cli_output_path = out_dir / f"{job_name}.cli.log"
     with open(cli_output_path, "wb") as cli_output:
@@ -787,15 +802,18 @@ async def run_check(
     agent: str,
     model: str,
     timeout_sec: float,
+    rubric_path: Path | None = None,
 ) -> CheckJobResult:
     """`harbor check` over one task directory: an evaluator agent reads the
-    whole task and scores it against Harbor's built-in quality rubric (an
-    automated stand-in for a human task reviewer). Different from run_analyze,
-    which grades agent trajectories, not the task itself. Harbor writes
-    <out_dir>/<job_name>/check_report.json. Known limitation: Harbor's own
-    launcher passes the agent's instruction as a shell argument, so a task
-    with a very large environment/ (e.g. vendored dependencies) can hit the
-    OS argument-length limit; the error surfaces in `error` below."""
+    whole task and scores it against a rubric -- Harbor's built-in default
+    (an automated stand-in for a human task reviewer) unless rubric_path
+    points at a custom one (e.g. vendor/tb_prompts/'s 35-criterion review).
+    Different from run_analyze, which grades agent trajectories, not the
+    task itself. Harbor writes <out_dir>/<job_name>/check_report.json. Known
+    limitation: Harbor's own launcher passes the agent's instruction as a
+    shell argument, so a task with a very large environment/ (e.g. vendored
+    dependencies) can hit the OS argument-length limit; the error surfaces
+    in `error` below."""
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
         settings.harbor_bin, "check", str(task_root),
@@ -803,6 +821,8 @@ async def run_check(
         "--jobs-dir", str(out_dir), "--job-name", job_name,
         "--quiet",
     ]
+    if rubric_path:
+        cmd += ["--rubric", str(rubric_path)]
     env = host_env_for_subprocess({**_litellm_key_env(), "DOCKER_DEFAULT_PLATFORM": settings.docker_platform})
     cli_output_path = out_dir / f"{job_name}.cli.log"
     with open(cli_output_path, "wb") as cli_output:

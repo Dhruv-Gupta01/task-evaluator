@@ -144,7 +144,17 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
   `task_specification` checks for each. It uses `ANALYZE_MODEL` (default `openai/gpt-6-luna`, a few
   cents per run) through `ANALYZE_AGENT` (Terminus-2), needs `OPENAI_API_KEY`, and is advisory. The
   evaluator sees the task's tests and the trajectories, so use keys with no-training / zero-retention
-  terms. Its labels are Harbor's trial folder names, not the "Trial #N" numbers.
+  terms. Its labels are Harbor's trial folder names, not the "Trial #N" numbers. Its Rubric dropdown
+  (Default / TB) swaps in a vendored, richer 6-criterion Terminal-Bench rubric instead of Harbor's own
+  2-criterion default, and additionally synthesizes a job-level summary across all trials (a step
+  Harbor itself doesn't have).
+- **Rubric dropdowns (Failure Analysis, Rubric Check) and Cheat Trial's Prompt dropdown**: all three
+  can swap in a richer, vendored Terminal-Bench alternative (`backend/vendor/tb_prompts/`, copied
+  verbatim from `harbor-framework/terminal-bench` at a pinned commit -- see `PROVENANCE.md` there)
+  instead of Harbor's own default. Rubric Check's TB option is a 35-criterion review (vs. Harbor's
+  own 11); Cheat Trial's TB prompt is a more aggressive, explicit red-team-style directive than the
+  platform's own hand-written one. None of these are the default -- pick them per-run when the
+  richer review is worth the extra cost.
 - **Rubric check**: the Rubric Check card's "Run Rubric Check" button runs `harbor check` — a
   different command from `harbor analyze` above: it scores the *task itself* (instruction, tests,
   environment) against Harbor's quality rubric, not agent trials. Uses `CHECK_MODEL` (default

@@ -113,6 +113,11 @@ export interface FailureAnalysis {
   cost_usd?: number | null;
   error?: string | null;
   results: TrialAnalysis[];
+  // "default" (Harbor's own 2-criterion rubric) or "tb" (vendored 6-criterion).
+  rubric?: string;
+  // Only present when rubric="tb" -- Harbor has no built-in job-summary
+  // step, so this is a separate synthesis over all trial results.
+  job_summary?: string | null;
 }
 
 // One trial run with an explicit cheat directive. `logs` is JSON once the
@@ -138,6 +143,8 @@ export interface CheatTrial {
   trial_log?: string | null;
   reward: 0 | 1 | null;
   cheat_check: CheatCheck | null;
+  // "default" (this platform's own directive) or "tb" (vendored red-team prompt).
+  cheat_prompt?: string;
 }
 
 // `logs` is JSON (see RubricCheck below) once the stage has run.
@@ -160,6 +167,8 @@ export interface RubricCheck {
   cost_usd?: number | null;
   error?: string | null;
   results: RubricCheckEntry[];
+  // "default" (Harbor's own 11-criterion rubric) or "tb" (vendored 35-criterion).
+  rubric?: string;
 }
 
 // `logs` is JSON (see StaticCheckReport below) once the stage has run.
@@ -205,6 +214,20 @@ export interface TbStaticCheckReport {
 // Reasoning levels the backend accepts for one run of trials.
 export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+// "tb" swaps in the vendored, richer Terminal-Bench rubric/prompt
+// (backend/vendor/tb_prompts/) instead of Harbor's own default.
+export const RUBRIC_CHOICES = [
+  { value: "default", label: "Default" },
+  { value: "tb", label: "TB (richer)" },
+] as const;
+export type RubricChoice = (typeof RUBRIC_CHOICES)[number]["value"];
+
+export const CHEAT_PROMPT_CHOICES = [
+  { value: "default", label: "Default" },
+  { value: "tb", label: "TB (red-team)" },
+] as const;
+export type CheatPromptChoice = (typeof CHEAT_PROMPT_CHOICES)[number]["value"];
 
 // Agents a run of trials can use; the backend picks each one's model from .env
 // (codex: AGENT_MODEL, claude-code: CLAUDE_AGENT_MODEL).
@@ -290,26 +313,38 @@ export const api = {
         (agent ? `&agent=${agent}` : ""),
       { method: "POST" },
     ).then(handle<unknown>),
-  failureAnalysis: (id: string) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/failure-analysis`, { method: "POST" }).then(
-      handle<unknown>,
-    ),
+  // rubric "default" is omitted from the query string; "tb" swaps in the
+  // vendored, richer Terminal-Bench rubric on the backend.
+  failureAnalysis: (id: string, rubric?: RubricChoice) =>
+    fetch(
+      `${API_BASE_URL}/submissions/${id}/failure-analysis` +
+        (rubric && rubric !== "default" ? `?rubric=${rubric}` : ""),
+      { method: "POST" },
+    ).then(handle<unknown>),
   // agent undefined = the server's default (HARBOR_AGENT).
-  cheatTrial: (id: string, agent?: AgentChoice, reasoningEffort?: ReasoningEffort) =>
+  cheatTrial: (
+    id: string,
+    agent?: AgentChoice,
+    reasoningEffort?: ReasoningEffort,
+    cheatPrompt?: CheatPromptChoice,
+  ) =>
     fetch(
       `${API_BASE_URL}/submissions/${id}/cheat-trial?` +
         [
           agent ? `agent=${agent}` : "",
           reasoningEffort ? `reasoning_effort=${reasoningEffort}` : "",
+          cheatPrompt && cheatPrompt !== "default" ? `cheat_prompt=${cheatPrompt}` : "",
         ]
           .filter(Boolean)
           .join("&"),
       { method: "POST" },
     ).then(handle<unknown>),
-  rubricCheck: (id: string) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/rubric-check`, { method: "POST" }).then(
-      handle<unknown>,
-    ),
+  rubricCheck: (id: string, rubric?: RubricChoice) =>
+    fetch(
+      `${API_BASE_URL}/submissions/${id}/rubric-check` +
+        (rubric && rubric !== "default" ? `?rubric=${rubric}` : ""),
+      { method: "POST" },
+    ).then(handle<unknown>),
   sufficiency: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/sufficiency`, { method: "POST" }).then(
       handle<unknown>,

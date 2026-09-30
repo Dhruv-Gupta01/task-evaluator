@@ -306,9 +306,17 @@ def get_budget(db: Session = Depends(get_db)) -> dict[str, float]:
 
 
 @router.post("/submissions/{submission_id}/failure-analysis", status_code=202)
-async def trigger_failure_analysis(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+async def trigger_failure_analysis(
+    submission_id: str, rubric: str = "default", db: Session = Depends(get_db)
+) -> dict[str, str]:
     """`harbor analyze` on the finished agent trials. Advisory, like the other
-    LLM stages; it costs a little (a cheap model) and counts toward the budget."""
+    LLM stages; it costs a little (a cheap model) and counts toward the
+    budget. rubric="tb" swaps in the vendored, richer 6-criterion
+    Terminal-Bench rubric instead of Harbor's own default 2-criterion one."""
+    if rubric not in task_runner.RUBRICS:
+        raise HTTPException(
+            status_code=400, detail=f"rubric must be one of {', '.join(task_runner.RUBRICS)}"
+        )
     _raise_if_over_budget(db, budget.exceeded_message(db))
     submission = db.get(Submission, submission_id)
     if submission is None:
@@ -327,7 +335,7 @@ async def trigger_failure_analysis(submission_id: str, db: Session = Depends(get
     db.commit()
 
     await task_queue.submit(
-        f"{submission_id}:failure_analysis", task_runner.run_failure_analysis(submission_id)
+        f"{submission_id}:failure_analysis", task_runner.run_failure_analysis(submission_id, rubric)
     )
     return {"status": "started"}
 
@@ -337,6 +345,7 @@ async def trigger_cheat_trial(
     submission_id: str,
     agent: str | None = None,
     reasoning_effort: str | None = None,
+    cheat_prompt: str = "default",
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
     """One trial run with an explicit directive to cheat spliced into the
@@ -347,7 +356,9 @@ async def trigger_cheat_trial(
     same as agent-trials -- otherwise this trial silently inherits whatever
     that setting happens to be, which is easy to leave stale/low without
     noticing (confirmed live: a real cheat trial once ran at low effort
-    purely because of that, not a deliberate choice)."""
+    purely because of that, not a deliberate choice). cheat_prompt="tb"
+    splices in the vendored, more aggressive Terminal-Bench red-team-style
+    directive instead of the platform's own hand-written one."""
     if agent is not None and agent not in task_runner.AGENTS:
         raise HTTPException(
             status_code=400, detail=f"agent must be one of {', '.join(task_runner.AGENTS)}"
@@ -356,6 +367,11 @@ async def trigger_cheat_trial(
         raise HTTPException(
             status_code=400,
             detail=f"reasoning_effort must be one of {', '.join(task_runner.REASONING_EFFORTS)}",
+        )
+    if cheat_prompt not in task_runner.CHEAT_PROMPTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"cheat_prompt must be one of {', '.join(task_runner.CHEAT_PROMPTS)}",
         )
     _raise_if_over_budget(db, budget.exceeded_message(db))
     _require_built_submission(submission_id, db)
@@ -371,16 +387,23 @@ async def trigger_cheat_trial(
 
     await task_queue.submit(
         f"{submission_id}:cheat_trial",
-        task_runner.run_cheat_trial(submission_id, agent, reasoning_effort),
+        task_runner.run_cheat_trial(submission_id, agent, reasoning_effort, cheat_prompt),
     )
     return {"status": "started"}
 
 
 @router.post("/submissions/{submission_id}/rubric-check", status_code=202)
-async def trigger_rubric_check(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
-    """`harbor check`: an evaluator agent scores the whole task against
-    Harbor's quality rubric. Advisory. Needs ANTHROPIC_API_KEY (CHECK_AGENT
-    defaults to claude-code)."""
+async def trigger_rubric_check(
+    submission_id: str, rubric: str = "default", db: Session = Depends(get_db)
+) -> dict[str, str]:
+    """`harbor check`: an evaluator agent scores the whole task against a
+    rubric. Advisory. Needs ANTHROPIC_API_KEY (CHECK_AGENT defaults to
+    claude-code). rubric="tb" swaps in the vendored, richer 35-criterion
+    Terminal-Bench rubric instead of Harbor's own default 11-criterion one."""
+    if rubric not in task_runner.RUBRICS:
+        raise HTTPException(
+            status_code=400, detail=f"rubric must be one of {', '.join(task_runner.RUBRICS)}"
+        )
     _raise_if_over_budget(db, budget.exceeded_message(db))
     _require_built_submission(submission_id, db)
 
@@ -394,7 +417,7 @@ async def trigger_rubric_check(submission_id: str, db: Session = Depends(get_db)
     db.commit()
 
     await task_queue.submit(
-        f"{submission_id}:rubric_check", task_runner.run_rubric_check(submission_id)
+        f"{submission_id}:rubric_check", task_runner.run_rubric_check(submission_id, rubric)
     )
     return {"status": "started"}
 
