@@ -749,12 +749,18 @@ async def run_analyze(
     timeout_sec: float,
     rubric_path: Path | None = None,
     prompt_path: Path | None = None,
+    agent_setup_timeout_sec: int = 0,
 ) -> AnalyzeJobResult:
     """`harbor analyze` over a job (or trial) directory: an evaluator agent
     reads each trial and grades it against a rubric -- Harbor's own default
     (reward hacking, task specification) unless rubric_path/prompt_path
     point at a custom one (e.g. vendor/tb_prompts/'s richer 6-criterion
-    review). Harbor writes <out_dir>/<job_name>/analysis.json."""
+    review). Harbor writes <out_dir>/<job_name>/analysis.json. An evaluator
+    agent that self-installs inside its container (claude-code, codex) needs
+    more than Harbor's bare 360s install allowance -- same deal as agent
+    trials, via agent_setup_timeout_sec (the caller's own
+    _agent_setup_timeout_sec(agent), since this module doesn't know which
+    agents self-install)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
         settings.harbor_bin, "analyze", str(trial_or_job_dir),
@@ -766,6 +772,9 @@ async def run_analyze(
         cmd += ["--rubric", str(rubric_path)]
     if prompt_path:
         cmd += ["--prompt", str(prompt_path)]
+    if agent_setup_timeout_sec > 0:
+        multiplier = agent_setup_timeout_sec / _HARBOR_DEFAULT_SETUP_TIMEOUT_SEC
+        cmd += ["--agent-setup-timeout-multiplier", f"{multiplier:.3f}"]
     env = host_env_for_subprocess({**_litellm_key_env(), "DOCKER_DEFAULT_PLATFORM": settings.docker_platform})
     cli_output_path = out_dir / f"{job_name}.cli.log"
     with open(cli_output_path, "wb") as cli_output:
@@ -823,6 +832,7 @@ async def run_check(
     model: str,
     timeout_sec: float,
     rubric_path: Path | None = None,
+    agent_setup_timeout_sec: int = 0,
 ) -> CheckJobResult:
     """`harbor check` over one task directory: an evaluator agent reads the
     whole task and scores it against a rubric -- Harbor's built-in default
@@ -833,7 +843,11 @@ async def run_check(
     limitation: Harbor's own launcher passes the agent's instruction as a
     shell argument, so a task with a very large environment/ (e.g. vendored
     dependencies) can hit the OS argument-length limit; the error surfaces
-    in `error` below."""
+    in `error` below. An evaluator agent that self-installs inside its
+    container (claude-code, the default CHECK_AGENT; codex) needs more than
+    Harbor's bare 360s install allowance -- same deal as agent trials, via
+    agent_setup_timeout_sec (the caller's own _agent_setup_timeout_sec(agent),
+    since this module doesn't know which agents self-install)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
         settings.harbor_bin, "check", str(task_root),
@@ -843,6 +857,9 @@ async def run_check(
     ]
     if rubric_path:
         cmd += ["--rubric", str(rubric_path)]
+    if agent_setup_timeout_sec > 0:
+        multiplier = agent_setup_timeout_sec / _HARBOR_DEFAULT_SETUP_TIMEOUT_SEC
+        cmd += ["--agent-setup-timeout-multiplier", f"{multiplier:.3f}"]
     env = host_env_for_subprocess({**_litellm_key_env(), "DOCKER_DEFAULT_PLATFORM": settings.docker_platform})
     cli_output_path = out_dir / f"{job_name}.cli.log"
     with open(cli_output_path, "wb") as cli_output:

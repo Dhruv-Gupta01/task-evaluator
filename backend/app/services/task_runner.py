@@ -1086,6 +1086,7 @@ async def run_failure_analysis(submission_id: str, rubric: str = "default") -> N
                 settings.analyze_timeout_sec,
                 rubric_path=_TB_ANALYZE_RUBRIC if use_tb else None,
                 prompt_path=_TB_ANALYZE_PROMPT if use_tb else None,
+                agent_setup_timeout_sec=_agent_setup_timeout_sec(settings.analyze_agent),
             )
             if outcome.error:
                 errors.append(f"{job_dir.name}: {outcome.error}")
@@ -1246,6 +1247,7 @@ async def run_cheat_trial(
                     settings.analyze_agent,
                     settings.analyze_model,
                     settings.analyze_timeout_sec,
+                    agent_setup_timeout_sec=_agent_setup_timeout_sec(settings.analyze_agent),
                 )
                 if analyze_outcome.cost_usd is not None:
                     budget.record(
@@ -1344,6 +1346,7 @@ async def run_rubric_check(submission_id: str, rubric: str = "default") -> None:
             settings.check_model,
             settings.check_timeout_sec,
             rubric_path=_TB_CHECK_RUBRIC if rubric == "tb" else None,
+            agent_setup_timeout_sec=_agent_setup_timeout_sec(settings.check_agent),
         )
         if outcome.cost_usd is not None:
             budget.record(
