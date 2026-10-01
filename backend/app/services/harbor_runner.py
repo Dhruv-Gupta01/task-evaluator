@@ -31,6 +31,22 @@ _POLL_INTERVAL_SEC = 5
 MAX_AGENT_OUTPUT_CHARS = 4_000
 # Harbor's built-in agent install limit, which --agent-setup-timeout-multiplier scales.
 _HARBOR_DEFAULT_SETUP_TIMEOUT_SEC = 360
+
+
+def _write_agent_setup_timeout_config(out_dir: Path, job_name: str, agent_setup_timeout_sec: int) -> Path:
+    """`harbor check` and `harbor analyze` have no --agent-setup-timeout-multiplier
+    CLI flag -- unlike `harbor run`, confirmed against the installed harbor 0.23.0
+    CLI (`harbor check -h` lists no such option; passing it anyway is a hard CLI
+    error, exit code 2, before anything runs). Their --config flag loads a base
+    JobConfig JSON/YAML instead, which does have an agent_setup_timeout_multiplier
+    field (every other field defaults, so a minimal one-field file validates), and
+    both commands apply their own explicit --agent/--model/--rubric args on top of
+    whatever --config loaded, so this is safe to combine with the rest of the
+    command line."""
+    multiplier = agent_setup_timeout_sec / _HARBOR_DEFAULT_SETUP_TIMEOUT_SEC
+    path = out_dir / f"{job_name}.setup-timeout-config.json"
+    path.write_text(json.dumps({"agent_setup_timeout_multiplier": multiplier}))
+    return path
 # How often the cost watchdog re-reads in-flight trials' running cost.
 _COST_CHECK_INTERVAL_SEC = 10
 _harbor_version_cache: str | None = None
@@ -773,8 +789,7 @@ async def run_analyze(
     if prompt_path:
         cmd += ["--prompt", str(prompt_path)]
     if agent_setup_timeout_sec > 0:
-        multiplier = agent_setup_timeout_sec / _HARBOR_DEFAULT_SETUP_TIMEOUT_SEC
-        cmd += ["--agent-setup-timeout-multiplier", f"{multiplier:.3f}"]
+        cmd += ["--config", str(_write_agent_setup_timeout_config(out_dir, job_name, agent_setup_timeout_sec))]
     env = host_env_for_subprocess({**_litellm_key_env(), "DOCKER_DEFAULT_PLATFORM": settings.docker_platform})
     cli_output_path = out_dir / f"{job_name}.cli.log"
     with open(cli_output_path, "wb") as cli_output:
@@ -858,8 +873,7 @@ async def run_check(
     if rubric_path:
         cmd += ["--rubric", str(rubric_path)]
     if agent_setup_timeout_sec > 0:
-        multiplier = agent_setup_timeout_sec / _HARBOR_DEFAULT_SETUP_TIMEOUT_SEC
-        cmd += ["--agent-setup-timeout-multiplier", f"{multiplier:.3f}"]
+        cmd += ["--config", str(_write_agent_setup_timeout_config(out_dir, job_name, agent_setup_timeout_sec))]
     env = host_env_for_subprocess({**_litellm_key_env(), "DOCKER_DEFAULT_PLATFORM": settings.docker_platform})
     cli_output_path = out_dir / f"{job_name}.cli.log"
     with open(cli_output_path, "wb") as cli_output:
