@@ -15,6 +15,15 @@ PRICES_PER_M: dict[str, tuple[float, float, float, float]] = {
     "gpt-6-luna": (0.1, 0.01, 0.5, 0.125),
     # Google paid tier; no cache-write premium, output includes thinking tokens.
     "gemini-3.5-flash-lite": (0.30, 0.03, 2.50, 0.30),
+    # Anthropic list price; cache reads are 0.025x input on Fable 5.1, 5-minute cache writes 1.25x.
+    "claude-fable-5-1": (10.0, 0.25, 50.0, 12.5),
+    # Sonnet 5.5: $2 / $10 per M, cache read 0.1x, 5-minute cache write 1.25x.
+    "claude-sonnet-5-5": (2.0, 0.20, 10.0, 2.5),
+    # Sonnet 4.6 (Harbor's own default model for check/analyze): $3 / $15 per M, cache read 0.1x, 5-minute write 1.25x.
+    "claude-sonnet-4-6": (3.0, 0.30, 15.0, 3.75),
+    # Fireworks serverless gpt-oss-120b ($0.15 / $0.015 cached / $0.60); no cache-write premium.
+    # Keyed without the "fireworks_ai/" LiteLLM prefix, which callers strip.
+    "accounts/fireworks/models/gpt-oss-120b": (0.15, 0.015, 0.60, 0.15),
 }
 
 

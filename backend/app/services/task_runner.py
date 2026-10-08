@@ -86,7 +86,8 @@ def _agent_kwargs(agent: str, reasoning_effort: str | None = None) -> dict[str, 
     an agent doesn't declare, so each agent only gets the ones it knows.
     reasoning_effort overrides AGENT_REASONING_EFFORT for this run only."""
     kwargs: dict[str, str] = {}
-    if agent.startswith("terminus"):
+    if agent.startswith("terminus") and settings.llm_max_iters > 0:
+        # LLM_MAX_ITERS=0 passes no cap, so only the task's agent timeout bounds the run.
         kwargs["max_turns"] = str(settings.llm_max_iters)
     if agent.startswith("terminus") or agent in ("codex", "claude-code"):
         effort = reasoning_effort or settings.agent_reasoning_effort
@@ -98,6 +99,12 @@ def _agent_kwargs(agent: str, reasoning_effort: str | None = None) -> dict[str, 
         if settings.codex_web_search:
             kwargs["web_search"] = settings.codex_web_search
     return kwargs
+
+
+def _evaluator_kwargs(effort: str) -> dict[str, str]:
+    """Agent kwargs for the analysis and rubric-check evaluators. Unlike trials they do not
+    inherit AGENT_REASONING_EFFORT: an empty setting passes nothing (the model's default)."""
+    return {"reasoning_effort": effort} if effort else {}
 
 
 # Codex and Claude Code install themselves inside the container (Node, npm or a
@@ -1087,6 +1094,7 @@ async def run_failure_analysis(submission_id: str, rubric: str = "default") -> N
                 rubric_path=_TB_ANALYZE_RUBRIC if use_tb else None,
                 prompt_path=_TB_ANALYZE_PROMPT if use_tb else None,
                 agent_setup_timeout_sec=_agent_setup_timeout_sec(settings.analyze_agent),
+                agent_kwargs=_evaluator_kwargs(settings.analyze_reasoning_effort),
             )
             if outcome.error:
                 errors.append(f"{job_dir.name}: {outcome.error}")
@@ -1248,6 +1256,7 @@ async def run_cheat_trial(
                     settings.analyze_model,
                     settings.analyze_timeout_sec,
                     agent_setup_timeout_sec=_agent_setup_timeout_sec(settings.analyze_agent),
+                    agent_kwargs=_evaluator_kwargs(settings.analyze_reasoning_effort),
                 )
                 if analyze_outcome.cost_usd is not None:
                     budget.record(
@@ -1347,6 +1356,7 @@ async def run_rubric_check(submission_id: str, rubric: str = "default") -> None:
             settings.check_timeout_sec,
             rubric_path=_TB_CHECK_RUBRIC if rubric == "tb" else None,
             agent_setup_timeout_sec=_agent_setup_timeout_sec(settings.check_agent),
+            agent_kwargs=_evaluator_kwargs(settings.check_reasoning_effort),
         )
         if outcome.cost_usd is not None:
             budget.record(

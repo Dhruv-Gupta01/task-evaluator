@@ -326,6 +326,31 @@ def _write_build_hosts_overlay(path: Path) -> Path | None:
     return path
 
 
+def _write_runtime_hosts_overlay(path: Path) -> Path | None:
+    """DOCKER_ADD_HOSTS's runtime counterpart: the build-time overlay above
+    only pins addresses while Harbor builds the image, not for the running
+    container -- an agent like Codex that self-installs via a live
+    `docker exec` (curl/nvm/npm, after the container has already started)
+    does normal DNS resolution and can still land on a bad address from the
+    same multi-IP host (confirmed live: a `main` container resolved
+    raw.githubusercontent.com to 185.199.109.133 and got a hung/reset
+    connection, the exact address this platform's build-time pin already
+    knew to avoid). `extra_hosts` at a service's top level, not nested
+    under `build:`, writes into the running container's own /etc/hosts, so
+    this pins the same addresses for the agent's entire runtime. Passed as
+    a second, separate --extra-docker-compose overlay alongside the
+    build-time one (Harbor's own CLI documents that flag as repeatable),
+    not a replacement for it -- the build still needs its own pin. None
+    when the setting is empty."""
+    pairs = docker_add_host_pairs()
+    if not pairs:
+        return None
+    lines = ["services:", "  main:", "    extra_hosts:"]
+    lines += [f'      - "{host}={ip}"' for host, ip in pairs]
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
 def _usage_line(outcome: TrialOutcome) -> str:
     if outcome.n_input_tokens is None and outcome.cost_usd is None:
         return "(no LLM usage recorded)"
@@ -564,6 +589,9 @@ async def run_job(
     )
     job_dir = jobs_dir / job_name
     hosts_overlay = _write_build_hosts_overlay(jobs_dir.parent / f"{jobs_dir.name}-build-hosts.yaml")
+    runtime_hosts_overlay = _write_runtime_hosts_overlay(
+        jobs_dir.parent / f"{jobs_dir.name}-runtime-hosts.yaml"
+    )
     cli_output_path = jobs_dir / f"{job_name}.out"
     cmd = [
         settings.harbor_bin,
@@ -586,6 +614,8 @@ async def run_job(
         setup_multiplier_note = f"(--agent-setup-timeout-multiplier {multiplier:.3f} passed, for {agent_setup_timeout_sec}s of install allowance)"
     if hosts_overlay:
         cmd += ["--extra-docker-compose", str(hosts_overlay)]
+    if runtime_hosts_overlay:
+        cmd += ["--extra-docker-compose", str(runtime_hosts_overlay)]
     if model:
         cmd += ["--model", model]
     for key, value in (agent_kwargs or {}).items():
@@ -766,6 +796,7 @@ async def run_analyze(
     rubric_path: Path | None = None,
     prompt_path: Path | None = None,
     agent_setup_timeout_sec: int = 0,
+    agent_kwargs: dict[str, str] | None = None,
 ) -> AnalyzeJobResult:
     """`harbor analyze` over a job (or trial) directory: an evaluator agent
     reads each trial and grades it against a rubric -- Harbor's own default
@@ -788,6 +819,8 @@ async def run_analyze(
         cmd += ["--rubric", str(rubric_path)]
     if prompt_path:
         cmd += ["--prompt", str(prompt_path)]
+    for key, value in (agent_kwargs or {}).items():
+        cmd += ["--agent-kwarg", f"{key}={value}"]
     if agent_setup_timeout_sec > 0:
         cmd += ["--config", str(_write_agent_setup_timeout_config(out_dir, job_name, agent_setup_timeout_sec))]
     env = host_env_for_subprocess({**_litellm_key_env(), "DOCKER_DEFAULT_PLATFORM": settings.docker_platform})
@@ -848,6 +881,7 @@ async def run_check(
     timeout_sec: float,
     rubric_path: Path | None = None,
     agent_setup_timeout_sec: int = 0,
+    agent_kwargs: dict[str, str] | None = None,
 ) -> CheckJobResult:
     """`harbor check` over one task directory: an evaluator agent reads the
     whole task and scores it against a rubric -- Harbor's built-in default
@@ -872,6 +906,8 @@ async def run_check(
     ]
     if rubric_path:
         cmd += ["--rubric", str(rubric_path)]
+    for key, value in (agent_kwargs or {}).items():
+        cmd += ["--agent-kwarg", f"{key}={value}"]
     if agent_setup_timeout_sec > 0:
         cmd += ["--config", str(_write_agent_setup_timeout_config(out_dir, job_name, agent_setup_timeout_sec))]
     env = host_env_for_subprocess({**_litellm_key_env(), "DOCKER_DEFAULT_PLATFORM": settings.docker_platform})

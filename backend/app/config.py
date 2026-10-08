@@ -113,6 +113,9 @@ class Settings(BaseSettings):
     analyze_agent: str = "terminus-2"
     analyze_model: str = "openai/gpt-6-luna"
     analyze_timeout_sec: int = 3600
+    # Reasoning effort for the analysis agent. Empty = pass nothing, so the evaluator
+    # model runs at its own default (not at AGENT_REASONING_EFFORT, which is for trials).
+    analyze_reasoning_effort: str = ""
     # "Rubric Check" stage: `harbor check` reads the whole task (not agent
     # trials) and scores it against Harbor's quality rubric -- an automated
     # stand-in for a human task reviewer. Runs Claude Code, so it needs
@@ -123,6 +126,8 @@ class Settings(BaseSettings):
     check_agent: str = "claude-code"
     check_model: str = "anthropic/claude-fable-5-1"
     check_timeout_sec: int = 3600
+    # Same idea for the rubric check: empty = the model's own default effort.
+    check_reasoning_effort: str = ""
     # "Cheat Trial" stage: one agent trial run with an explicit directive to
     # cheat spliced into instruction.md, to confirm the anti-cheat design
     # holds even when the agent is told to game the grading, not just when it

@@ -18,7 +18,11 @@ def get_llm_client() -> LLMClient:
         if not settings.anthropic_api_key:
             raise ValueError("ANTHROPIC_API_KEY not set")
         return AnthropicClient(
-            model=settings.llm_model, api_key=settings.anthropic_api_key, rate_limiter=rate_limiter
+            model=settings.llm_model,
+            api_key=settings.anthropic_api_key,
+            rate_limiter=rate_limiter,
+            reasoning_effort=settings.llm_reasoning_effort or None,
+            max_output_tokens=settings.llm_max_output_tokens or None,
         )
 
     if provider == "openai":
@@ -56,6 +60,8 @@ def get_llm_client() -> LLMClient:
             api_key=settings.fireworks_api_key,
             rate_limiter=rate_limiter,
             base_url=FIREWORKS_BASE_URL,
+            reasoning_effort=settings.llm_reasoning_effort or None,
+            max_output_tokens=settings.llm_max_output_tokens or None,
         )
 
     if provider == "gemini":
