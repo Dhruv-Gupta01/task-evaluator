@@ -52,6 +52,14 @@ def record(
     n_input_tokens: int | None,
     n_cache_tokens: int | None,
     n_output_tokens: int | None,
+    *,
+    agent: str | None = None,
+    reasoning_effort: str | None = None,
+    trial_index: int | None = None,
+    detail: str | None = None,
+    n_cache_write_tokens: int | None = None,
+    unit: str | None = None,
+    unit_count: int | None = None,
 ) -> None:
     db.add(
         LlmSpend(
@@ -63,6 +71,13 @@ def record(
             n_cache_tokens=n_cache_tokens,
             n_output_tokens=n_output_tokens,
             created_at=datetime.now(UTC),
+            agent=agent,
+            reasoning_effort=reasoning_effort or None,
+            trial_index=trial_index,
+            detail=detail,
+            n_cache_write_tokens=n_cache_write_tokens,
+            unit=unit,
+            unit_count=unit_count,
         )
     )
 
@@ -76,20 +91,33 @@ def judge_exceeded_message(db: Session) -> str | None:
 
 
 def record_calls(
-    db: Session, submission_id: str, stage: str, calls: list[tuple[str, Usage]]
+    db: Session,
+    submission_id: str,
+    stage: str,
+    calls: list[tuple[str, Usage]],
+    reasoning_effort: str | None = None,
 ) -> None:
-    """Record collected judge calls; models without a known price are skipped."""
-    for model, usage in calls:
+    """Record collected judge calls. A model without a known price is still
+    recorded (cost 0, flagged in `detail`) so the cost report shows the call
+    happened instead of silently omitting it."""
+    for i, (model, usage) in enumerate(calls, start=1):
         cost = pricing.cost_usd(model, usage)
-        if cost is None:
-            continue
         record(
             db,
             submission_id,
             stage,
             model,
-            cost,
+            cost if cost is not None else 0.0,
             usage.input_tokens,
             usage.cached_tokens,
             usage.output_tokens,
+            agent="direct API call",
+            reasoning_effort=reasoning_effort,
+            detail=f"call {i}" + ("" if cost is not None else " (model not in price table; cost not computed)"),
+            n_cache_write_tokens=usage.cache_write_tokens,
         )
+
+
+def gptzero_cost_usd(words: int) -> float:
+    """GPTZero is billed per word in INR; convert at the configured rate."""
+    return words * settings.gptzero_inr_per_word / settings.usd_inr_rate

@@ -495,9 +495,9 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
         raise HTTPException(status_code=404, detail="submission not found")
 
     schema = submission_service.to_schema(submission)
-    total_cost_usd = db.query(func.sum(LlmSpend.cost_usd)).filter_by(
-        submission_id=submission_id
-    ).scalar()
+    spend_rows = db.query(LlmSpend).filter_by(submission_id=submission_id).all()
+    total_cost_usd = sum(r.cost_usd for r in spend_rows) if spend_rows else None
+    cost_report = submission_service.build_cost_report(spend_rows)
 
     def _json_or_raw(logs: str | None) -> dict | str | None:
         if logs is None:
@@ -530,7 +530,10 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
             "not_run": schema.rubric_check.status == "not-run",
             "report": _json_or_raw(schema.rubric_check.logs),
         },
-        "summary_markdown": submission_service.build_summary_markdown(schema, total_cost_usd),
+        "cost": cost_report,
+        "summary_markdown": submission_service.build_summary_markdown(
+            schema, total_cost_usd, cost_report
+        ),
     }
     # C10: strip host usernames from every absolute /Users|home/<user>/...
     # path before this leaves the platform -- the raw versions are fine in

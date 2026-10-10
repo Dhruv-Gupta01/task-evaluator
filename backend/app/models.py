@@ -77,3 +77,13 @@ class LlmSpend(Base):
     n_cache_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     n_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Added for the evidence cost report. All nullable: rows recorded before
+    # these existed show them as "not recorded" instead of being wiped.
+    agent: Mapped[str | None] = mapped_column(String, nullable=True)  # harness, e.g. codex
+    reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
+    trial_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    detail: Mapped[str | None] = mapped_column(String, nullable=True)  # what this call was for
+    n_cache_write_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Per-unit billing (GPTZero is per word, not per token).
+    unit: Mapped[str | None] = mapped_column(String, nullable=True)
+    unit_count: Mapped[int | None] = mapped_column(Integer, nullable=True)

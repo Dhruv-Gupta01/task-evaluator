@@ -2,7 +2,7 @@ import json
 import math
 import re
 
-from app.models import Run, Submission
+from app.models import LlmSpend, Run, Submission
 from app.schemas import (
     AgentTrialsResult,
     BuildResult,
@@ -297,7 +297,79 @@ def _fmt_status(status: str) -> str:
     )
 
 
-def build_summary_markdown(schema: SubmissionSchema, total_cost_usd: float | None) -> str:
+def build_cost_report(rows: list[LlmSpend]) -> dict:
+    """Every recorded spend row for a submission, plus totals grouped by stage
+    and by model and by stage+model. Fields a row was recorded without (older
+    rows, or evaluators where Harbor reports only a cost) are null, never
+    guessed. Costs are USD; GPTZero is converted from its INR per-word price
+    at the configured rate and carries its word count in unit/unit_count."""
+    ordered = sorted(rows, key=lambda r: (r.created_at, r.id))
+
+    def _group(field_names: tuple, key) -> list[dict]:
+        groups: dict[tuple, dict] = {}
+        for r in ordered:
+            g = groups.setdefault(
+                key(r),
+                {"calls": 0, "cost_usd": 0.0, "input_tokens": 0, "cached_tokens": 0,
+                 "cache_write_tokens": 0, "output_tokens": 0, "tokens_missing_for": 0},
+            )
+            g["calls"] += 1
+            g["cost_usd"] += r.cost_usd
+            if r.n_input_tokens is None and r.n_output_tokens is None:
+                g["tokens_missing_for"] += 1
+            g["input_tokens"] += r.n_input_tokens or 0
+            g["cached_tokens"] += r.n_cache_tokens or 0
+            g["cache_write_tokens"] += r.n_cache_write_tokens or 0
+            g["output_tokens"] += r.n_output_tokens or 0
+        return [
+            {**dict(zip(field_names, k)), **g, "cost_usd": round(g["cost_usd"], 6)}
+            for k, g in groups.items()
+        ]
+
+    by_stage = _group(("stage",), lambda r: (r.stage,))
+    by_model = _group(("model",), lambda r: (r.model,))
+    by_stage_model = _group(("stage", "model"), lambda r: (r.stage, r.model))
+
+    return {
+        "currency": "USD",
+        "total_usd": round(sum(r.cost_usd for r in ordered), 6),
+        "n_records": len(ordered),
+        "by_stage": by_stage,
+        "by_model": by_model,
+        "by_stage_and_model": by_stage_model,
+        "records": [
+            {
+                "recorded_at": r.created_at.isoformat(),
+                "stage": r.stage,
+                "detail": r.detail,
+                "trial": r.trial_index,
+                "model": r.model,
+                "agent_or_harness": r.agent,
+                "reasoning_effort": r.reasoning_effort,
+                "input_tokens": r.n_input_tokens,
+                "cached_tokens": r.n_cache_tokens,
+                "cache_write_tokens": r.n_cache_write_tokens,
+                "output_tokens": r.n_output_tokens,
+                "unit": r.unit,
+                "unit_count": r.unit_count,
+                "cost_usd": round(r.cost_usd, 6),
+            }
+            for r in ordered
+        ],
+        "notes": [
+            "Agent trials, the cheat trial and its check, Failure Analysis and Rubric Check "
+            "report cost from Harbor; evaluator runs report no token counts, so those are null.",
+            "Judge calls (Sufficiency, Review Report) are priced from token usage; a model not "
+            "in the price table is listed with cost 0 and flagged in `detail`.",
+            "A trial that crashed before Harbor reported a cost has no record, so it is absent.",
+            "Rows recorded before this report existed have null agent/effort/trial/detail.",
+        ],
+    }
+
+
+def build_summary_markdown(
+    schema: SubmissionSchema, total_cost_usd: float | None, cost_report: dict | None = None
+) -> str:
     """C8: a README/summary rendered straight from already-verified run data
     -- no LLM call, so every field is a real value or an explicit "not run
     yet" / "not recorded" -- never a [fill] placeholder ship. Used by
@@ -381,4 +453,9 @@ def build_summary_markdown(schema: SubmissionSchema, total_cost_usd: float | Non
         f"- Total recorded LLM spend for this submission: "
         + (f"${total_cost_usd:.4f}" if total_cost_usd is not None else "not recorded"),
     ]
+    if cost_report and cost_report["records"]:
+        lines += ["", "| Stage | Model | Calls | Cost (USD) |", "|---|---|---|---|"]
+        for g in sorted(cost_report["by_stage_and_model"], key=lambda g: g["stage"]):
+            lines.append(f"| {g['stage']} | {g['model']} | {g['calls']} | ${g['cost_usd']:.4f} |")
+        lines.append("- Full per-call breakdown: see `cost` in the evidence JSON.")
     return "\n".join(lines) + "\n"

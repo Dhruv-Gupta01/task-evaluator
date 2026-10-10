@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     # scripts/check_ai_detection.py) -- empty means that check no-ops
     # (prints a warning, passes) rather than erroring.
     gptzero_api_key: str | None = None
+    # GPTZero bills per word, not per token. Defaults are the plan used so far
+    # (Rs 4,262 per 300,000 words) and the INR/USD rate used in the cost sheets;
+    # edit both in .env when the plan or the exchange rate changes.
+    gptzero_inr_per_word: float = 0.014207
+    usd_inr_rate: float = 96.9
 
     # Defaults applied when a task.toml omits a section
     default_cpus: float = 1.0

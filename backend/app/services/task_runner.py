@@ -216,7 +216,9 @@ def _track_llm_spend(db, submission_id: str, stage: str):
     try:
         yield
     finally:
-        budget.record_calls(db, submission_id, stage, calls)
+        budget.record_calls(
+            db, submission_id, stage, calls, reasoning_effort=settings.llm_reasoning_effort
+        )
 
 
 def _get_or_create_run(db, submission_id: str, kind: str, run_index: int = 0) -> Run:
@@ -527,6 +529,10 @@ async def _retry_infra_agent_failures(
                 budget.record(
                     db, submission_id, "agent_trials", model, outcome.cost_usd,
                     outcome.n_input_tokens, outcome.n_cache_tokens, outcome.n_output_tokens,
+                    agent=agent,
+                    reasoning_effort=agent_kwargs.get("reasoning_effort"),
+                    trial_index=run.run_index + 1,
+                    detail="automatic infra retry of this trial",
                 )
             if outcome.reward is None:
                 run.status = "failed"
@@ -616,6 +622,10 @@ async def run_agent_trials(
                     outcome.n_input_tokens,
                     outcome.n_cache_tokens,
                     outcome.n_output_tokens,
+                    agent=agent,
+                    reasoning_effort=agent_kwargs.get("reasoning_effort"),
+                    trial_index=pending[0].run_index + 1 if pending else None,
+                    detail="agent trial" + ("" if outcome.reward is not None else " (no reward: crashed or cut short)"),
                 )
             if pending:
                 run = pending.pop(0)
@@ -962,6 +972,23 @@ async def run_ai_detection_stage(submission_id: str) -> None:
             run.status = "passed" if result.passed else "failed"
             run.reward = 1 if result.passed else 0
 
+        gptzero_words = None
+        if result.ran and not result.skipped and not result.error:
+            # GPTZero bills per word, and the vendored script sends both files whole.
+            gptzero_words = 0
+            for rel in ("instruction.md", "solution/solve.sh"):
+                f = Path(submission.extracted_path) / rel
+                if f.is_file():
+                    gptzero_words += len(f.read_text(errors="replace").split())
+            budget.record(
+                db, submission_id, "ai_detection", "gptzero",
+                budget.gptzero_cost_usd(gptzero_words), None, None, None,
+                agent="GPTZero API",
+                detail="instruction.md + solution/solve.sh, billed per word in INR",
+                unit="words",
+                unit_count=gptzero_words,
+            )
+
         run.logs = json.dumps(
             {
                 "skipped": result.skipped if result.ran else None,
@@ -969,6 +996,7 @@ async def run_ai_detection_stage(submission_id: str) -> None:
                 "output": result.output if result.ran else None,
                 "error": result.error,
                 "api_key_configured": bool(settings.gptzero_api_key),
+                "words_billed": gptzero_words,
             }
         )
         run.finished_at = datetime.now(UTC)
@@ -1105,6 +1133,9 @@ async def run_failure_analysis(submission_id: str, rubric: str = "default") -> N
                 budget.record(
                     db, submission_id, "failure_analysis", settings.analyze_model,
                     outcome.cost_usd, None, None, None,
+                    agent=settings.analyze_agent,
+                    reasoning_effort=settings.analyze_reasoning_effort,
+                    detail=f"harbor analyze of {job_dir.name}",
                 )
 
         job_summary = None
@@ -1215,6 +1246,10 @@ async def run_cheat_trial(
                     db, submission_id, "cheat_trial", model,
                     outcome.cost_usd, outcome.n_input_tokens, outcome.n_cache_tokens,
                     outcome.n_output_tokens,
+                    agent=agent,
+                    reasoning_effort=agent_kwargs.get("reasoning_effort"),
+                    trial_index=1,
+                    detail="cheat trial (agent told to cheat)",
                 )
             return None
 
@@ -1262,6 +1297,9 @@ async def run_cheat_trial(
                     budget.record(
                         db, submission_id, "cheat_trial", settings.analyze_model,
                         analyze_outcome.cost_usd, None, None, None,
+                        agent=settings.analyze_agent,
+                        reasoning_effort=settings.analyze_reasoning_effort,
+                        detail="reward-hacking check on the cheat trial",
                     )
                 results = (analyze_outcome.report or {}).get("results") or []
                 check = (results[0].get("checks") or {}).get("reward_hacking") if results else None
@@ -1362,6 +1400,9 @@ async def run_rubric_check(submission_id: str, rubric: str = "default") -> None:
             budget.record(
                 db, submission_id, "rubric_check", settings.check_model,
                 outcome.cost_usd, None, None, None,
+                agent=settings.check_agent,
+                reasoning_effort=settings.check_reasoning_effort,
+                detail=f"harbor check, {rubric or 'default'} rubric",
             )
 
         results = (outcome.report or {}).get("results") or []
