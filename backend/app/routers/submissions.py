@@ -270,6 +270,12 @@ async def trigger_review_report(submission_id: str, db: Session = Depends(get_db
     return {"status": "started"}
 
 
+@router.get("/agents")
+def get_agent_models() -> dict[str, str]:
+    """The model each agent choice in the UI will actually run, from .env."""
+    return {a: task_runner._agent_model(a) for a in ("codex", "claude-code")}
+
+
 @router.get("/budget")
 def get_budget(db: Session = Depends(get_db)) -> dict[str, float]:
     """This calendar month's tracked LLM spend against LLM_BUDGET_USD (0 = no cap)."""

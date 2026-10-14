@@ -5,6 +5,7 @@ import { ArrowLeft, AlertTriangle } from "lucide-react";
 import {
   api,
   AGENT_CHOICES,
+  agentLabel,
   REASONING_EFFORTS,
   RUBRIC_CHOICES,
   CHEAT_PROMPT_CHOICES,
@@ -119,11 +120,17 @@ function SubmissionDetail() {
   const [analysisRubric, setAnalysisRubric] = useState<RubricChoice>("default");
   const [checkRubric, setCheckRubric] = useState<RubricChoice>("default");
   const [agentChoice, setAgentChoice] = useState<AgentChoice>("codex");
+  const { data: agentModels } = useQuery({
+    queryKey: ["agent-models"],
+    queryFn: api.getAgentModels,
+    staleTime: 60_000,
+  });
   const mAgent = useMutation({
     mutationFn: () =>
       api.agentTrials(id, n, effort === "default" ? undefined : effort, agentChoice),
     onSuccess: () => {
-      const label = AGENT_CHOICES.find((a) => a.value === agentChoice)?.label ?? agentChoice;
+      const choice = AGENT_CHOICES.find((a) => a.value === agentChoice);
+      const label = choice ? agentLabel(choice, agentModels) : agentChoice;
       toast.success(
         `Agent trials (${label}, n=${n}, reasoning ${effort === "default" ? "server default" : effort}) started`,
       );
@@ -425,7 +432,7 @@ function SubmissionDetail() {
               <SelectContent>
                 {AGENT_CHOICES.map((a) => (
                   <SelectItem key={a.value} value={a.value}>
-                    {a.label}
+                    {agentLabel(a, agentModels)}
                   </SelectItem>
                 ))}
               </SelectContent>

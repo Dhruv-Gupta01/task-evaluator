@@ -241,11 +241,21 @@ export const CHEAT_PROMPT_CHOICES = [
 export type CheatPromptChoice = (typeof CHEAT_PROMPT_CHOICES)[number]["value"];
 
 // Agents a run of trials can use; the backend picks each one's model from .env
-// (codex: AGENT_MODEL, claude-code: CLAUDE_AGENT_MODEL).
+// (codex: AGENT_MODEL, claude-code: CLAUDE_AGENT_MODEL). The model shown next
+// to each name comes from GET /agents, never hard-coded, so it can't go stale.
 export const AGENT_CHOICES = [
-  { value: "codex", label: "Codex · GPT-6 Astra" },
-  { value: "claude-code", label: "Claude Code · Fable 5.1" },
+  { value: "codex", label: "Codex" },
+  { value: "claude-code", label: "Claude Code" },
 ] as const;
+
+/** "Codex · gpt-6-luna" from the backend's LiteLLM model string ("openai/gpt-6-luna"). */
+export function agentLabel(
+  choice: { value: string; label: string },
+  models?: Record<string, string>,
+): string {
+  const model = models?.[choice.value]?.split("/").pop();
+  return model ? `${choice.label} · ${model}` : choice.label;
+}
 export type AgentChoice = (typeof AGENT_CHOICES)[number]["value"];
 
 export interface Submission {
@@ -290,6 +300,8 @@ async function handle<T>(res: Response): Promise<T> {
 }
 
 export const api = {
+  getAgentModels: () =>
+    fetch(`${API_BASE_URL}/agents`).then(handle<Record<string, string>>),
   listSubmissions: () =>
     fetch(`${API_BASE_URL}/submissions`).then(handle<SubmissionListItem[]>),
   getSubmission: (id: string) =>
