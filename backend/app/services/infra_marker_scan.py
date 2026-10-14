@@ -15,6 +15,13 @@ _INFRA_MARKERS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bEAI_AGAIN\b"), "DNS resolution failure (EAI_AGAIN)"),
     (re.compile(r"ConnectionResetError|ConnectionRefusedError", re.I), "connection reset/refused"),
     (re.compile(r"503 Service Unavailable", re.I), "upstream 503"),
+    # Agent setup downloads (Codex install via nvm/npm/apt) failing inside the trial
+    # before the agent ran at all.
+    (re.compile(r"NetworkConnectionError"), "network error while setting up the agent"),
+    (
+        re.compile(r"NonZeroAgentExitCodeError[\s\S]{0,300}apt-get (update|install)", re.I),
+        "apt install failed while setting up the agent",
+    ),
     (re.compile(r"docker\.errors\.(ImageNotFound|APIError)", re.I), "Docker orchestration error (not a task-logic failure)"),
 ]
 

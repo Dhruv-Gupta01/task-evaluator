@@ -153,6 +153,10 @@ def host_env_for_subprocess(extra: dict[str, str] | None = None) -> dict[str, st
     env = {k: v for k, v in os.environ.items() if k != "TZ"}
     if extra:
         env.update(extra)
+    # Harbor prints emoji through rich; a Windows console defaults to cp1252 and
+    # `harbor analyze`/`check` crash with UnicodeEncodeError before doing any work.
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
     return env
 
 

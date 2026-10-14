@@ -36,6 +36,9 @@ export interface ChecksumInfo {
   canonical: string | null;
   consistent: boolean | null;
   mismatched: string[];
+  // Trials whose task copy the platform extended on purpose (Codex baked into the
+  // image); excluded from the comparison above.
+  not_comparable?: string[];
 }
 
 export interface AgentTrialsResult {

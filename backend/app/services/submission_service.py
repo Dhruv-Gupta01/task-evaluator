@@ -3,6 +3,7 @@ import math
 import re
 
 from app.models import LlmSpend, Run, Submission
+from app.services.harbor_runner import CODEX_BAKE_NOTE_MARKER
 from app.schemas import (
     AgentTrialsResult,
     BuildResult,
@@ -192,18 +193,26 @@ def _checksum_info(submission: Submission) -> ChecksumInfo:
     until at least one comparable run has reported a checksum."""
     canonical = submission.task_checksum
     mismatched: list[str] = []
+    not_comparable: list[str] = []
     seen_any = False
     for r in submission.runs:
         if r.kind not in ("oracle", "nop", "agent") or not r.task_checksum:
             continue
+        label = r.kind if r.kind == "nop" else f"{r.kind}#{r.run_index}"
+        # A trial with Codex baked into its task copy ran a Dockerfile the
+        # platform itself had extended (and date-stamped), so Harbor's checksum
+        # differs from the other stages by design, not because the task changed.
+        if CODEX_BAKE_NOTE_MARKER in (r.logs or ""):
+            not_comparable.append(label)
+            continue
         seen_any = True
         if canonical and r.task_checksum != canonical:
-            label = r.kind if r.kind == "nop" else f"{r.kind}#{r.run_index}"
             mismatched.append(label)
     return ChecksumInfo(
         canonical=canonical,
         consistent=(len(mismatched) == 0) if seen_any else None,
         mismatched=mismatched,
+        not_comparable=not_comparable,
     )
 
 

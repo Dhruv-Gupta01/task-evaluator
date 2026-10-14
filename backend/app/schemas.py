@@ -164,6 +164,10 @@ class ChecksumInfo(BaseModel):
     canonical: str | None = None
     consistent: bool | None = None
     mismatched: list[str] = []
+    # Trials left out of the comparison because the platform changed their task
+    # copy on purpose (Codex baked into the Dockerfile), so their checksum
+    # legitimately differs. They are not evidence either way.
+    not_comparable: list[str] = []
 
 
 class SubmissionSchema(BaseModel):

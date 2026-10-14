@@ -249,7 +249,8 @@ def _record_checksum(
     the others and must never become -- or be compared against -- the
     canonical version."""
     run.task_checksum = task_checksum
-    if update_canonical and task_checksum and not submission.task_checksum:
+    baked = harbor_runner.CODEX_BAKE_NOTE_MARKER in (run.logs or "")
+    if update_canonical and not baked and task_checksum and not submission.task_checksum:
         submission.task_checksum = task_checksum
 
 

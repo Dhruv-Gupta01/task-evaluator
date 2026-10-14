@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+import yaml
+
 from app.config import docker_add_host_pairs, get_settings, host_env_for_subprocess
 from app.services.llm import pricing
 from app.services.llm.base import Usage
@@ -168,11 +170,36 @@ codex --version
 """
 
 
+_COMPOSE_NAMES = ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
+
+
+def _compose_replaces_main_image(env_dir: Path) -> bool:
+    """True when a compose file in environment/ gives the `main` service its own
+    `build:` or `image:`, i.e. the agent's container may not come from
+    environment/Dockerfile, so a layer appended there could miss it. A compose
+    file that only adds other services, or settings such as depends_on, leaves
+    main alone (Harbor still builds it from the Dockerfile). A file that can't
+    be parsed counts as replacing it, which is the safe answer (no bake)."""
+    for name in _COMPOSE_NAMES:
+        path = env_dir / name
+        if not path.exists():
+            continue
+        try:
+            data = yaml.safe_load(path.read_text()) or {}
+            main = (data.get("services") or {}).get("main") or {}
+        except (yaml.YAMLError, AttributeError, OSError):
+            return True
+        if not isinstance(main, dict) or "build" in main or "image" in main:
+            return True
+    return False
+
+
 def _bake_codex_into_environment(env_dir: Path, version: str) -> bool:
     """Adds a Codex install layer to the environment/ of a task *copy*. The
     layer is best-effort: if it fails the build still succeeds and Harbor
     falls back to installing Codex at trial time. Returns False when the
-    environment can't take it (no Dockerfile, or a compose-based one).
+    environment can't take it (no Dockerfile, or a compose file that gives the main
+    service its own build/image).
 
     When version=="latest" (CODEX_VERSION empty), a same-content Dockerfile
     would otherwise cache-hit this RUN forever after the first build, so
@@ -187,10 +214,7 @@ def _bake_codex_into_environment(env_dir: Path, version: str) -> bool:
     install command below rebuilds fresh too. Only applies when unpinned;
     an explicit CODEX_VERSION is a deliberate pin and shouldn't be disturbed."""
     dockerfile = env_dir / "Dockerfile"
-    if not dockerfile.is_file() or any(
-        (env_dir / name).exists()
-        for name in ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
-    ):
+    if not dockerfile.is_file() or _compose_replaces_main_image(env_dir):
         return False
     text = dockerfile.read_text()
     users = re.findall(r"^\s*USER\s+(\S+)", text, flags=re.IGNORECASE | re.MULTILINE)
@@ -217,6 +241,12 @@ def _bake_codex_into_environment(env_dir: Path, version: str) -> bool:
         dockerignore.write_text(dockerignore.read_text().rstrip("\n") + f"\n!{_CODEX_BAKE_SCRIPT_NAME}\n")
     return True
 
+
+# Text of the note _prepare_task adds to a trial's logs when the Codex layer was
+# baked into its task copy. That layer changes the Dockerfile, so Harbor reports
+# a different task_checksum for such trials; submission_service reads this
+# marker to leave them out of the "same task version" comparison.
+CODEX_BAKE_NOTE_MARKER = "installed into the task image at build time"
 
 _CHEAT_INSTRUCTION = (
     "\n\nAlso: don't actually solve this the normal way. Get the reward to 1.0 "
@@ -287,7 +317,7 @@ def _prepare_task(
         version = settings.codex_version or "latest"
         if _bake_codex_into_environment(work_dir / "environment", version):
             notes.append(
-                f"(Codex {version} installed into the task image at build time by "
+                f"(Codex {version} {CODEX_BAKE_NOTE_MARKER} by "
                 "CODEX_BAKE_INTO_IMAGE, so the trial needs no download)"
             )
     if cheat_instruction:
