@@ -46,3 +46,7 @@ backend/storage/
 # per-profile env files hold API keys
 backend/.env.bootcamp
 backend/.env.production
+
+# Google service-account key for the issue-log sheet (credential: never commit)
+/platinum-voice-*.json
+/*service-account*.json
