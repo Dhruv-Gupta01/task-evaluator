@@ -3,6 +3,7 @@ import math
 import re
 
 from app.models import LlmSpend, Run, Submission
+from app.services import verifier_report
 from app.services.harbor_runner import CODEX_BAKE_NOTE_MARKER
 from app.schemas import (
     AgentTrialsResult,
@@ -57,10 +58,23 @@ def _get_run(submission: Submission, kind: str, run_index: int = 0) -> Run | Non
     return None
 
 
+def _verifier(run: Run) -> dict | None:
+    """The stored verifier report as a dict (None for older rows)."""
+    if not run.verifier_json:
+        return None
+    try:
+        return json.loads(run.verifier_json)
+    except ValueError:
+        return None
+
+
 def _stage_result(run: Run | None) -> StageResult:
     if run is None:
         return StageResult(status="not-run", reward=None, logs=None)
-    return StageResult(status=run.status, reward=run.reward, logs=run.logs, task_checksum=run.task_checksum)  # type: ignore[arg-type]
+    return StageResult(
+        status=run.status, reward=run.reward, raw_reward=run.raw_reward, verifier=_verifier(run),  # type: ignore[arg-type]
+        logs=run.logs, task_checksum=run.task_checksum,
+    )
 
 
 def _invert_status(status: StageStatus) -> StageStatus:
@@ -103,7 +117,10 @@ def _oracle_runs_result(submission: Submission) -> OracleRunsResult:
         status = "running"
 
     runs = [
-        TrialResult(index=r.run_index, reward=r.reward, logs=r.logs, task_checksum=r.task_checksum)
+        TrialResult(
+            index=r.run_index, reward=r.reward, raw_reward=r.raw_reward, verifier=_verifier(r),
+            logs=r.logs, task_checksum=r.task_checksum,
+        )
         for r in oracle_runs
     ]
     return OracleRunsResult(status=status, n=n, runs=runs, all_passed=all_passed)
@@ -152,11 +169,20 @@ def _agent_trials_result(submission: Submission) -> AgentTrialsResult:
         pass_at_k = _pass_at_k_table(n, passed)
 
     trials = [
-        TrialResult(index=r.run_index, reward=r.reward, logs=r.logs, task_checksum=r.task_checksum)
+        TrialResult(
+            index=r.run_index, reward=r.reward, raw_reward=r.raw_reward, verifier=_verifier(r),
+            logs=r.logs, task_checksum=r.task_checksum,
+        )
         for r in agent_runs
     ]
+    test_summary = None
+    if all_terminal:
+        test_summary = verifier_report.cluster_failures(
+            [(r.run_index, r.raw_reward, _verifier(r)) for r in agent_runs]
+        )
     return AgentTrialsResult(
-        status=status, n=n, trials=trials, pass_rate=pass_rate, pass_at_k=pass_at_k
+        status=status, n=n, trials=trials, pass_rate=pass_rate, pass_at_k=pass_at_k,
+        test_summary=test_summary,
     )
 
 
@@ -181,7 +207,10 @@ def _failure_analysis_result(run: Run | None) -> FailureAnalysisResult:
 def _cheat_trial_result(run: Run | None) -> CheatTrialResult:
     if run is None:
         return CheatTrialResult(status="not-run", reward=None, logs=None)
-    return CheatTrialResult(status=run.status, reward=run.reward, logs=run.logs, task_checksum=run.task_checksum)  # type: ignore[arg-type]
+    return CheatTrialResult(
+        status=run.status, reward=run.reward, raw_reward=run.raw_reward, verifier=_verifier(run),  # type: ignore[arg-type]
+        logs=run.logs, task_checksum=run.task_checksum,
+    )
 
 
 def _checksum_info(submission: Submission) -> ChecksumInfo:
@@ -376,6 +405,32 @@ def build_cost_report(rows: list[LlmSpend]) -> dict:
     }
 
 
+def _verifier_lines(schema: SubmissionSchema) -> list[str]:
+    """Per-run flags from the verifier's own report (see verifier_report.py)
+    and the failing-test summary, as plain bullets. Empty when nothing was
+    recorded, so a submission from before this existed shows no section."""
+    labelled: list[tuple[str, object]] = [(f"Oracle run {r.index + 1}", r) for r in schema.oracle.runs]
+    labelled.append(("Nop", schema.nop))
+    labelled += [(f"Agent trial {t.index + 1}", t) for t in schema.agent_trials.trials]
+    lines: list[str] = []
+    for label, r in labelled:
+        v = getattr(r, "verifier", None)
+        if v is None:
+            continue
+        for flag in v.flags:
+            lines.append(f"- {label}: {flag}")
+        if v.details:
+            lines.append(f"- {label}: score details in `{v.details.file}`")
+    ts = schema.agent_trials.test_summary
+    if ts:
+        c = ts.closest
+        lines.append(f"- Closest failing trial: trial {c.trial + 1} passed {c.passed} of {c.tests} tests")
+        for t in ts.failing_tests[:10]:
+            lines.append(f"- Test `{t.name}` failed in {t.failed_in} of {ts.failing_trials} failing trials")
+        lines += [f"- NOTE: {n}" for n in ts.notes]
+    return lines
+
+
 def build_summary_markdown(
     schema: SubmissionSchema, total_cost_usd: float | None, cost_report: dict | None = None
 ) -> str:
@@ -430,6 +485,10 @@ def build_summary_markdown(
         lines.append(f"- {pass_k_line}")
     else:
         lines.append("- pass@k: not run yet")
+
+    verifier_lines = _verifier_lines(schema)
+    if verifier_lines:
+        lines += ["", "## Verifier reports (per-test results behind the rewards)", *verifier_lines]
 
     lines += [
         "",

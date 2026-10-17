@@ -6,9 +6,36 @@ from pydantic import BaseModel
 StageStatus = Literal["pending", "running", "passed", "failed", "not-run"]
 
 
+class CtrfSummary(BaseModel):
+    tests: int
+    passed: int
+    failed: int
+    skipped: int
+    other: int = 0
+    failed_names: list[str] = []
+    skipped_names: list[str] = []
+
+
+class VerifierDetails(BaseModel):
+    file: str
+    content: str
+
+
+class VerifierReport(BaseModel):
+    """What the verifier's own files said about one trial (advisory evidence;
+    see services/verifier_report.py). `flags` lists places where the reward and
+    the tests behind it disagree, or where no per-test record exists."""
+    reward_raw: float | None = None
+    ctrf: CtrfSummary | None = None
+    details: VerifierDetails | None = None
+    flags: list[str] = []
+
+
 class StageResult(BaseModel):
     status: StageStatus
     reward: int | None = None  # 0 | 1 | null
+    raw_reward: float | None = None  # Harbor's exact reward; reward is 1 only at >= 1.0
+    verifier: VerifierReport | None = None
     logs: str | None = None
     task_checksum: str | None = None
 
@@ -22,8 +49,32 @@ class BuildResult(BaseModel):
 class TrialResult(BaseModel):
     index: int
     reward: int | None = None
+    raw_reward: float | None = None
+    verifier: VerifierReport | None = None
     logs: str | None = None
     task_checksum: str | None = None
+
+
+class FailingTest(BaseModel):
+    name: str
+    failed_in: int
+
+
+class ClosestTrial(BaseModel):
+    trial: int
+    passed: int
+    tests: int
+
+
+class TestSummary(BaseModel):
+    """Across the failing trials of one agent job: which tests they failed and
+    how close the best one came. A single test failed by every failing trial is
+    the typical shape of an over-strict grader or an unstated rule, so it is
+    called out in `notes` (a human decides)."""
+    failing_trials: int
+    failing_tests: list[FailingTest]
+    closest: ClosestTrial
+    notes: list[str] = []
 
 
 class AgentTrialsResult(BaseModel):
@@ -37,6 +88,7 @@ class AgentTrialsResult(BaseModel):
     # Harbor itself), every k is always present here once all trials are
     # terminal; null while any trial is still running/pending.
     pass_at_k: dict[str, float] | None = None
+    test_summary: TestSummary | None = None
 
 
 class OracleRunsResult(BaseModel):
@@ -98,6 +150,8 @@ class CheatTrialResult(BaseModel):
     error} | null}."""
     status: StageStatus
     reward: int | None = None
+    raw_reward: float | None = None
+    verifier: VerifierReport | None = None
     logs: str | None = None
     # Recorded for audit, but never compared to the submission's canonical
     # checksum -- this trial's task copy always has an intentionally edited

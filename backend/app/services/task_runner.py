@@ -31,6 +31,22 @@ from app.services.task_config import TaskConfig
 settings = get_settings()
 
 
+
+def _apply_trial_outcome(run: Run, outcome: "harbor_runner.TrialOutcome") -> None:
+    """Fill a Harbor-backed run's reward fields from a trial. `reward` stays
+    the 0/1 the gates use (anything below 1.0 counts as a failure); the exact
+    reward and the verifier's per-test report are kept beside it so a 0.73 or
+    a 17-of-18 near miss is not lost."""
+    run.raw_reward = outcome.reward
+    run.verifier_json = json.dumps(outcome.report) if outcome.report else None
+    if outcome.reward is None:
+        run.status = "failed"
+        run.reward = None
+    else:
+        run.reward = 1 if outcome.reward >= 1.0 else 0
+        run.status = "passed" if run.reward == 1 else "failed"
+
+
 def _get_task_config(submission: Submission) -> TaskConfig:
     if submission.task_config_json:
         return TaskConfig.model_validate_json(submission.task_config_json)
@@ -346,6 +362,8 @@ async def run_oracle_trials(submission_id: str, n: int) -> None:
         for run in runs:
             run.status = "running"
             run.reward = None
+            run.raw_reward = None
+            run.verifier_json = None
             run.logs = None
             run.started_at = datetime.now(UTC)
             db.commit()
@@ -358,12 +376,7 @@ async def run_oracle_trials(submission_id: str, n: int) -> None:
                 timeout_sec,
             )
             # The gate needs a perfect 1.0; any partial reward counts as 0.
-            if outcome.reward is None:
-                run.status = "failed"
-                run.reward = None
-            else:
-                run.reward = 1 if outcome.reward >= 1.0 else 0
-                run.status = "passed" if run.reward == 1 else "failed"
+            _apply_trial_outcome(run, outcome)
             run.logs = outcome.logs
             _record_checksum(submission, run, outcome.task_checksum)
             run.finished_at = datetime.now(UTC)
@@ -412,6 +425,8 @@ async def _run_harbor_gate(submission_id: str, kind: str) -> None:
         run = _get_or_create_run(db, submission_id, kind)
         run.status = "running"
         run.reward = None
+        run.raw_reward = None
+        run.verifier_json = None
         run.logs = None
         run.started_at = datetime.now(UTC)
         db.commit()
@@ -437,12 +452,7 @@ async def _run_harbor_gate(submission_id: str, kind: str) -> None:
         )
 
         # The gate needs a perfect 1.0; any partial reward counts as 0.
-        if result.reward is None:
-            run.status = "failed"
-            run.reward = None
-        else:
-            run.reward = 1 if result.reward >= 1.0 else 0
-            run.status = "passed" if run.reward == 1 else "failed"
+        _apply_trial_outcome(run, result)
         run.logs = result.logs
         _record_checksum(submission, run, result.task_checksum)
         run.finished_at = datetime.now(UTC)
@@ -535,12 +545,7 @@ async def _retry_infra_agent_failures(
                     trial_index=run.run_index + 1,
                     detail="automatic infra retry of this trial",
                 )
-            if outcome.reward is None:
-                run.status = "failed"
-                run.reward = None
-            else:
-                run.reward = 1 if outcome.reward >= 1.0 else 0
-                run.status = "passed" if run.reward == 1 else "failed"
+            _apply_trial_outcome(run, outcome)
             run.logs = f"{header}\n{outcome.logs}"
             _record_checksum(submission, run, outcome.task_checksum)
         else:
@@ -630,12 +635,7 @@ async def run_agent_trials(
                 )
             if pending:
                 run = pending.pop(0)
-                if outcome.reward is None:
-                    run.status = "failed"
-                    run.reward = None
-                else:
-                    run.reward = 1 if outcome.reward >= 1.0 else 0
-                    run.status = "passed" if run.reward == 1 else "failed"
+                _apply_trial_outcome(run, outcome)
                 run.logs = outcome.logs
                 _record_checksum(submission, run, outcome.task_checksum)
                 run.finished_at = datetime.now(UTC)
@@ -1277,6 +1277,8 @@ async def run_cheat_trial(
         if outcome_holder:
             outcome = outcome_holder[0]
             run.reward = 1 if (outcome.reward is not None and outcome.reward >= 1.0) else outcome.reward
+            run.raw_reward = outcome.reward
+            run.verifier_json = json.dumps(outcome.report) if outcome.report else None
             cheat_check: dict | None = None
             if run.reward == 1:
                 # reward=1 alone can't say cheated vs. refused-and-solved-honestly

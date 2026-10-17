@@ -48,6 +48,12 @@ class Run(Base):
 
     status: Mapped[str] = mapped_column(String, default="pending")
     reward: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Harbor's exact reward (reward above is the 0/1 the gates use: anything
+    # below 1.0 counts as 0), and what the verifier's own report said about
+    # it (services/verifier_report.py, JSON). Both null for rows recorded
+    # before these existed and for stages that are not Harbor trials.
+    raw_reward: Mapped[float | None] = mapped_column(Float, nullable=True)
+    verifier_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     logs: Mapped[str | None] = mapped_column(Text, nullable=True)
     container_id: Mapped[str | None] = mapped_column(String, nullable=True)
     # Harbor's own dirhash of the task dir this run actually executed

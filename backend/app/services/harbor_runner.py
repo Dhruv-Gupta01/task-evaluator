@@ -19,6 +19,7 @@ from pathlib import Path
 import yaml
 
 from app.config import docker_add_host_pairs, get_settings, host_env_for_subprocess
+from app.services import verifier_report
 from app.services.llm import pricing
 from app.services.llm.base import Usage
 
@@ -88,6 +89,10 @@ class TrialOutcome:
     # version" is read from Harbor's own ground truth per trial rather than
     # assumed from a requested/pinned setting like CODEX_VERSION.
     agent_version: str | None = None
+    # What the verifier's own files said (services/verifier_report.py): per-
+    # test results, a score-details sidecar, and flags where the reward and
+    # the tests disagree. None when the trial never reached grading.
+    report: dict | None = None
 
 
 @dataclass
@@ -509,6 +514,10 @@ def _parse_trial(
         task_checksum=result.get("task_checksum"),
         agent_version=agent_version,
     )
+    try:
+        outcome.report = verifier_report.read_verifier_report(trial_dir / "verifier", reward)
+    except Exception:  # advisory evidence must never break reading a trial
+        outcome.report = None
 
     if outcome.cost_usd is None and outcome.n_input_tokens is not None and model:
         # Not every agent reports cost; price the tokens ourselves when we can.
@@ -534,6 +543,8 @@ def _parse_trial(
         f"=== REWARD ===\n{reward if reward is not None else '(none)'}",
         f"=== LLM USAGE ===\n{_usage_line(outcome)}",
     ]
+    if outcome.report:
+        sections.append(f"=== VERIFIER REPORT ===\n{verifier_report.summary_lines(outcome.report)}")
     exception = result.get("exception_info")
     if exception:
         sections.append(

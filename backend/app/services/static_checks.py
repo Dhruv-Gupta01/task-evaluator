@@ -109,6 +109,8 @@ _MKDIR_LOGS_RE = re.compile(r"mkdir\s+-p\s+/logs/verifier")
 _CTRF_RE = re.compile(r"--ctrf\b")
 _RC_CAPTURE_RE = re.compile(r'rc=\$\?')
 _TRAILING_EXIT_RE = re.compile(r"\nexit\s+\d+\s*$")
+# A line that writes to reward.txt: `echo 1 > .../reward.txt`, `printf "%s" "$x" > ...`
+_REWARD_WRITE_RE = re.compile(r"^\s*(?:echo|printf)\b(?P<arg>[^>\n]*)>>?\s*\S*reward\.txt", re.M)
 
 
 def check_test_sh(test_sh_path: Path, report: StaticCheckReport) -> None:
@@ -130,6 +132,8 @@ def check_test_sh(test_sh_path: Path, report: StaticCheckReport) -> None:
         else:
             report.add(name, "warn", ok_message.replace("present", "missing") + ".")
 
+    _check_reward_values(text, report)
+
     if _TRAILING_EXIT_RE.search(text.rstrip() + "\n"):
         report.add(
             "test_sh_no_trailing_exit",
@@ -139,6 +143,36 @@ def check_test_sh(test_sh_path: Path, report: StaticCheckReport) -> None:
         )
     else:
         report.add("test_sh_no_trailing_exit", "info", "No unconditional trailing exit code.")
+
+
+def _check_reward_values(text: str, report: StaticCheckReport) -> None:
+    """Terminal-Bench needs reward.txt to hold exactly 0 or 1. A literal like
+    0.75 is a sure miss; a computed value cannot be judged by reading the
+    script, so it is only mentioned."""
+    args = [m.group("arg").strip().strip("\"'") for m in _REWARD_WRITE_RE.finditer(text)]
+    if not args:
+        report.add(
+            "test_sh_reward_binary",
+            "warn",
+            "No `echo`/`printf ... > reward.txt` line found; could not check that the reward is exactly 0 or 1.",
+        )
+        return
+    bad = [a for a in args if re.fullmatch(r"-?\d+(\.\d+)?", a) and a not in ("0", "1")]
+    if bad:
+        report.add(
+            "test_sh_reward_binary",
+            "fail",
+            f"test.sh writes {', '.join(repr(a) for a in bad)} to reward.txt; "
+            "Terminal-Bench requires exactly 0 or 1 (put detail in ctrf.json or reward-details.json).",
+        )
+    elif all(a in ("0", "1") for a in args):
+        report.add("test_sh_reward_binary", "info", "reward.txt is written with literal 0/1 values only.")
+    else:
+        report.add(
+            "test_sh_reward_binary",
+            "info",
+            "reward.txt is written from a variable or computed value; check by reading the script that it can only be 0 or 1.",
+        )
 
 
 _DIGEST_PIN_RE = re.compile(r"^FROM\s+\S+@sha256:[0-9a-f]{64}", re.M | re.I)

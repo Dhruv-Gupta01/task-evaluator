@@ -22,6 +22,8 @@ import {
   type TbStaticCheckReport,
   type AiDetectionReport,
   type AnalysisCheck,
+  type AgentTrialsResult,
+  type VerifierReport,
 } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogPanel } from "@/components/LogPanel";
@@ -368,6 +370,7 @@ function SubmissionDetail() {
                         }
                       />
                     </div>
+                    <VerifierLine rawReward={r.raw_reward} verifier={r.verifier} />
                     {r.logs && (
                       <div className="mt-2">
                         <LogPanel logs={r.logs} title={`Run #${r.index} logs`} />
@@ -396,6 +399,7 @@ function SubmissionDetail() {
             disabled={!buildReady}
             disabledReason="Build the image first"
           />
+          <VerifierLine rawReward={data.nop.raw_reward} verifier={data.nop.verifier} />
           <LogPanel logs={data.nop.logs} title="Nop logs" />
         </StageCard>
 
@@ -486,6 +490,9 @@ function SubmissionDetail() {
                     ))}
                 </div>
               )}
+              {data.agent_trials.test_summary && (
+                <TestSummaryBlock summary={data.agent_trials.test_summary} />
+              )}
               <ul className="divide-y divide-border">
                 {data.agent_trials.trials.map((t) => (
                   <li key={t.index} className="px-3 py-2">
@@ -501,6 +508,7 @@ function SubmissionDetail() {
                         }
                       />
                     </div>
+                    <VerifierLine rawReward={t.raw_reward} verifier={t.verifier} />
                     {t.logs && (
                       <div className="mt-2">
                         <LogPanel logs={t.logs} title={`Trial #${t.index} logs`} />
@@ -1164,6 +1172,81 @@ function PageShell({ children }: { children: React.ReactNode }) {
         </Link>
         {children}
       </div>
+    </div>
+  );
+}
+
+function VerifierLine({
+  rawReward,
+  verifier,
+}: {
+  rawReward?: number | null;
+  verifier?: VerifierReport | null;
+}) {
+  const ctrf = verifier?.ctrf;
+  const flags = verifier?.flags ?? [];
+  const nonBinary = rawReward != null && rawReward !== 0 && rawReward !== 1;
+  if (!ctrf && flags.length === 0 && !nonBinary) return null;
+  return (
+    <div className="mt-1 flex flex-col gap-1 text-xs">
+      {(ctrf || nonBinary) && (
+        <div className="text-muted-foreground">
+          {nonBinary && <span className="font-mono">raw reward {rawReward} · </span>}
+          {ctrf && (
+            <span>
+              tests: <span className="font-mono">{ctrf.passed}/{ctrf.tests}</span> passed
+              {ctrf.failed > 0 && `, ${ctrf.failed} failed`}
+              {ctrf.skipped > 0 && `, ${ctrf.skipped} skipped`}
+              {ctrf.failed_names.length > 0 && (
+                <span title={ctrf.failed_names.join("\n")}>
+                  {" "}— failed: <span className="font-mono">{ctrf.failed_names.slice(0, 3).join(", ")}</span>
+                  {ctrf.failed_names.length > 3 && ` +${ctrf.failed_names.length - 3} more`}
+                </span>
+              )}
+            </span>
+          )}
+        </div>
+      )}
+      {flags.map((f) => (
+        <div
+          key={f}
+          className="flex items-start gap-1.5 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-amber-700 dark:text-amber-400"
+        >
+          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+          <span>{f}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TestSummaryBlock({
+  summary,
+}: {
+  summary: NonNullable<AgentTrialsResult["test_summary"]>;
+}) {
+  const c = summary.closest;
+  return (
+    <div className="flex flex-col gap-1 border-b border-border px-3 py-2 text-xs text-muted-foreground">
+      <div>
+        Closest failing trial: #{c.trial} passed{" "}
+        <span className="font-mono">{c.passed}/{c.tests}</span> tests.
+      </div>
+      {summary.failing_tests.slice(0, 5).map((t) => (
+        <div key={t.name}>
+          <span className="font-mono">{t.name}</span> failed in {t.failed_in} of{" "}
+          {summary.failing_trials} failing trials
+        </div>
+      ))}
+      {summary.notes.map((n) => (
+        <div
+          key={n}
+          className="flex items-start gap-1.5 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-amber-700 dark:text-amber-400"
+        >
+          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+          <span>{n} (advisory: check the instruction and that test)</span>
+        </div>
+      ))}
     </div>
   );
 }

@@ -28,10 +28,18 @@ def _add_missing_llm_spend_columns() -> None:
             conn.execute(text(f"ALTER TABLE llm_spend ADD COLUMN IF NOT EXISTS {name} {sql_type}"))
 
 
+def _add_missing_run_columns() -> None:
+    """Same for runs: the verifier-report columns, nullable, no data loss."""
+    with engine.begin() as conn:
+        for name, sql_type in (("raw_reward", "DOUBLE PRECISION"), ("verifier_json", "TEXT")):
+            conn.execute(text(f"ALTER TABLE runs ADD COLUMN IF NOT EXISTS {name} {sql_type}"))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     _add_missing_llm_spend_columns()
+    _add_missing_run_columns()
     docker_orchestrator.reap_orphans()
     task_runner.reset_stuck_rows()
     yield

@@ -4,9 +4,32 @@ export const API_BASE_URL =
 
 export type StageStatus = "pending" | "running" | "passed" | "failed" | "not-run";
 
+// What the verifier's own files said about one trial (advisory evidence, see
+// backend services/verifier_report.py). `flags` lists places where the reward
+// and the tests behind it disagree, or where no per-test record exists.
+export interface CtrfSummary {
+  tests: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  other: number;
+  failed_names: string[];
+  skipped_names: string[];
+}
+
+export interface VerifierReport {
+  reward_raw: number | null;
+  ctrf: CtrfSummary | null;
+  details: { file: string; content: string } | null;
+  flags: string[];
+}
+
 export interface StageResult {
   status: StageStatus;
   reward: 0 | 1 | null;
+  // Harbor's exact reward; `reward` is 1 only at >= 1.0, so 0.73 shows here.
+  raw_reward?: number | null;
+  verifier?: VerifierReport | null;
   logs?: string;
   task_checksum?: string | null;
 }
@@ -20,6 +43,8 @@ export interface BuildResult {
 export interface TrialResult {
   index: number;
   reward: 0 | 1 | null;
+  raw_reward?: number | null;
+  verifier?: VerifierReport | null;
   logs?: string;
   task_checksum?: string | null;
 }
@@ -50,6 +75,15 @@ export interface AgentTrialsResult {
   // by k as a string. Harbor's own job-level reporting only ever fills
   // powers-of-2/multiples-of-5 -- pass@1 is never computed by Harbor itself.
   pass_at_k: Record<string, number> | null;
+  // Across the failing trials: which tests they failed and how close the best
+  // one came. A single test failed by every failing trial is the typical
+  // shape of an over-strict grader or an unstated rule (`notes`).
+  test_summary?: {
+    failing_trials: number;
+    failing_tests: { name: string; failed_in: number }[];
+    closest: { trial: number; passed: number; tests: number };
+    notes: string[];
+  } | null;
 }
 
 // Oracle can be run N times, always appended to the ones already there (Gate
@@ -121,6 +155,8 @@ export interface FailureAnalysis {
 export interface CheatTrialResult {
   status: StageStatus;
   reward: 0 | 1 | null;
+  raw_reward?: number | null;
+  verifier?: VerifierReport | null;
   logs?: string;
   // Recorded for audit only -- never compared against ChecksumInfo.canonical.
   // This trial's task copy always has an intentionally edited instruction.md.
