@@ -9,6 +9,9 @@ and notice a reward that disagrees with the tests behind it.
 Everything here is advisory evidence for a human; nothing gates a stage."""
 
 import json
+import platform
+import tomllib
+from datetime import datetime
 from pathlib import Path
 
 MAX_NAMES = 50
@@ -90,6 +93,78 @@ def _flags(reward: float | None, ctrf: dict | None) -> list[str]:
     return flags
 
 
+# Harbor's own defaults when task.toml names no limit.
+DEFAULT_LIMIT_SEC = 600.0
+# Share of a limit that counts as "close to it".
+NEAR_LIMIT = 0.8
+# What the trial's own output says when the CPU architecture is the problem.
+ARCH_SIGNATURES = ("exec format error", "illegal instruction", "cannot execute binary file")
+
+
+def _seconds(span: object) -> float | None:
+    """Seconds between a result.json {started_at, finished_at} pair."""
+    if not isinstance(span, dict) or not span.get("started_at") or not span.get("finished_at"):
+        return None
+    try:
+        start = datetime.fromisoformat(span["started_at"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(span["finished_at"].replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return round((end - start).total_seconds(), 1)
+
+
+def read_run_facts(result: dict, task_toml: Path | None, docker_platform: str) -> dict:
+    """How the trial was run: limits, time used, resources, architecture and
+    which users ran the agent and the verifier. Facts only; `flags` judges them."""
+    try:
+        task = tomllib.loads(task_toml.read_text()) if task_toml else {}
+    except (OSError, ValueError):
+        task = {}
+    env = task.get("environment") or {}
+    cfg = result.get("config") or {}
+    cfg_env = cfg.get("environment") or {}
+    return {
+        "agent_seconds": _seconds(result.get("agent_execution")),
+        "agent_limit_sec": float((task.get("agent") or {}).get("timeout_sec") or DEFAULT_LIMIT_SEC),
+        "verifier_seconds": _seconds(result.get("verifier")),
+        "verifier_limit_sec": float((task.get("verifier") or {}).get("timeout_sec") or DEFAULT_LIMIT_SEC),
+        "cpus": cfg_env.get("override_cpus") or env.get("cpus"),
+        "memory_mb": cfg_env.get("override_memory_mb") or env.get("memory_mb"),
+        "platform": docker_platform or None,
+        "host_arch": platform.machine(),
+        # None means Harbor used the image's own USER (root unless the Dockerfile sets one).
+        "agent_user": (task.get("agent") or {}).get("user") or cfg.get("user_agent"),
+        "verifier_user": (task.get("verifier") or {}).get("user"),
+        "verifier_mode": result.get("verifier_environment_mode"),
+    }
+
+
+def facts_flags(facts: dict, trial_dir: Path) -> list[str]:
+    flags: list[str] = []
+    for label, used, limit in (
+        ("agent", facts["agent_seconds"], facts["agent_limit_sec"]),
+        ("verifier", facts["verifier_seconds"], facts["verifier_limit_sec"]),
+    ):
+        if used is not None and limit and used >= NEAR_LIMIT * limit:
+            flags.append(
+                f"the {label} used {used:g}s of its {limit:g}s limit: a slower machine could "
+                f"push this trial over the limit"
+            )
+    for name in ("verifier/test-stdout.txt", "trial.log"):
+        try:
+            text = (trial_dir / name).read_text(errors="replace").lower()
+        except OSError:
+            continue
+        hit = next((sig for sig in ARCH_SIGNATURES if sig in text), None)
+        if hit:
+            flags.append(
+                f"`{hit}` in {name}: a binary built for another CPU architecture "
+                f"(this run used {facts['platform'] or 'the default platform'} on a {facts['host_arch']} host)"
+            )
+            break
+    return flags
+
+
 def read_verifier_report(verifier_dir: Path, reward: float | None) -> dict | None:
     """None when the trial has no verifier folder at all (crash before grading)."""
     if not verifier_dir.is_dir():
@@ -100,6 +175,7 @@ def read_verifier_report(verifier_dir: Path, reward: float | None) -> dict | Non
         "ctrf": ctrf,
         "details": _read_details(verifier_dir),
         "flags": _flags(reward, ctrf),
+        "facts": None,
     }
 
 
@@ -114,6 +190,20 @@ def summary_lines(report: dict) -> str:
         )
         if ctrf["failed_names"]:
             lines.append("failed: " + ", ".join(ctrf["failed_names"][:10]))
+    facts = report.get("facts")
+    if facts:
+        lines.append(
+            f"time: agent {facts['agent_seconds']}s of {facts['agent_limit_sec']:g}s, "
+            f"verifier {facts['verifier_seconds']}s of {facts['verifier_limit_sec']:g}s"
+        )
+        lines.append(
+            f"resources: cpus {facts['cpus']}, memory {facts['memory_mb']} MB, platform "
+            f"{facts['platform']}, host {facts['host_arch']}"
+        )
+        lines.append(
+            f"users: agent {facts['agent_user'] or 'image default'}, verifier "
+            f"{facts['verifier_user'] or 'image default'}, verifier mode {facts['verifier_mode']}"
+        )
     if report["details"]:
         lines.append(f"score details file: {report['details']['file']}")
     for flag in report["flags"]:

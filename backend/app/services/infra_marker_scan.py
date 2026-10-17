@@ -22,6 +22,9 @@ _INFRA_MARKERS: list[tuple[re.Pattern, str]] = [
         re.compile(r"NonZeroAgentExitCodeError[\s\S]{0,300}apt-get (update|install)", re.I),
         "apt install failed while setting up the agent",
     ),
+    (re.compile(r"no space left on device", re.I), "disk full on the host (no space left on device)"),
+    (re.compile(r"litellm\.(Timeout|APIConnectionError)|APITimeoutError", re.I), "model request timed out or dropped"),
+    (re.compile(r"Cannot connect to the Docker daemon|docker daemon is not running", re.I), "Docker daemon unreachable"),
     (re.compile(r"docker\.errors\.(ImageNotFound|APIError)", re.I), "Docker orchestration error (not a task-logic failure)"),
 ]
 

@@ -223,6 +223,37 @@ def check_dockerfile(dockerfile_path: Path, report: StaticCheckReport) -> None:
         report.add("dockerfile_no_recursive_chmod", "info", "No recursive chmod/chown.")
 
 
+_NATIVE_FLAG_RE = re.compile(r"-m(?:arch|tune|cpu)=native|target-cpu=native|-C\s*target-cpu=native")
+_NATIVE_SCAN_DIRS = ("environment", "solution", "tests")
+
+
+def check_hardware_flags(task_root: Path, report: StaticCheckReport) -> None:
+    """-march=native bakes the build machine's CPU into the binary, so the
+    same task can pass on one host and crash (illegal instruction) or run at a
+    different speed on another."""
+    hits: list[str] = []
+    for sub in _NATIVE_SCAN_DIRS:
+        for path in sorted((task_root / sub).rglob("*")) if (task_root / sub).is_dir() else []:
+            if not path.is_file() or path.stat().st_size > 1_000_000:
+                continue
+            try:
+                text = path.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+            if _NATIVE_FLAG_RE.search(text):
+                hits.append(str(path.relative_to(task_root)))
+    if hits:
+        report.add(
+            "no_native_cpu_flags",
+            "warn",
+            "Machine-specific compiler flag (-march=native / -mtune=native / target-cpu=native) in: "
+            + ", ".join(hits[:10])
+            + ". Results and speed can differ between hosts; use a fixed target.",
+        )
+    else:
+        report.add("no_native_cpu_flags", "info", "No -march=native style flags.")
+
+
 _FORBIDDEN_TOP_LEVEL = {"__MACOSX", ".git", ".DS_Store"}
 
 
@@ -258,6 +289,7 @@ def run_static_checks(task_root: Path) -> StaticCheckReport:
     check_instruction(task_root / "instruction.md", report)
     check_test_sh(task_root / "tests" / "test.sh", report)
     check_dockerfile(task_root / "environment" / "Dockerfile", report)
+    check_hardware_flags(task_root, report)
     check_zip_layout(task_root, report)
     check_rubric(task_root, report)
     return report

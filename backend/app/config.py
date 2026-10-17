@@ -97,6 +97,10 @@ class Settings(BaseSettings):
     # task.toml's [agent] timeout_sec. Terminal-Bench 4.0 uses a flat 8 hours
     # (28800). 0 = respect each task's own value.
     agent_timeout_sec: int = 0
+    # LiteLLM (inside Harbor's Terminus-2) cuts a model call at 600s unless told otherwise.
+    litellm_request_timeout_sec: int = 3600
+    # E.7: a per-trial share of the run cost cap below this is warned about on long-timeout tasks.
+    min_trial_cost_usd: float = 3.0
     # Stops an agent-trials run once its own cost (finished plus in-flight
     # trials) reaches this many USD; 0 disables it. The run is also capped by
     # whatever is left of LLM_BUDGET_USD this month.

@@ -122,6 +122,9 @@ function SubmissionDetail() {
   const [analysisRubric, setAnalysisRubric] = useState<RubricChoice>("default");
   const [checkRubric, setCheckRubric] = useState<RubricChoice>("default");
   const [agentChoice, setAgentChoice] = useState<AgentChoice>("codex");
+  // Empty = the server's AGENT_RUN_BUDGET_USD.
+  const [costCap, setCostCap] = useState("");
+  const [costMode, setCostMode] = useState<"total" | "per_trial">("total");
   const { data: agentModels } = useQuery({
     queryKey: ["agent-models"],
     queryFn: api.getAgentModels,
@@ -129,7 +132,14 @@ function SubmissionDetail() {
   });
   const mAgent = useMutation({
     mutationFn: () =>
-      api.agentTrials(id, n, effort === "default" ? undefined : effort, agentChoice),
+      api.agentTrials(
+        id,
+        n,
+        effort === "default" ? undefined : effort,
+        agentChoice,
+        Number(costCap) > 0 ? Number(costCap) : undefined,
+        costMode,
+      ),
     onSuccess: () => {
       const choice = AGENT_CHOICES.find((a) => a.value === agentChoice);
       const label = choice ? agentLabel(choice, agentModels) : agentChoice;
@@ -455,6 +465,25 @@ function SubmissionDetail() {
                 ))}
               </SelectContent>
             </Select>
+            <label className="text-sm text-muted-foreground">Cost cap $</label>
+            <Input
+              type="number"
+              min={0}
+              step="any"
+              placeholder="default"
+              value={costCap}
+              onChange={(e) => setCostCap(e.target.value)}
+              className="w-24"
+            />
+            <Select value={costMode} onValueChange={(v) => setCostMode(v as "total" | "per_trial")}>
+              <SelectTrigger className="w-32">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="total">for the run</SelectItem>
+                <SelectItem value="per_trial">per trial</SelectItem>
+              </SelectContent>
+            </Select>
             <RunButton
               label="Run Agent Trials"
               runningLabel="Running…"
@@ -465,6 +494,18 @@ function SubmissionDetail() {
               disabledReason="Build the image first"
             />
           </div>
+
+          {Number(costCap) > 0 &&
+            (costMode === "per_trial" ? Number(costCap) : Number(costCap) / n) < MIN_TRIAL_COST_USD && (
+              <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-700 dark:text-amber-400">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>
+                  That is under ${MIN_TRIAL_COST_USD} per trial; real trials have cost $3 to $42, so
+                  the cap may stop them early. The run stops as a whole when the total is reached,
+                  and a single trial can still use more than its share.
+                </span>
+              </div>
+            )}
 
           {data.agent_trials.trials && data.agent_trials.trials.length > 0 && (
             <div className="rounded-md border border-border">
@@ -1176,6 +1217,9 @@ function PageShell({ children }: { children: React.ReactNode }) {
   );
 }
 
+// Matches MIN_TRIAL_COST_USD on the backend.
+const MIN_TRIAL_COST_USD = 3;
+
 function VerifierLine({
   rawReward,
   verifier,
@@ -1186,9 +1230,19 @@ function VerifierLine({
   const ctrf = verifier?.ctrf;
   const flags = verifier?.flags ?? [];
   const nonBinary = rawReward != null && rawReward !== 0 && rawReward !== 1;
-  if (!ctrf && flags.length === 0 && !nonBinary) return null;
+  const facts = verifier?.facts;
+  if (!ctrf && flags.length === 0 && !nonBinary && !facts) return null;
   return (
     <div className="mt-1 flex flex-col gap-1 text-xs">
+      {facts && (
+        <div className="text-muted-foreground">
+          agent {facts.agent_seconds ?? "?"}s of {facts.agent_limit_sec}s · verifier{" "}
+          {facts.verifier_seconds ?? "?"}s of {facts.verifier_limit_sec}s · {facts.platform ?? facts.host_arch}
+          {facts.peak_memory_mb != null && ` · peak memory ${facts.peak_memory_mb}${facts.memory_mb ? ` of ${facts.memory_mb}` : ""} MB`}
+          {" · "}agent user {facts.agent_user ?? "image default"}, verifier user{" "}
+          {facts.verifier_user ?? "image default"}
+        </div>
+      )}
       {(ctrf || nonBinary) && (
         <div className="text-muted-foreground">
           {nonBinary && <span className="font-mono">raw reward {rawReward} · </span>}

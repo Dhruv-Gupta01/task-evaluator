@@ -22,6 +22,21 @@ export interface VerifierReport {
   ctrf: CtrfSummary | null;
   details: { file: string; content: string } | null;
   flags: string[];
+  // How the trial ran (E.1/E.3/E.4/E.8): limits, time used, resources, users.
+  facts?: {
+    agent_seconds: number | null;
+    agent_limit_sec: number;
+    verifier_seconds: number | null;
+    verifier_limit_sec: number;
+    cpus: number | null;
+    memory_mb: number | null;
+    peak_memory_mb?: number | null;
+    platform: string | null;
+    host_arch: string;
+    agent_user: string | null;
+    verifier_user: string | null;
+    verifier_mode: string | null;
+  } | null;
 }
 
 export interface StageResult {
@@ -364,11 +379,21 @@ export const api = {
     ),
   // reasoningEffort / agent undefined = the server's defaults
   // (AGENT_REASONING_EFFORT, HARBOR_AGENT).
-  agentTrials: (id: string, n: number, reasoningEffort?: ReasoningEffort, agent?: AgentChoice) =>
+  // maxCost undefined = AGENT_RUN_BUDGET_USD from .env; costMode says whether
+  // it is the whole run's cap or each trial's share (times n).
+  agentTrials: (
+    id: string,
+    n: number,
+    reasoningEffort?: ReasoningEffort,
+    agent?: AgentChoice,
+    maxCost?: number,
+    costMode?: "total" | "per_trial",
+  ) =>
     fetch(
       `${API_BASE_URL}/submissions/${id}/agent-trials?n=${n}` +
         (reasoningEffort ? `&reasoning_effort=${reasoningEffort}` : "") +
-        (agent ? `&agent=${agent}` : ""),
+        (agent ? `&agent=${agent}` : "") +
+        (maxCost ? `&max_cost_usd=${maxCost}&cost_mode=${costMode ?? "total"}` : ""),
       { method: "POST" },
     ).then(handle<unknown>),
   // rubric "default" is omitted from the query string; "tb" swaps in the

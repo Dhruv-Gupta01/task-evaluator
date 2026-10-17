@@ -29,6 +29,7 @@ class VerifierReport(BaseModel):
     ctrf: CtrfSummary | None = None
     details: VerifierDetails | None = None
     flags: list[str] = []
+    facts: dict | None = None  # how the trial ran: limits, time used, resources, users
 
 
 class StageResult(BaseModel):

@@ -128,6 +128,8 @@ async def trigger_agent_trials(
     append: bool = False,
     reasoning_effort: str | None = None,
     agent: str | None = None,
+    max_cost_usd: float | None = None,
+    cost_mode: str = "total",
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
     """Runs n agent trials. By default they replace any earlier trials;
@@ -135,7 +137,11 @@ async def trigger_agent_trials(
     reasoning_effort sets the agent's reasoning level for these trials only
     (default: AGENT_REASONING_EFFORT from .env). agent picks codex (AGENT_MODEL),
     claude-code (CLAUDE_AGENT_MODEL) or terminus-2 for these trials only
-    (default: HARBOR_AGENT)."""
+    (default: HARBOR_AGENT). max_cost_usd caps this run's cost instead of
+    AGENT_RUN_BUDGET_USD: cost_mode "total" is the whole run, "per_trial" means
+    max_cost_usd x n for the run (the job stops when that total is reached; a
+    single trial is not cut off on its own, except Claude Code, which enforces
+    its share itself). The monthly budget still applies on top."""
     if agent is not None and agent not in task_runner.AGENTS:
         raise HTTPException(
             status_code=400, detail=f"agent must be one of {', '.join(task_runner.AGENTS)}"
@@ -145,6 +151,10 @@ async def trigger_agent_trials(
             status_code=400,
             detail=f"reasoning_effort must be one of {', '.join(task_runner.REASONING_EFFORTS)}",
         )
+    if cost_mode not in ("total", "per_trial"):
+        raise HTTPException(status_code=400, detail="cost_mode must be total or per_trial")
+    if max_cost_usd is not None and not 0 < max_cost_usd <= 10_000:
+        raise HTTPException(status_code=400, detail="max_cost_usd must be between 0 and 10000")
     if n < 1 or n > settings.max_agent_trials:
         raise HTTPException(
             status_code=400, detail=f"n must be between 1 and {settings.max_agent_trials}"
@@ -166,8 +176,10 @@ async def trigger_agent_trials(
         db.add(Run(submission_id=submission_id, kind="agent", run_index=run_index, status="pending"))
     db.commit()
 
+    run_cap = max_cost_usd * n if max_cost_usd and cost_mode == "per_trial" else max_cost_usd
     await task_queue.submit(
-        f"{submission_id}:agent", task_runner.run_agent_trials(submission_id, n, append, reasoning_effort, agent)
+        f"{submission_id}:agent",
+        task_runner.run_agent_trials(submission_id, n, append, reasoning_effort, agent, run_cap),
     )
     return {"status": "started"}
 

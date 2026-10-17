@@ -140,11 +140,29 @@ def _agent_timeout_sec(config: TaskConfig) -> float:
     return settings.agent_timeout_sec or config.agent.timeout_sec
 
 
-def _run_cost_cap(db) -> tuple[float | None, str]:
+def _cost_cap_warning(cap_usd: float | None, label: str, n: int, timeout_sec: float) -> str:
+    """E.7: a cap that gives each trial less than a realistic trial costs will
+    stop long-timeout runs early and make the stop look like a task result."""
+    if not cap_usd or n < 1 or timeout_sec < 3600:
+        return ""
+    share = cap_usd / n
+    if share >= settings.min_trial_cost_usd:
+        return ""
+    return (
+        f"(WARNING: cost cap ${cap_usd:.2f} ({label}) over {n} trial(s) is ${share:.2f} each, below "
+        f"${settings.min_trial_cost_usd:.2f}; with a {timeout_sec / 3600:g} h agent timeout a trial can cost more "
+        "than that and may be stopped early by the cap, not by the task)"
+    )
+
+
+def _run_cost_cap(db, requested_usd: float | None = None) -> tuple[float | None, str]:
     """The tightest dollar limit for one agent-trials run: the per-run budget
-    and what's left of this month's budget."""
+    (the amount set in the UI for this run, else AGENT_RUN_BUDGET_USD) and
+    what's left of this month's budget, which the UI can lower but never raise."""
     caps: list[tuple[float, str]] = []
-    if settings.agent_run_budget_usd > 0:
+    if requested_usd:
+        caps.append((requested_usd, "the cost cap set for this run"))
+    elif settings.agent_run_budget_usd > 0:
         caps.append((settings.agent_run_budget_usd, "AGENT_RUN_BUDGET_USD"))
     if settings.llm_budget_usd > 0:
         remaining = max(settings.llm_budget_usd - budget.spent_this_month(db), 0.0)
@@ -562,6 +580,7 @@ async def run_agent_trials(
     append: bool = False,
     reasoning_effort: str | None = None,
     agent: str | None = None,
+    max_cost_usd: float | None = None,
 ) -> None:
     """n trials of an LLM agent via one `harbor run` job. Harbor runs the
     agent inside the task container and only copies tests/ in afterwards to
@@ -644,7 +663,7 @@ async def run_agent_trials(
             reason = budget.exceeded_message(db)
             return f"skipped: {reason}" if reason and pending else None
 
-        cost_cap_usd, cost_cap_label = _run_cost_cap(db)
+        cost_cap_usd, cost_cap_label = _run_cost_cap(db, max_cost_usd)
         if agent == "claude-code" and cost_cap_usd is not None:
             # The watchdog can't read Claude Code's cost while it runs (its
             # session log stays in the container), so each trial also gets its
@@ -664,6 +683,7 @@ async def run_agent_trials(
             cost_cap_usd=cost_cap_usd,
             cost_cap_label=cost_cap_label,
             on_trial=on_trial,
+            extra_note=_cost_cap_warning(cost_cap_usd, cost_cap_label, n, _agent_timeout_sec(config)),
         )
 
         for run in pending:  # trials that never produced a result

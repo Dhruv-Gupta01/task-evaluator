@@ -19,7 +19,7 @@ from pathlib import Path
 import yaml
 
 from app.config import docker_add_host_pairs, get_settings, host_env_for_subprocess
-from app.services import verifier_report
+from app.services import infra_marker_scan, verifier_report
 from app.services.llm import pricing
 from app.services.llm.base import Usage
 
@@ -484,8 +484,76 @@ def _live_cost_from_container(trial_dir: Path, model: str | None) -> float | Non
     return None
 
 
+def _probe_container(trial_dir: Path) -> dict | None:
+    """Blocking (docker CLI); run it in a thread. Reads the trial container's
+    cgroup memory counters and Docker's OOMKilled flag while it is still alive:
+    Harbor removes the container when the trial ends. Returns None when there
+    is no container or the counters are not available."""
+    project = trial_dir.name.lower()
+    try:
+        ids = subprocess.run(
+            ["docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project={project}"],
+            capture_output=True, text=True, timeout=20,
+        ).stdout.split()
+        probe: dict = {}
+        for cid in ids:
+            state = subprocess.run(
+                ["docker", "inspect", "-f", "{{.State.OOMKilled}}", cid],
+                capture_output=True, text=True, timeout=20,
+            ).stdout.strip()
+            if state == "true":
+                probe["oom_killed"] = True
+            out = subprocess.run(
+                ["docker", "exec", cid, "sh", "-c",
+                 "cat /sys/fs/cgroup/memory.peak 2>/dev/null; echo ---; "
+                 "grep '^oom_kill ' /sys/fs/cgroup/memory.events 2>/dev/null"],
+                capture_output=True, text=True, timeout=20,
+            ).stdout
+            peak_text, _, events = out.partition("---")
+            if peak_text.strip().isdigit():
+                probe["peak_memory_mb"] = max(
+                    probe.get("peak_memory_mb", 0), round(int(peak_text) / 1048576)
+                )
+            if events.strip().startswith("oom_kill"):
+                probe["oom_kills"] = max(probe.get("oom_kills", 0), int(events.split()[1]))
+        return probe or None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _merge_probe(old: dict | None, new: dict | None) -> dict | None:
+    if not new:
+        return old
+    merged = dict(old or {})
+    for key, value in new.items():
+        merged[key] = value if key == "oom_killed" else max(value, merged.get(key, 0))
+    return merged
+
+
+def _apply_probe(outcome: "TrialOutcome", probe: dict | None) -> None:
+    if not probe or outcome.report is None or not outcome.report.get("facts"):
+        return
+    facts = outcome.report["facts"]
+    facts["peak_memory_mb"] = probe.get("peak_memory_mb")
+    limit = facts.get("memory_mb")
+    if probe.get("oom_killed") or probe.get("oom_kills"):
+        outcome.report["flags"].append(
+            "out of memory: the container hit its memory limit and the kernel killed a process"
+            + (f" (limit {limit} MB)" if limit else "")
+            + "; this looks like a task sizing problem, not an agent failure"
+        )
+    elif limit and probe.get("peak_memory_mb") and probe["peak_memory_mb"] >= 0.9 * limit:
+        outcome.report["flags"].append(
+            f"peak memory {probe['peak_memory_mb']} MB is {round(100 * probe['peak_memory_mb'] / limit)}% "
+            f"of the {limit} MB limit"
+        )
+
+
 def _parse_trial(
-    result_path: Path, model: str | None = None, live_costs: dict[Path, float] | None = None
+    result_path: Path,
+    model: str | None = None,
+    live_costs: dict[Path, float] | None = None,
+    task_toml: Path | None = None,
 ) -> TrialOutcome:
     trial_dir = result_path.parent
     result = json.loads(result_path.read_text())
@@ -516,6 +584,23 @@ def _parse_trial(
     )
     try:
         outcome.report = verifier_report.read_verifier_report(trial_dir / "verifier", reward)
+        facts = verifier_report.read_run_facts(result, task_toml, settings.docker_platform)
+        facts_flags = verifier_report.facts_flags(facts, trial_dir)
+        if outcome.report is None:  # crashed before grading: keep the run facts anyway
+            outcome.report = {"reward_raw": reward, "ctrf": None, "details": None, "flags": []}
+        outcome.report["facts"] = facts
+        outcome.report["flags"] += facts_flags
+        # E.6: a trial that ended on a model-request timeout, a full disk or a
+        # Docker error was not decided by the task.
+        exc = result.get("exception_info") or {}
+        infra = infra_marker_scan.scan_trial_logs(
+            f"{exc.get('exception_type', '')} {exc.get('exception_message', '')}\n"
+            + _read_text(trial_dir / "trial.log")
+        )
+        if infra and reward != 1.0:
+            outcome.report["flags"].append(
+                "infrastructure, not the task: " + "; ".join(infra) + " (re-run before trusting this result)"
+            )
     except Exception:  # advisory evidence must never break reading a trial
         outcome.report = None
 
@@ -615,6 +700,7 @@ async def run_job(
     on_trial: Callable[[TrialOutcome], Awaitable[str | None]] | None = None,
     cheat_instruction: bool = False,
     cheat_instruction_text: str | None = None,
+    extra_note: str = "",
 ) -> HarborJobResult:
     """Run `harbor run` with `n_attempts` trials of `agent` against the task
     at `task_root`. If `cost_cap_usd` is set, the job is stopped once the cost
@@ -683,6 +769,7 @@ async def run_job(
             ),
             setup_multiplier_note,
             network_note,
+            extra_note,
         )
         if n
     )
@@ -690,14 +777,24 @@ async def run_job(
     # Harbor doesn't pin a platform; Docker honours this default for builds
     # and runs, keeping Harbor on the same architecture as our own stages.
     env = host_env_for_subprocess(
-        {**_litellm_key_env(), "DOCKER_DEFAULT_PLATFORM": settings.docker_platform}
+        {
+            **_litellm_key_env(),
+            "DOCKER_DEFAULT_PLATFORM": settings.docker_platform,
+            **(
+                {"REQUEST_TIMEOUT": str(settings.litellm_request_timeout_sec)}
+                if settings.litellm_request_timeout_sec
+                else {}
+            ),
+        }
     )
 
     trials: list[TrialOutcome] = []
     seen: set[Path] = set()
     stop_reason: str | None = None
     live_costs: dict[Path, float] = {}
+    probes: dict[Path, dict] = {}
     last_cost_check = 0.0
+    last_probe = 0.0
     loop = asyncio.get_running_loop()
 
     async def collect_finished() -> None:
@@ -707,7 +804,8 @@ async def run_job(
             if result_path in seen:
                 continue
             try:
-                outcome = _parse_trial(result_path, model, live_costs)
+                outcome = _parse_trial(result_path, model, live_costs, task_path / "task.toml")
+                _apply_probe(outcome, probes.get(result_path.parent))
             except (json.JSONDecodeError, OSError):
                 continue  # caught mid-write; pick it up on the next poll
             seen.add(result_path)
@@ -732,6 +830,20 @@ async def run_job(
                 reason = await on_trial(outcome)
                 if reason and stop_reason is None:
                     stop_reason = reason
+
+    async def probe_containers() -> None:
+        nonlocal last_probe
+        if not job_dir.exists() or loop.time() - last_probe < _COST_CHECK_INTERVAL_SEC:
+            return
+        last_probe = loop.time()
+        finished = {p.parent for p in seen}
+        for trial_dir in sorted(d for d in job_dir.iterdir() if d.is_dir()):
+            if trial_dir in finished:
+                continue
+            new = await asyncio.to_thread(_probe_container, trial_dir)
+            merged = _merge_probe(probes.get(trial_dir), new)
+            if merged:
+                probes[trial_dir] = merged
 
     async def check_cost_cap() -> None:
         nonlocal stop_reason, last_cost_check
@@ -782,6 +894,7 @@ async def run_job(
                     await asyncio.wait_for(proc.wait(), timeout=_POLL_INTERVAL_SEC)
                     break
                 except TimeoutError:
+                    await probe_containers()
                     await collect_finished()
                     await check_cost_cap()
                     if stop_reason is not None:
