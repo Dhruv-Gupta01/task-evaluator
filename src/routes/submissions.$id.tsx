@@ -26,6 +26,7 @@ import {
   type VerifierReport,
   type SubmissionChanges,
   type VariantProbe,
+  type EdgeCases,
   type ReviewerDecision,
 } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -80,6 +81,8 @@ function SubmissionDetail() {
         d.sufficiency.status === "pending" ||
         isActive(d.failure_analysis.status) ||
         isActive(d.variant_probe.status) ||
+        isActive(d.weak_probe.status) ||
+        isActive(d.edge_cases.status) ||
         d.build.status === "pending";
       return any ? 2500 : false;
     },
@@ -124,7 +127,9 @@ function SubmissionDetail() {
   const [cheatEffort, setCheatEffort] = useState<ReasoningEffort | "default">("max");
   const [cheatPrompt, setCheatPrompt] = useState<CheatPromptChoice>("default");
   const [analysisRubric, setAnalysisRubric] = useState<RubricChoice>("default");
-  const [checkRubric, setCheckRubric] = useState<RubricChoice>("default");
+  // The richer Terminal-Bench rubric runs the anti-cheat and verification criteria
+  // the default one lacks, so it is pre-selected (the dropdown still offers Default).
+  const [checkRubric, setCheckRubric] = useState<RubricChoice>("tb");
   const [agentChoice, setAgentChoice] = useState<AgentChoice>("codex");
   // Empty = the server's AGENT_RUN_BUDGET_USD.
   const [costCap, setCostCap] = useState("");
@@ -167,6 +172,22 @@ function SubmissionDetail() {
     mutationFn: () => api.variantProbe(id),
     onSuccess: () => {
       toast.success("Valid-variant probe started");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const mWeakProbe = useMutation({
+    mutationFn: () => api.weakProbe(id),
+    onSuccess: () => {
+      toast.success("Weak-answer probe started");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const mEdgeCases = useMutation({
+    mutationFn: () => api.edgeCases(id),
+    onSuccess: () => {
+      toast.success("Edge-case check started");
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -967,6 +988,46 @@ function SubmissionDetail() {
           <VariantProbeView logs={data.variant_probe.logs} />
         </StageCard>
 
+        {/* Weak-answer probe */}
+        <StageCard
+          title="Weak-Answer Probe"
+          description="Is the grader weaker than the instruction? A model breaks one stated rule at a time in the Oracle's answer (up to 6 breakages), and each broken answer runs through the real verifier. It must score 0; a broken answer that still passes means a stated rule is not enforced. Advisory."
+          status={data.weak_probe.status}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <RunButton
+              label="Run Weak-Answer Probe"
+              runningLabel="Probing…"
+              onClick={() => mWeakProbe.mutate()}
+              running={isActive(data.weak_probe.status)}
+              pending={mWeakProbe.isPending}
+              disabled={!buildReady || !data.oracle.runs.some((r) => r.reward === 1)}
+              disabledReason="Build the image and get an Oracle pass first"
+            />
+          </div>
+          <VariantProbeView logs={data.weak_probe.logs} />
+        </StageCard>
+
+        {/* Edge cases */}
+        <StageCard
+          title="Edge-Case Coverage"
+          description="One model call lists the edge cases an expert would handle, from the instruction alone; a second checks each against the hidden tests. An uncovered case is a question for a reviewer, not a verdict. Advisory; no Docker needed."
+          status={data.edge_cases.status}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <RunButton
+              label="Run Edge-Case Check"
+              runningLabel="Checking…"
+              onClick={() => mEdgeCases.mutate()}
+              running={isActive(data.edge_cases.status)}
+              pending={mEdgeCases.isPending}
+              disabled={!validated}
+              disabledReason="Validate the submission first"
+            />
+          </div>
+          <EdgeCasesView logs={data.edge_cases.logs} />
+        </StageCard>
+
         {/* Review Report */}
         <StageCard
           title="Review Report"
@@ -1027,6 +1088,41 @@ function ChangesBanner({ changes }: { changes: SubmissionChanges }) {
   );
 }
 
+function EdgeCasesView({ logs }: { logs?: string }) {
+  if (!logs) return null;
+  let parsed: EdgeCases | null = null;
+  try {
+    parsed = JSON.parse(logs) as EdgeCases;
+  } catch {
+    return <LogPanel logs={logs} title="Edge-case output" />;
+  }
+  return (
+    <div className="space-y-2 text-sm">
+      {parsed.error && (
+        <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs whitespace-pre-wrap">
+          {parsed.error}
+        </div>
+      )}
+      {parsed.cases.map((c, i) => (
+        <div key={i} className="rounded-md border border-border p-3">
+          <div className="flex items-center justify-between gap-2">
+            <span>{c.case}</span>
+            <span
+              className={`text-xs font-medium ${c.covered ? "text-emerald-600" : "text-amber-700 dark:text-amber-400"}`}
+            >
+              {c.covered ? "covered" : "not covered"}
+            </span>
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            Expected: {c.expected}
+            {c.test && <> · test: <span className="font-mono">{c.test}</span></>} — {c.reason}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function VariantProbeView({ logs }: { logs?: string }) {
   if (!logs) return null;
   let parsed: VariantProbe | null = null;
@@ -1053,19 +1149,31 @@ function VariantProbeView({ logs }: { logs?: string }) {
             <span>{v.description}</span>
             <span
               className={`text-xs font-medium ${
-                v.status === "accepted"
+                v.status === "accepted" || v.status === "caught"
                   ? "text-emerald-600"
-                  : v.status === "rejected"
+                  : v.status === "rejected" || v.status === "slipped_through"
                     ? "text-red-600"
                     : "text-muted-foreground"
               }`}
             >
-              {v.status === "did_not_run" ? "did not run" : v.status}
+              {v.status === "did_not_run"
+                ? "did not run"
+                : v.status === "caught"
+                  ? "caught (scored 0)"
+                  : v.status === "slipped_through"
+                    ? "slipped through (scored 1)"
+                    : v.status}
             </span>
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
-            Instruction says: “{v.instruction_quote}”
+            {parsed.mode === "broken" ? "Rule broken" : "Instruction says"}: “{v.instruction_quote}”
           </div>
+          {v.status === "slipped_through" && (
+            <div className="mt-1 text-xs text-red-600 dark:text-red-400">
+              The verifier gave this deliberately broken answer full credit, so the rule above may
+              not be enforced. Check that the edit really breaks it.
+            </div>
+          )}
           {v.status === "rejected" && (
             <div className="mt-1 text-xs text-red-600 dark:text-red-400">
               The verifier rejected this form
@@ -1405,7 +1513,13 @@ function CheatTrialView({ status, logs }: { status: StageStatus; logs?: string }
   const check = parsed.cheat_check;
   return (
     <div className="space-y-3">
-      {parsed.reward !== 1 ? (
+      {parsed.reward !== 1 && parsed.inconclusive ? (
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-700 dark:text-amber-400">
+          Inconclusive — agent did not try: {parsed.inconclusive}. This is not evidence the
+          anti-cheat design held. Run the Cheat Trial again, ideally with a second agent or the
+          TB red-team prompt.
+        </div>
+      ) : parsed.reward !== 1 ? (
         <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-2.5 text-xs text-emerald-700 dark:text-emerald-400">
           The anti-cheat design held: told to cheat, the agent still did not get reward 1.
         </div>

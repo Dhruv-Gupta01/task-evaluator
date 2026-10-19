@@ -13,6 +13,8 @@ from app.schemas import (
     FailureAnalysisResult,
     RubricCheckResult,
     VariantProbeResult,
+    WeakProbeResult,
+    EdgeCasesResult,
     LeakageScanResult,
     OracleRunsResult,
     ReviewReportResult,
@@ -270,6 +272,18 @@ def _variant_probe_result(run: Run | None) -> VariantProbeResult:
     return VariantProbeResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
 
 
+def _weak_probe_result(run: Run | None) -> WeakProbeResult:
+    if run is None:
+        return WeakProbeResult(status="not-run", logs=None)
+    return WeakProbeResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
+
+
+def _edge_cases_result(run: Run | None) -> EdgeCasesResult:
+    if run is None:
+        return EdgeCasesResult(status="not-run", logs=None)
+    return EdgeCasesResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
+
+
 def _reviewer_decisions(run: Run | None) -> dict:
     if run is None or not run.logs:
         return {}
@@ -316,6 +330,8 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         cheat_trial=_cheat_trial_result(_get_run(submission, "cheat_trial")),
         rubric_check=_rubric_check_result(_get_run(submission, "rubric_check")),
         variant_probe=_variant_probe_result(_get_run(submission, "variant_probe")),
+        weak_probe=_weak_probe_result(_get_run(submission, "weak_probe")),
+        edge_cases=_edge_cases_result(_get_run(submission, "edge_cases")),
         reviewer_decisions=_reviewer_decisions(_get_run(submission, "reviewer_decision")),
         static_checks=_static_checks_result(_get_run(submission, "static_checks")),
         tb_static_checks=_tb_static_checks_result(_get_run(submission, "tb_static_checks")),

@@ -451,6 +451,47 @@ async def trigger_variant_probe(submission_id: str, db: Session = Depends(get_db
     return {"status": "started"}
 
 
+@router.post("/submissions/{submission_id}/weak-probe", status_code=202)
+async def trigger_weak_probe(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """Advisory. Up to 6 deliberately broken versions of the Oracle's answer
+    run through the real verifier (one Oracle trial each, sequentially); each
+    must score 0. One that scores 1 means the grader is weaker than the
+    instruction. Needs a passing Oracle run first."""
+    _raise_if_over_budget(db, budget.judge_exceeded_message(db))
+    _require_built_submission(submission_id, db)
+    if db.query(Run).filter_by(submission_id=submission_id, kind="oracle", reward=1).first() is None:
+        raise HTTPException(status_code=400, detail="run the Oracle and get a pass first")
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="weak_probe", run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind="weak_probe", run_index=0)
+        db.add(run)
+    run.status = "pending"
+    db.commit()
+    await task_queue.submit(f"{submission_id}:weak_probe", task_runner.run_weak_probe(submission_id))
+    return {"status": "started"}
+
+
+@router.post("/submissions/{submission_id}/edge-cases", status_code=202)
+async def trigger_edge_cases(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """Advisory. One judge call lists the edge cases an expert would handle
+    (from the instruction alone), a second checks each against the tests.
+    Uncovered cases are findings for a human. No Docker needed."""
+    _raise_if_over_budget(db, budget.judge_exceeded_message(db))
+    submission = db.get(Submission, submission_id)
+    if submission is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if submission.extracted_path is None:
+        raise HTTPException(status_code=400, detail="validate the submission first (files must be extracted)")
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="edge_cases", run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind="edge_cases", run_index=0)
+        db.add(run)
+    run.status = "pending"
+    db.commit()
+    await task_queue.submit(f"{submission_id}:edge_cases", task_runner.run_edge_case_check(submission_id))
+    return {"status": "started"}
+
+
 @router.get("/submissions/{submission_id}/changes")
 def get_changes(submission_id: str, against: str | None = None, db: Session = Depends(get_db)) -> dict:
     """What changed since an earlier upload of the same task: files added,
@@ -649,6 +690,16 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
             "status": schema.variant_probe.status,
             "not_run": schema.variant_probe.status == "not-run",
             "report": _json_or_raw(schema.variant_probe.logs),
+        },
+        "weak_probe": {
+            "status": schema.weak_probe.status,
+            "not_run": schema.weak_probe.status == "not-run",
+            "report": _json_or_raw(schema.weak_probe.logs),
+        },
+        "edge_cases": {
+            "status": schema.edge_cases.status,
+            "not_run": schema.edge_cases.status == "not-run",
+            "report": _json_or_raw(schema.edge_cases.logs),
         },
         "reviewer_decisions": schema.reviewer_decisions,
         "rubric_check": {

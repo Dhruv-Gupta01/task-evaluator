@@ -205,8 +205,27 @@ export interface CheatTrial {
   trial_log?: string | null;
   reward: 0 | 1 | null;
   cheat_check: CheatCheck | null;
-  // "default" (this platform's own directive) or "tb" (vendored red-team prompt).
+  // "default" (this platform's own directive), "tb" (vendored red-team prompt)
+  // or "combined" (a real partial solution plus a shortcut).
   cheat_prompt?: string;
+  // Why a reward below 1 does not show the trap held: the agent never really
+  // tried (few tool calls) or the trial produced no reward. null = it tried.
+  inconclusive?: string | null;
+  tool_calls?: number | null;
+}
+
+// Weak-answer probe and edge-case check (advisory).
+export interface WeakProbeResult {
+  status: StageStatus;
+  logs?: string;
+}
+export interface EdgeCasesResult {
+  status: StageStatus;
+  logs?: string;
+}
+export interface EdgeCases {
+  cases: { case: string; expected: string; covered: boolean; test: string | null; reason: string }[];
+  error?: string;
 }
 
 // Valid-variant probe (advisory). `logs` is JSON (VariantProbe) once run.
@@ -217,7 +236,7 @@ export interface VariantProbeResult {
 export interface VariantEntry {
   description: string;
   instruction_quote: string;
-  status: "accepted" | "rejected" | "did_not_run";
+  status: "accepted" | "rejected" | "caught" | "slipped_through" | "did_not_run";
   reward: number | null;
   failed_tests: string[];
   flags: string[];
@@ -225,6 +244,7 @@ export interface VariantEntry {
 }
 export interface VariantProbe {
   model?: string;
+  mode?: "valid" | "broken";
   reason?: string;
   error?: string;
   in_progress?: boolean;
@@ -348,6 +368,7 @@ export type RubricChoice = (typeof RUBRIC_CHOICES)[number]["value"];
 export const CHEAT_PROMPT_CHOICES = [
   { value: "default", label: "Default" },
   { value: "tb", label: "TB (red-team)" },
+  { value: "combined", label: "Partial solve + shortcut" },
 ] as const;
 export type CheatPromptChoice = (typeof CHEAT_PROMPT_CHOICES)[number]["value"];
 
@@ -384,6 +405,8 @@ export interface Submission {
   cheat_trial: CheatTrialResult;
   rubric_check: RubricCheckResult;
   variant_probe: VariantProbeResult;
+  weak_probe: WeakProbeResult;
+  edge_cases: EdgeCasesResult;
   reviewer_decisions: Record<string, ReviewerDecision>;
   static_checks: StaticChecksResult;
   tb_static_checks: TbStaticChecksResult;
@@ -488,6 +511,10 @@ export const api = {
     fetch(`${API_BASE_URL}/submissions/${id}/variant-probe`, { method: "POST" }).then(
       handle<unknown>,
     ),
+  weakProbe: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/weak-probe`, { method: "POST" }).then(handle<unknown>),
+  edgeCases: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/edge-cases`, { method: "POST" }).then(handle<unknown>),
   changes: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/changes`).then(handle<SubmissionChanges>),
   setReviewerDecision: (id: string, body: { key: string } & ReviewerDecision) =>

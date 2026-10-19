@@ -202,6 +202,24 @@ class VariantProbeResult(BaseModel):
     logs: str | None = None
 
 
+class WeakProbeResult(BaseModel):
+    """Weak-answer probe. Advisory: deliberately broken versions of the Oracle's
+    answer are run through the real verifier and must score 0; one that scores
+    1 ("slipped_through") means the grader is weaker than the instruction.
+    `logs` is JSON like VariantProbeResult's, with status caught|slipped_through
+    |did_not_run per variant and mode "broken"."""
+    status: StageStatus
+    logs: str | None = None
+
+
+class EdgeCasesResult(BaseModel):
+    """Edge-case check. Advisory: cases an expert would handle, from the
+    instruction alone, each marked covered or not by the tests. `logs` is JSON:
+    {cases: [{case, expected, covered, test, reason}], error}."""
+    status: StageStatus
+    logs: str | None = None
+
+
 class RubricCheckResult(BaseModel):
     """`harbor check`: an evaluator agent scores the whole task against
     Harbor's quality rubric (not the agent trials -- see FailureAnalysisResult
@@ -251,6 +269,8 @@ class SubmissionSchema(BaseModel):
     cheat_trial: CheatTrialResult
     rubric_check: RubricCheckResult
     variant_probe: VariantProbeResult
+    weak_probe: WeakProbeResult
+    edge_cases: EdgeCasesResult
     reviewer_decisions: dict[str, dict] = {}
     static_checks: StaticChecksResult
     tb_static_checks: TbStaticChecksResult

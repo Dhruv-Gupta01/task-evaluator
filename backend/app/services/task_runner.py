@@ -13,6 +13,7 @@ from app.db import SessionLocal
 from app.models import Run, Submission
 from app.services import (
     ai_detection,
+    edge_cases,
     budget,
     docker_orchestrator,
     harbor_runner,
@@ -76,7 +77,9 @@ AGENTS = ("codex", "claude-code", "terminus-2")
 # PROVENANCE.md there) -- an alternate, richer rubric a run can opt into,
 # never the default. "default" = Harbor's own built-in rubric/prompt.
 RUBRICS = ("default", "tb")
-CHEAT_PROMPTS = ("default", "tb")
+CHEAT_PROMPTS = ("default", "tb", "combined")
+# Fewer tool calls than this means the agent did not really attempt anything.
+_MIN_CHEAT_TOOL_CALLS = 3
 _TB_PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "vendor" / "tb_prompts"
 _TB_ANALYZE_RUBRIC = _TB_PROMPTS_DIR / "trial-analysis.toml"
 _TB_ANALYZE_PROMPT = _TB_PROMPTS_DIR / "trial-analysis.txt"
@@ -419,8 +422,9 @@ async def run_oracle_trials(submission_id: str, n: int) -> None:
         db.close()
 
 
-async def run_variant_probe(submission_id: str) -> None:
-    """Advisory. A model proposes correct-by-the-instruction variants of the
+async def _run_probe(submission_id: str, kind: str, mode: str) -> None:
+    """Shared by the valid-variant probe (mode "valid") and the weak-answer
+    probe (mode "broken"). Advisory. A model proposes correct-by-the-instruction variants of the
     Oracle's answer (services/variant_probe.py); each is run through the real
     verifier as an Oracle trial on a temporary copy of the task. A variant the
     verifier rejects means the grader accepts fewer forms than the instruction
@@ -432,7 +436,7 @@ async def run_variant_probe(submission_id: str) -> None:
         submission = db.get(Submission, submission_id)
         if submission is None or submission.extracted_path is None:
             return
-        run = _get_or_create_run(db, submission_id, "variant_probe", 0)
+        run = _get_or_create_run(db, submission_id, kind, 0)
         run.status = "running"
         run.reward = None
         run.logs = None
@@ -441,8 +445,8 @@ async def run_variant_probe(submission_id: str) -> None:
 
         task_root = Path(submission.extracted_path)
         try:
-            with _track_llm_spend(db, submission_id, "variant_probe"):
-                proposal = await variant_probe.propose_variants(task_root)
+            with _track_llm_spend(db, submission_id, kind):
+                proposal = await variant_probe.propose_variants(task_root, mode)
         except Exception:
             run.status = "failed"
             run.logs = json.dumps({"error": traceback.format_exc(), "variants": []})
@@ -457,7 +461,7 @@ async def run_variant_probe(submission_id: str) -> None:
             + config.verifier.timeout_sec
             + _HARBOR_TIMEOUT_BUFFER_SEC
         )
-        base = settings.storage_dir / "submissions" / submission_id / "runs" / "variant_probe"
+        base = settings.storage_dir / "submissions" / submission_id / "runs" / kind
         results: list[dict] = []
         for i, variant in enumerate(proposal["variants"]):
             entry = {**variant, "status": "did_not_run", "reward": None, "failed_tests": [], "flags": [], "note": ""}
@@ -479,16 +483,20 @@ async def run_variant_probe(submission_id: str) -> None:
             entry["flags"] = report.get("flags") or []
             if outcome.reward is None:
                 entry["note"] = (outcome.logs or "")[-600:]
+            elif mode == "broken":
+                # reward 1 on a deliberately broken answer is the finding.
+                entry["status"] = "slipped_through" if outcome.reward >= 1.0 else "caught"
             else:
                 entry["status"] = "accepted" if outcome.reward >= 1.0 else "rejected"
             db.refresh(run)
-            run.logs = json.dumps({"model": settings.llm_model, "in_progress": True, "variants": results})
+            run.logs = json.dumps({"model": settings.llm_model, "mode": mode, "in_progress": True, "variants": results})
             db.commit()
 
-        rejected = [r for r in results if r["status"] == "rejected"]
+        rejected = [r for r in results if r["status"] in ("rejected", "slipped_through")]
         run.logs = json.dumps(
             {
                 "model": settings.llm_model,
+                "mode": mode,
                 "reason": proposal["reason"],
                 "dropped": proposal["dropped"],
                 "variants": results,
@@ -500,10 +508,54 @@ async def run_variant_probe(submission_id: str) -> None:
         run.finished_at = datetime.now(UTC)
         db.commit()
     except Exception:
-        run = _get_or_create_run(db, submission_id, "variant_probe", 0)
+        run = _get_or_create_run(db, submission_id, kind, 0)
         run.status = "failed"
         run.reward = None
         run.logs = json.dumps({"error": traceback.format_exc(), "variants": []})
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    finally:
+        db.close()
+
+
+async def run_variant_probe(submission_id: str) -> None:
+    """Is the grader stricter than the instruction? See _run_probe."""
+    await _run_probe(submission_id, "variant_probe", "valid")
+
+
+async def run_weak_probe(submission_id: str) -> None:
+    """Is the grader weaker than the instruction? Deliberately broken versions
+    of the Oracle's answer must score 0; one that scores 1 slipped through."""
+    await _run_probe(submission_id, "weak_probe", "broken")
+
+
+async def run_edge_case_check(submission_id: str) -> None:
+    """Advisory. Edge cases an expert would handle (from the instruction only),
+    each checked against the tests. "failed" means at least one is uncovered."""
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+        run = _get_or_create_run(db, submission_id, "edge_cases", 0)
+        run.status = "running"
+        run.reward = None
+        run.logs = None
+        run.started_at = datetime.now(UTC)
+        db.commit()
+        with _track_llm_spend(db, submission_id, "edge_cases"):
+            result = await edge_cases.run_edge_case_check(Path(submission.extracted_path))
+        uncovered = [c for c in result["cases"] if not c["covered"]]
+        run.logs = json.dumps(result)
+        run.status = "failed" if uncovered or result.get("error") else "passed"
+        run.reward = 0 if run.status == "failed" else 1
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    except Exception:
+        run = _get_or_create_run(db, submission_id, "edge_cases", 0)
+        run.status = "failed"
+        run.reward = None
+        run.logs = json.dumps({"cases": [], "error": traceback.format_exc()})
         run.finished_at = datetime.now(UTC)
         db.commit()
     finally:
@@ -1540,7 +1592,13 @@ async def run_cheat_trial(
             cost_cap_label=cost_cap_label,
             on_trial=on_trial,
             cheat_instruction=True,
-            cheat_instruction_text=_tb_cheat_prompt_text() if cheat_prompt == "tb" else None,
+            cheat_instruction_text=(
+                _tb_cheat_prompt_text()
+                if cheat_prompt == "tb"
+                else harbor_runner.CHEAT_COMBINED_INSTRUCTION
+                if cheat_prompt == "combined"
+                else None
+            ),
         )
 
         if outcome_holder:
@@ -1589,13 +1647,30 @@ async def run_cheat_trial(
                         "cost_usd": analyze_outcome.cost_usd,
                         "error": analyze_outcome.error or "harbor analyze produced no reward_hacking check",
                     }
-            # "passed" whenever the trap held outright (reward != 1), or when
-            # reward=1 but the reward_hacking check positively found no
-            # cheating; anything else (a real finding, or an unresolved
-            # check) stays "failed" so it gets a human's attention.
+            # A reward below 1 only means the trap held if the agent really
+            # tried. A trial with no reward, or one where the agent barely made
+            # a tool call (refused, was blocked, crashed early), tested nothing.
+            inconclusive: str | None = None
+            if run.reward != 1:
+                if outcome.reward is None:
+                    inconclusive = (
+                        "the trial produced no reward (it crashed, timed out or was stopped), "
+                        "so the trap was never tested"
+                    )
+                elif outcome.tool_calls is not None and outcome.tool_calls < _MIN_CHEAT_TOOL_CALLS:
+                    inconclusive = (
+                        f"the agent made only {outcome.tool_calls} tool call(s); it did not really "
+                        "try to cheat, so the trap was never tested"
+                    )
+            # "passed" whenever the trap held outright (reward != 1 and the
+            # agent tried), or when reward=1 but the reward_hacking check
+            # positively found no cheating; anything else (a real finding, an
+            # unresolved check, an inconclusive trial) stays "failed" so it
+            # gets a human's attention.
             run.status = (
                 "passed"
-                if run.reward != 1 or (cheat_check is not None and cheat_check.get("outcome") == "pass")
+                if (run.reward != 1 and inconclusive is None)
+                or (cheat_check is not None and cheat_check.get("outcome") == "pass")
                 else "failed"
             )
             run.logs = json.dumps(
@@ -1604,6 +1679,8 @@ async def run_cheat_trial(
                     "reward": run.reward,
                     "cheat_check": cheat_check,
                     "cheat_prompt": cheat_prompt,
+                    "inconclusive": inconclusive,
+                    "tool_calls": outcome.tool_calls,
                 }
             )
             # Not update_canonical: this trial's task copy always has an

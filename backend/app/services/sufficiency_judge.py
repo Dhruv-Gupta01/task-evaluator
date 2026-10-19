@@ -49,6 +49,16 @@ orientation), report it.
 with the data; report a mismatch.
 - [source] For each expected value in the tests, name the line of the spec or data that justifies \
 it. Report values with no such line.
+- [coverage] List every MUST / MUST NOT / keep / rather-than rule in the instruction and name the \
+test that fails when it is broken. A rule no test enforces is a gap.
+- [loose] How many wrong outputs could the grader still pass (a tolerance, a count threshold, a \
+check on two elements only, a check on types only)? Does any test pass on an empty or unchanged \
+output? Report tests that are looser than the rule they claim to enforce.
+- [trust] Does any test read a result or flag from a file the agent can write? Does the grader \
+measure the real outcome or a modelled shortcut, and does it re-implement the task's own code \
+without a test tying the two together?
+- [fixed-input] Are the test inputs fixed and visible to the agent, so a hard-coded answer \
+would pass?
 - [oracle] Does the reference solution compute its output from the inputs, or does it read from \
 tests/, embed the expected output, or copy a ground-truth file? Only the latter is a gap.
 

@@ -20,6 +20,7 @@ from app.services.llm.base import Message
 from app.services.llm.factory import get_llm_client
 
 MAX_VARIANTS = 4
+MAX_BREAKS = 6
 
 SYSTEM_PROMPT = f"""You help find graders that are stricter than their task instruction. You are \\
 shown a task's instruction.md and its reference solution (solution/). The reference solution \\
@@ -43,18 +44,41 @@ Respond with ONLY JSON:
  "reason": "if no variants, why"}}"""
 
 
+BREAK_PROMPT = f"""You help find graders that are weaker than their task instruction. You are shown a \
+task's instruction.md and its reference solution (solution/), which produces a correct answer.
+
+Propose up to {MAX_BREAKS} deliberately BROKEN versions of the reference solution. Each breaks exactly one \
+rule the instruction states, so a correct grader must reject it. Examples: leave an output empty or \
+truncated, drop items the instruction says to include, add something the instruction forbids, leave \
+one element wrong while the rest is right, weaken a check the instruction requires, skip a required \
+step, or produce the right shape with wrong content.
+Rules:
+- Name the rule being broken by copying the instruction sentence that states it exactly into \
+"instruction_quote". Only break rules the instruction really states.
+- The broken answer must clearly violate that sentence. Do not propose changes that leave the answer \
+correct, and do not break more than one rule at a time.
+- Make the smallest edit that breaks the rule, as exact find/replace pairs on files under solution/. \
+"find" must appear exactly once in that file.
+- Prefer breaks a lenient grader might miss: partial, subtle or single-element breaks over total failure.
+
+Respond with ONLY JSON:
+{{"variants": [{{"description": "which rule is broken and how", "instruction_quote": "exact sentence from instruction.md", \
+"edits": [{{"file": "solution/solve.sh", "find": "exact text", "replace": "new text"}}]}}],
+ "reason": "if none, why"}}"""
+
+
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().lower()
 
 
-async def propose_variants(task_root: Path) -> dict:
+async def propose_variants(task_root: Path, mode: str = "valid") -> dict:
     """{"variants": [...kept...], "dropped": [{"description", "reason"}], "reason": str}."""
     instruction = (task_root / "instruction.md").read_text(errors="replace")
     solution = read_text_files(task_root / "solution") if (task_root / "solution").is_dir() else ""
     client = get_llm_client()
     response = await client.complete(
         [
-            Message(role="system", content=SYSTEM_PROMPT),
+            Message(role="system", content=BREAK_PROMPT if mode == "broken" else SYSTEM_PROMPT),
             Message(
                 role="user",
                 content=f"=== instruction.md ===\n{instruction}\n\n=== solution/ ===\n{solution}\n",
@@ -73,7 +97,7 @@ async def propose_variants(task_root: Path) -> dict:
     kept: list[dict] = []
     dropped: list[dict] = []
     normalized_instruction = _norm(instruction)
-    for raw in (data.get("variants") or [])[:MAX_VARIANTS]:
+    for raw in (data.get("variants") or [])[: MAX_BREAKS if mode == "broken" else MAX_VARIANTS]:
         if not isinstance(raw, dict):
             continue
         description = str(raw.get("description", "variant"))[:300]
