@@ -68,6 +68,24 @@ def _expected_slug(task_root: Path) -> str:
     return task_root.name
 
 
+_CANARY_FAIL_RE = re.compile(r"^FAIL (\S+?):", re.M)
+
+
+def _label_contested_canary(output: str) -> str:
+    """Upstream proposes dropping the canary requirement for environment/ files
+    (issues #2200, #2210) because a canary in a file the agent can read leaks
+    into its context. Until the vendored copy is refreshed, a canary failure
+    that points only at environment/ files is marked contested, not hidden."""
+    failing = _CANARY_FAIL_RE.findall(output)
+    if failing and all("/environment/" in f for f in failing):
+        return (
+            "CONTESTED: every file named below is under environment/, and upstream is discussing "
+            "dropping the canary rule for those files. Treat this as a question for a reviewer, not a "
+            "clear failure.\n" + output
+        )
+    return output
+
+
 def run_tb_static_checks(task_root: Path) -> TbStaticCheckReport:
     """Runs every vendored check-*.sh against task_root, one process each,
     same as Terminal-Bench's own CI does (.github/workflows/static-checks.yml).
@@ -104,5 +122,7 @@ def run_tb_static_checks(task_root: Path) -> TbStaticCheckReport:
             except subprocess.TimeoutExpired:
                 passed = False
                 output = f"timed out after {_TIMEOUT_SEC}s"
+            if not passed and script.stem == "check-canary":
+                output = _label_contested_canary(output)
             report.results.append(TbCheckResult(script.stem, passed, output))
     return report

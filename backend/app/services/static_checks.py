@@ -8,6 +8,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.services.hygiene_checks import _own_files, run_hygiene_checks
+
 Severity = str  # "fail" | "warn" | "info"
 
 
@@ -233,8 +235,8 @@ def check_hardware_flags(task_root: Path, report: StaticCheckReport) -> None:
     different speed on another."""
     hits: list[str] = []
     for sub in _NATIVE_SCAN_DIRS:
-        for path in sorted((task_root / sub).rglob("*")) if (task_root / sub).is_dir() else []:
-            if not path.is_file() or path.stat().st_size > 1_000_000:
+        for path in _own_files(task_root / sub):
+            if path.stat().st_size > 1_000_000:
                 continue
             try:
                 text = path.read_text()
@@ -292,4 +294,5 @@ def run_static_checks(task_root: Path) -> StaticCheckReport:
     check_hardware_flags(task_root, report)
     check_zip_layout(task_root, report)
     check_rubric(task_root, report)
+    run_hygiene_checks(task_root, report)
     return report
