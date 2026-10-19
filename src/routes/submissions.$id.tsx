@@ -24,6 +24,9 @@ import {
   type AnalysisCheck,
   type AgentTrialsResult,
   type VerifierReport,
+  type SubmissionChanges,
+  type VariantProbe,
+  type ReviewerDecision,
 } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogPanel } from "@/components/LogPanel";
@@ -76,6 +79,7 @@ function SubmissionDetail() {
         d.sufficiency.status === "running" ||
         d.sufficiency.status === "pending" ||
         isActive(d.failure_analysis.status) ||
+        isActive(d.variant_probe.status) ||
         d.build.status === "pending";
       return any ? 2500 : false;
     },
@@ -150,13 +154,33 @@ function SubmissionDetail() {
     },
     onError: (e: Error) => toast.error(e.message),
   });
+  const [sufficiencyRuns, setSufficiencyRuns] = useState("1");
   const mSufficiency = useMutation({
-    mutationFn: () => api.sufficiency(id),
+    mutationFn: () => api.sufficiency(id, Number(sufficiencyRuns)),
     onSuccess: () => {
       toast.success("Sufficiency check started");
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
+  });
+  const mVariantProbe = useMutation({
+    mutationFn: () => api.variantProbe(id),
+    onSuccess: () => {
+      toast.success("Valid-variant probe started");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const mDecision = useMutation({
+    mutationFn: (b: { key: string } & ReviewerDecision) => api.setReviewerDecision(id, b),
+    onSuccess: invalidate,
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const { data: changes } = useQuery({
+    queryKey: ["changes", id],
+    queryFn: () => api.changes(id),
+    staleTime: 60_000,
+    retry: false,
   });
   const mLeakageScan = useMutation({
     mutationFn: () => api.leakageScan(id),
@@ -301,6 +325,9 @@ function SubmissionDetail() {
         </div>
       </div>
 
+      {changes?.against && changes.counts && (
+        <ChangesBanner changes={changes} />
+      )}
       {data.checksum.consistent === false && (
         <div className="mb-6 flex items-start gap-2 rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-400">
           <span>
@@ -568,6 +595,24 @@ function SubmissionDetail() {
           description="LLM judge: is instruction.md + environment/ enough to pass the hidden tests?"
           status={data.sufficiency.status}
         >
+          <div className="flex items-center gap-2">
+            <label className="text-sm text-muted-foreground">Judge runs</label>
+            <Select value={sufficiencyRuns} onValueChange={setSufficiencyRuns}>
+              <SelectTrigger className="w-20">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {["1", "2", "3"].map((r) => (
+                  <SelectItem key={r} value={r}>
+                    {r}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <span className="text-xs text-muted-foreground">
+              more runs cost more; the majority decides and disagreement is shown
+            </span>
+          </div>
           <RunButton
             label="Run Sufficiency Check"
             runningLabel="Checking…"
@@ -812,7 +857,11 @@ function SubmissionDetail() {
               disabledReason="Run the agent trials to completion first"
             />
           </div>
-          <AnalysisView logs={data.failure_analysis.logs} />
+          <AnalysisView
+            logs={data.failure_analysis.logs}
+            decisions={data.reviewer_decisions}
+            onDecide={(b) => mDecision.mutate(b)}
+          />
         </StageCard>
 
         {/* Cheat trial */}
@@ -898,6 +947,26 @@ function SubmissionDetail() {
           <RubricCheckView logs={data.rubric_check.logs} />
         </StageCard>
 
+        {/* Valid-variant probe */}
+        <StageCard
+          title="Valid-Variant Probe"
+          description="Is the grader stricter than the instruction? A model proposes other forms of the Oracle's answer that the instruction allows (a number format, the other accepted identifier, an order left free); each runs through the real verifier on a temporary copy of the task. A rejected variant may mean the grader is too strict — or that the variant was not really allowed, so read the quoted sentence. Advisory."
+          status={data.variant_probe.status}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <RunButton
+              label="Run Valid-Variant Probe"
+              runningLabel="Probing…"
+              onClick={() => mVariantProbe.mutate()}
+              running={isActive(data.variant_probe.status)}
+              pending={mVariantProbe.isPending}
+              disabled={!buildReady || !data.oracle.runs.some((r) => r.reward === 1)}
+              disabledReason="Build the image and get an Oracle pass first"
+            />
+          </div>
+          <VariantProbeView logs={data.variant_probe.logs} />
+        </StageCard>
+
         {/* Review Report */}
         <StageCard
           title="Review Report"
@@ -930,7 +999,144 @@ function SubmissionDetail() {
   );
 }
 
-function AnalysisView({ logs }: { logs?: string }) {
+function ChangesBanner({ changes }: { changes: SubmissionChanges }) {
+  const c = changes.counts!;
+  const testsRemoved = changes.tests_removed_count ?? 0;
+  return (
+    <details
+      className={`rounded-md border p-3 text-sm ${
+        testsRemoved > 0
+          ? "border-amber-500/30 bg-amber-500/10"
+          : "border-border bg-muted/40"
+      }`}
+    >
+      <summary className="cursor-pointer">
+        <strong>Changes since the earlier upload</strong> ({changes.against?.slice(0, 8)}): {c.changed}{" "}
+        changed, {c.added} added, {c.removed} removed files · tests removed: {testsRemoved}, added:{" "}
+        {changes.tests_added_count ?? 0}
+        {changes.instruction_words &&
+          ` · instruction ${changes.instruction_words.before ?? "?"} → ${changes.instruction_words.after ?? "?"} words`}
+      </summary>
+      <div className="mt-2 space-y-1 font-mono text-xs">
+        {testsRemoved > 0 && <div>tests removed: {changes.tests_removed?.join(", ")}</div>}
+        {!!changes.changed?.length && <div>changed: {changes.changed.join(", ")}</div>}
+        {!!changes.added?.length && <div>added: {changes.added.join(", ")}</div>}
+        {!!changes.removed?.length && <div>removed: {changes.removed.join(", ")}</div>}
+      </div>
+    </details>
+  );
+}
+
+function VariantProbeView({ logs }: { logs?: string }) {
+  if (!logs) return null;
+  let parsed: VariantProbe | null = null;
+  try {
+    parsed = JSON.parse(logs) as VariantProbe;
+  } catch {
+    return <LogPanel logs={logs} title="Probe output" />;
+  }
+  return (
+    <div className="space-y-2 text-sm">
+      {parsed.error && (
+        <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs whitespace-pre-wrap">
+          {parsed.error}
+        </div>
+      )}
+      {parsed.variants.length === 0 && !parsed.error && (
+        <div className="text-xs text-muted-foreground">
+          No variants proposed{parsed.reason ? `: ${parsed.reason}` : "."}
+        </div>
+      )}
+      {parsed.variants.map((v, i) => (
+        <div key={i} className="rounded-md border border-border p-3">
+          <div className="flex items-center justify-between gap-2">
+            <span>{v.description}</span>
+            <span
+              className={`text-xs font-medium ${
+                v.status === "accepted"
+                  ? "text-emerald-600"
+                  : v.status === "rejected"
+                    ? "text-red-600"
+                    : "text-muted-foreground"
+              }`}
+            >
+              {v.status === "did_not_run" ? "did not run" : v.status}
+            </span>
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            Instruction says: “{v.instruction_quote}”
+          </div>
+          {v.status === "rejected" && (
+            <div className="mt-1 text-xs text-red-600 dark:text-red-400">
+              The verifier rejected this form
+              {v.failed_tests.length > 0 && <>: failed {v.failed_tests.join(", ")}</>}. Check whether
+              the grader is too strict or the variant was not really allowed.
+            </div>
+          )}
+          {v.note && <div className="mt-1 text-xs whitespace-pre-wrap text-muted-foreground">{v.note}</div>}
+        </div>
+      ))}
+      {(parsed.dropped ?? []).map((d, i) => (
+        <div key={`d${i}`} className="text-xs text-muted-foreground">
+          Dropped “{d.description}”: {d.reason}.
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ContestedDecision({
+  clusterKey,
+  decisions,
+  onDecide,
+}: {
+  clusterKey: string;
+  decisions?: Record<string, ReviewerDecision>;
+  onDecide?: (b: { key: string } & ReviewerDecision) => void;
+}) {
+  const current = decisions?.[clusterKey];
+  const [note, setNote] = useState(current?.note ?? "");
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-2 text-foreground">
+      <span className="text-xs">Reviewer decision</span>
+      <Select
+        value={current?.decision ?? ""}
+        onValueChange={(v) =>
+          onDecide?.({ key: clusterKey, decision: v as ReviewerDecision["decision"], note })
+        }
+      >
+        <SelectTrigger className="h-7 w-52 text-xs">
+          <SelectValue placeholder="Not decided" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="grader_wrong">The grader is wrong</SelectItem>
+          <SelectItem value="agent_wrong">The agents were wrong</SelectItem>
+          <SelectItem value="hard_not_ambiguous">Hard, not ambiguous</SelectItem>
+          <SelectItem value="unsure">Unsure</SelectItem>
+        </SelectContent>
+      </Select>
+      <Input
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        onBlur={() =>
+          current && note !== current.note && onDecide?.({ key: clusterKey, decision: current.decision, note })
+        }
+        placeholder="Note"
+        className="h-7 w-56 text-xs"
+      />
+    </div>
+  );
+}
+
+function AnalysisView({
+  logs,
+  decisions,
+  onDecide,
+}: {
+  logs?: string;
+  decisions?: Record<string, ReviewerDecision>;
+  onDecide?: (b: { key: string } & ReviewerDecision) => void;
+}) {
   if (!logs) return null;
   let parsed: FailureAnalysis | null = null;
   try {
@@ -948,6 +1154,91 @@ function AnalysisView({ logs }: { logs?: string }) {
       {parsed.error && (
         <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs whitespace-pre-wrap max-h-48 overflow-y-auto">
           {parsed.error}
+        </div>
+      )}
+      {parsed.classification && (
+        <div className="rounded-md border border-border p-3 text-sm">
+          <div className="mb-1 text-xs font-medium text-muted-foreground">
+            Why the failed trials failed
+          </div>
+          <ul className="space-y-1 text-xs">
+            {parsed.classification.trials.map((t) => (
+              <li key={t.trial}>
+                <span className="font-mono">{t.trial}</span> ·{" "}
+                <span
+                  className={
+                    t.class === "instruction_gap"
+                      ? "font-medium text-amber-700 dark:text-amber-400"
+                      : t.class === "infrastructure"
+                        ? "font-medium text-blue-700 dark:text-blue-400"
+                        : ""
+                  }
+                >
+                  {t.class.replace("_", " ")}
+                </span>{" "}
+                — {t.reason}
+              </li>
+            ))}
+          </ul>
+          {(parsed.classification.clusters ?? []).map((c) => (
+            <div
+              key={c.reading}
+              className="mt-2 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs text-amber-700 dark:text-amber-400"
+            >
+              {c.trials.length} trials made the same alternative choice ({c.label}): {c.reading}
+              <ContestedDecision
+                clusterKey={[...c.trials].sort().join("|")}
+                decisions={decisions}
+                onDecide={onDecide}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+      {parsed.audit && (
+        <div className="rounded-md border border-border p-3 text-xs space-y-2">
+          <div className="text-xs font-medium text-muted-foreground">Audit of passes and the best trial</div>
+          {(parsed.audit.passing ?? [])
+            .filter((p) => p.assumptions?.length)
+            .map((p) => (
+              <div key={p.trial}>
+                <span className="font-mono">{p.trial}</span> passed, but relied on assumptions the
+                instruction does not state:
+                <ul className="ml-4 list-disc">
+                  {p.assumptions.map((a, i) => (
+                    <li key={i}>
+                      <span className="font-mono">{a.test}</span>: {a.assumption}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          {parsed.audit.best_failed && parsed.audit.best_failed.misses?.length > 0 && (
+            <div>
+              Best failing trial <span className="font-mono">{parsed.audit.best_failed.trial}</span>:
+              <ul className="ml-4 list-disc">
+                {parsed.audit.best_failed.misses.map((m, i) => (
+                  <li key={i}>
+                    <span className="font-mono">{m.test}</span>
+                    {m.times && m.times > 1 ? ` (×${m.times})` : ""} ·{" "}
+                    <span
+                      className={
+                        m.ruling === "agent_error" ? "" : "font-medium text-amber-700 dark:text-amber-400"
+                      }
+                    >
+                      {m.ruling.replace("_", " ")}
+                    </span>{" "}
+                    — {m.reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {(parsed.audit.examples ?? []).map((e, i) => (
+            <div key={i} className="text-amber-700 dark:text-amber-400">
+              Documented example the tests would reject: {e}
+            </div>
+          ))}
         </div>
       )}
       {parsed.job_summary && (

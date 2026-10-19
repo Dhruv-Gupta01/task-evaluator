@@ -379,6 +379,45 @@ def check_effective_instruction_length(task_root: Path, report) -> None:
     )
 
 
+_TESTS_REF = re.compile(r"(?:\.\./|/|\b)tests/[\w./-]+|\$\{?TESTS_DIR\}?")
+
+
+def check_oracle_honesty(task_root: Path, report) -> None:
+    """If solution/ reads the tests or copies a file from them, the Oracle
+    passing proves nothing about the task being solvable."""
+    solution = task_root / "solution"
+    tests = task_root / "tests"
+    if not solution.is_dir():
+        return
+    answer_names = {
+        p.name for p in _own_files(tests)
+        if re.search(r"golden|expected|answer|truth|reference|solution", p.name, re.I)
+    }
+    hits: list[str] = []
+    for path, text in _text_files(solution):
+        rel = str(path.relative_to(task_root))
+        # Mentions of /tests/ as the place output is verified are common in comments;
+        # only count lines that read or copy.
+        for line in text.splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            if _TESTS_REF.search(line) and re.search(r"\b(cp|cat|mv|ln|rsync|open|read|load|copy|sha256sum|diff)\b", line):
+                hits.append(f"{rel}: reads from tests/")
+                break
+        for name in answer_names:
+            if name in text:
+                hits.append(f"{rel}: uses the tests' answer file `{name}`")
+    if hits:
+        report.add(
+            "oracle_reads_tests",
+            "warn",
+            f"The reference solution seems to read the tests or an answer file ({_listed(sorted(set(hits)))}). "
+            "If it copies the expected result, passing the Oracle proves nothing about solvability.",
+        )
+    else:
+        report.add("oracle_reads_tests", "info", "solution/ does not read from tests/ or use a tests answer file.")
+
+
 def run_hygiene_checks(task_root: Path, report) -> None:
     for check in (
         check_named_volumes,
@@ -387,6 +426,7 @@ def run_hygiene_checks(task_root: Path, report) -> None:
         check_mirrored_files,
         check_tool_parity,
         check_effective_instruction_length,
+        check_oracle_honesty,
     ):
         try:
             check(task_root, report)

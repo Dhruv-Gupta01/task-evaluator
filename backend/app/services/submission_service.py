@@ -12,6 +12,7 @@ from app.schemas import (
     CheatTrialResult,
     FailureAnalysisResult,
     RubricCheckResult,
+    VariantProbeResult,
     LeakageScanResult,
     OracleRunsResult,
     ReviewReportResult,
@@ -263,6 +264,22 @@ def _ai_detection_result(run: Run | None) -> AiDetectionResult:
     return AiDetectionResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
 
 
+def _variant_probe_result(run: Run | None) -> VariantProbeResult:
+    if run is None:
+        return VariantProbeResult(status="not-run", logs=None)
+    return VariantProbeResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
+
+
+def _reviewer_decisions(run: Run | None) -> dict:
+    if run is None or not run.logs:
+        return {}
+    try:
+        data = json.loads(run.logs)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _rubric_check_result(run: Run | None) -> RubricCheckResult:
     if run is None:
         return RubricCheckResult(status="not-run", logs=None)
@@ -298,6 +315,8 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         failure_analysis=_failure_analysis_result(_get_run(submission, "failure_analysis")),
         cheat_trial=_cheat_trial_result(_get_run(submission, "cheat_trial")),
         rubric_check=_rubric_check_result(_get_run(submission, "rubric_check")),
+        variant_probe=_variant_probe_result(_get_run(submission, "variant_probe")),
+        reviewer_decisions=_reviewer_decisions(_get_run(submission, "reviewer_decision")),
         static_checks=_static_checks_result(_get_run(submission, "static_checks")),
         tb_static_checks=_tb_static_checks_result(_get_run(submission, "tb_static_checks")),
         ai_detection=_ai_detection_result(_get_run(submission, "ai_detection")),

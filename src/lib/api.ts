@@ -162,6 +162,22 @@ export interface FailureAnalysis {
   // Only present when rubric="tb" -- Harbor has no built-in job-summary
   // step, so this is a separate synthesis over all trial results.
   job_summary?: string | null;
+  // Why each failed trial failed (a reasoning bug, an instruction gap or
+  // infrastructure) and trials that chose the same alternative reading.
+  // Passes that may rest on a guess, and the best failing trial's misses ruled
+  // agent error / documentation gap / grader error.
+  audit?: {
+    passing?: { trial: string; assumptions: { test: string; assumption: string }[] }[];
+    best_failed?: {
+      trial: string;
+      misses: { test: string; ruling: string; reason: string; times?: number }[];
+    } | null;
+    examples?: string[];
+  } | null;
+  classification?: {
+    trials: { trial: string; class: string; reason: string }[];
+    clusters?: { reading: string; trials: string[]; label: string }[];
+  } | null;
 }
 
 // One trial run with an explicit cheat directive. `logs` is JSON once the
@@ -191,6 +207,50 @@ export interface CheatTrial {
   cheat_check: CheatCheck | null;
   // "default" (this platform's own directive) or "tb" (vendored red-team prompt).
   cheat_prompt?: string;
+}
+
+// Valid-variant probe (advisory). `logs` is JSON (VariantProbe) once run.
+export interface VariantProbeResult {
+  status: StageStatus;
+  logs?: string;
+}
+export interface VariantEntry {
+  description: string;
+  instruction_quote: string;
+  status: "accepted" | "rejected" | "did_not_run";
+  reward: number | null;
+  failed_tests: string[];
+  flags: string[];
+  note: string;
+}
+export interface VariantProbe {
+  model?: string;
+  reason?: string;
+  error?: string;
+  in_progress?: boolean;
+  dropped?: { description: string; reason: string }[];
+  variants: VariantEntry[];
+}
+
+export interface ReviewerDecision {
+  decision: "grader_wrong" | "agent_wrong" | "hard_not_ambiguous" | "unsure";
+  note: string;
+  at?: string;
+}
+
+// What changed since an earlier upload of the same task.
+export interface SubmissionChanges {
+  against: string | null;
+  against_uploaded_at?: string;
+  added?: string[];
+  removed?: string[];
+  changed?: string[];
+  counts?: { added: number; removed: number; changed: number };
+  tests_removed?: string[];
+  tests_added?: string[];
+  tests_removed_count?: number;
+  tests_added_count?: number;
+  instruction_words?: { before: number | null; after: number | null };
 }
 
 // `logs` is JSON (see RubricCheck below) once the stage has run.
@@ -323,6 +383,8 @@ export interface Submission {
   failure_analysis: FailureAnalysisResult;
   cheat_trial: CheatTrialResult;
   rubric_check: RubricCheckResult;
+  variant_probe: VariantProbeResult;
+  reviewer_decisions: Record<string, ReviewerDecision>;
   static_checks: StaticChecksResult;
   tb_static_checks: TbStaticChecksResult;
   ai_detection: AiDetectionResult;
@@ -422,14 +484,27 @@ export const api = {
           .join("&"),
       { method: "POST" },
     ).then(handle<unknown>),
+  variantProbe: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/variant-probe`, { method: "POST" }).then(
+      handle<unknown>,
+    ),
+  changes: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/changes`).then(handle<SubmissionChanges>),
+  setReviewerDecision: (id: string, body: { key: string } & ReviewerDecision) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/reviewer-decision`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(handle<unknown>),
   rubricCheck: (id: string, rubric?: RubricChoice) =>
     fetch(
       `${API_BASE_URL}/submissions/${id}/rubric-check` +
         (rubric && rubric !== "default" ? `?rubric=${rubric}` : ""),
       { method: "POST" },
     ).then(handle<unknown>),
-  sufficiency: (id: string) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/sufficiency`, { method: "POST" }).then(
+  // runs 1..3: independent judge calls, majority decides (cost grows with runs)
+  sufficiency: (id: string, runs = 1) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/sufficiency?runs=${runs}`, { method: "POST" }).then(
       handle<unknown>,
     ),
   leakageScan: (id: string) =>

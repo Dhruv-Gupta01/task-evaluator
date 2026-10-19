@@ -191,6 +191,17 @@ class AiDetectionResult(BaseModel):
     logs: str | None = None
 
 
+class VariantProbeResult(BaseModel):
+    """Valid-variant probe. Advisory: a model proposes forms of the Oracle's
+    answer that the instruction allows, each is run through the real verifier,
+    and a rejected one means the grader may be stricter than the instruction.
+    `logs` is JSON: {model, reason, dropped, variants: [{description,
+    instruction_quote, edits, status accepted|rejected|did_not_run, reward,
+    failed_tests, flags, note}]}."""
+    status: StageStatus
+    logs: str | None = None
+
+
 class RubricCheckResult(BaseModel):
     """`harbor check`: an evaluator agent scores the whole task against
     Harbor's quality rubric (not the agent trials -- see FailureAnalysisResult
@@ -239,6 +250,8 @@ class SubmissionSchema(BaseModel):
     failure_analysis: FailureAnalysisResult
     cheat_trial: CheatTrialResult
     rubric_check: RubricCheckResult
+    variant_probe: VariantProbeResult
+    reviewer_decisions: dict[str, dict] = {}
     static_checks: StaticChecksResult
     tb_static_checks: TbStaticChecksResult
     ai_detection: AiDetectionResult

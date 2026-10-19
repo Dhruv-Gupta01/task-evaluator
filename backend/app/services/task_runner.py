@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import shutil
 import traceback
 import uuid
@@ -22,6 +23,8 @@ from app.services import (
     sufficiency_judge,
     tb_static_checks,
     validation_service,
+    variant_probe,
+    verifier_report,
 )
 from app.services.llm import factory as llm_factory
 from app.services.llm import usage as llm_usage
@@ -416,6 +419,97 @@ async def run_oracle_trials(submission_id: str, n: int) -> None:
         db.close()
 
 
+async def run_variant_probe(submission_id: str) -> None:
+    """Advisory. A model proposes correct-by-the-instruction variants of the
+    Oracle's answer (services/variant_probe.py); each is run through the real
+    verifier as an Oracle trial on a temporary copy of the task. A variant the
+    verifier rejects means the grader accepts fewer forms than the instruction
+    allows. logs is JSON: {model, reason, dropped, variants: [{description,
+    instruction_quote, edits, status: accepted|rejected|did_not_run, reward,
+    failed_tests, flags, note}]}."""
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+        run = _get_or_create_run(db, submission_id, "variant_probe", 0)
+        run.status = "running"
+        run.reward = None
+        run.logs = None
+        run.started_at = datetime.now(UTC)
+        db.commit()
+
+        task_root = Path(submission.extracted_path)
+        try:
+            with _track_llm_spend(db, submission_id, "variant_probe"):
+                proposal = await variant_probe.propose_variants(task_root)
+        except Exception:
+            run.status = "failed"
+            run.logs = json.dumps({"error": traceback.format_exc(), "variants": []})
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+            return
+
+        config = _get_task_config(submission)
+        timeout_sec = (
+            config.environment.build_timeout_sec
+            + _agent_timeout_sec(config)
+            + config.verifier.timeout_sec
+            + _HARBOR_TIMEOUT_BUFFER_SEC
+        )
+        base = settings.storage_dir / "submissions" / submission_id / "runs" / "variant_probe"
+        results: list[dict] = []
+        for i, variant in enumerate(proposal["variants"]):
+            entry = {**variant, "status": "did_not_run", "reward": None, "failed_tests": [], "flags": [], "note": ""}
+            results.append(entry)
+            copy_root = base / f"v{i}-task"
+            if copy_root.exists():
+                shutil.rmtree(copy_root)
+            shutil.copytree(task_root, copy_root, symlinks=True)
+            problem = variant_probe.apply_edits(copy_root, variant["edits"])
+            if problem:
+                entry["note"] = f"the edit could not be applied: {problem}"
+                continue
+            outcome = await harbor_runner.run_single(
+                copy_root, "oracle", base / f"v{i}", f"variant-{uuid.uuid4().hex[:8]}", timeout_sec
+            )
+            report = outcome.report or {}
+            entry["reward"] = outcome.reward
+            entry["failed_tests"] = ((report.get("ctrf") or {}).get("failed_names") or [])[:10]
+            entry["flags"] = report.get("flags") or []
+            if outcome.reward is None:
+                entry["note"] = (outcome.logs or "")[-600:]
+            else:
+                entry["status"] = "accepted" if outcome.reward >= 1.0 else "rejected"
+            db.refresh(run)
+            run.logs = json.dumps({"model": settings.llm_model, "in_progress": True, "variants": results})
+            db.commit()
+
+        rejected = [r for r in results if r["status"] == "rejected"]
+        run.logs = json.dumps(
+            {
+                "model": settings.llm_model,
+                "reason": proposal["reason"],
+                "dropped": proposal["dropped"],
+                "variants": results,
+            }
+        )
+        # Advisory: "passed" means the grader accepted every variant that ran.
+        run.status = "failed" if rejected else "passed"
+        run.reward = 0 if rejected else 1
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    except Exception:
+        run = _get_or_create_run(db, submission_id, "variant_probe", 0)
+        run.status = "failed"
+        run.reward = None
+        run.logs = json.dumps({"error": traceback.format_exc(), "variants": []})
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    finally:
+        db.close()
+
+
 async def run_nop(submission_id: str) -> None:
     await _run_harbor_gate(submission_id, kind="nop")
 
@@ -709,7 +803,7 @@ async def run_agent_trials(
         db.close()
 
 
-async def run_sufficiency_check(submission_id: str) -> None:
+async def run_sufficiency_check(submission_id: str, runs: int = 1) -> None:
     """Single-shot LLM-as-judge check: does the agent-visible material
     (instruction.md + environment/) contain or make derivable everything the
     hidden tests/ actually grade? No Docker involved — just file reads plus
@@ -733,7 +827,7 @@ async def run_sufficiency_check(submission_id: str) -> None:
 
         try:
             with _track_llm_spend(db, submission_id, "sufficiency"):
-                verdict = await sufficiency_judge.run_sufficiency_judge(task_root)
+                verdict = await sufficiency_judge.run_sufficiency_judge(task_root, runs)
         except Exception:
             run.status = "failed"
             run.reward = None
@@ -1104,6 +1198,151 @@ async def run_review_report(submission_id: str) -> None:
         db.close()
 
 
+_CLASSIFY_PROMPT = """You are reviewing failed agent trials on a benchmark task, to separate a hard task \
+from a flawed one. For each trial you get the analyzer's summary, its task-specification check, the \
+tests that failed and any automatic flags.
+
+Classify every trial whose reward is below 1:
+- "real_bug": the agent had what it needed and reasoned or implemented wrongly.
+- "instruction_gap": the failure came from something the instruction or files did not establish, or \
+the checker is stricter than the instruction.
+- "infrastructure": a timeout, resource limit, network or Docker problem, not the task.
+Trials with reward 1 get "passed".
+
+Then group failed trials that chose the same alternative reading of the task. Two or more trials \
+making the same alternative choice is a sign of ambiguity, but it can be a false alarm when the task \
+simply needs domain knowledge, so describe it as contested, never as broken.
+
+Respond with ONLY JSON:
+{"trials": [{"trial": "<trial_name>", "class": "real_bug|instruction_gap|infrastructure|passed", \
+"reason": "one sentence"}],
+ "clusters": [{"reading": "the shared alternative reading", "trials": ["<trial_name>", ...]}]}
+
+TRIALS:
+"""
+
+
+def _trial_evidence(job_dirs: list[Path], results: list[dict]) -> list[dict]:
+    """Analyzer output joined with each trial's reward and failing tests."""
+    evidence = []
+    for res in results:
+        item = {
+            "trial": res.get("trial_name"),
+            "summary": res.get("summary"),
+            "task_specification": (res.get("checks") or {}).get("task_specification"),
+        }
+        for job_dir in job_dirs:
+            trial_dir = job_dir / str(res.get("trial_name"))
+            if not (trial_dir / "result.json").is_file():
+                continue
+            try:
+                reward = ((json.loads((trial_dir / "result.json").read_text()).get("verifier_result") or {})
+                          .get("rewards") or {}).get("reward")
+                report = verifier_report.read_verifier_report(trial_dir / "verifier", reward)
+            except (OSError, ValueError):
+                break
+            item["reward"] = reward
+            if report:
+                item["failed_tests"] = ((report.get("ctrf") or {}).get("failed_names") or [])[:15]
+                item["flags"] = report.get("flags")
+            break
+        evidence.append(item)
+    return evidence
+
+
+async def _classify_failures(db, submission_id: str, job_dirs: list[Path], results: list[dict]) -> dict | None:
+    evidence = _trial_evidence(job_dirs, results)
+    if not any((e.get("reward") is None or e.get("reward") < 1) for e in evidence):
+        return None  # nothing failed
+    try:
+        with _track_llm_spend(db, submission_id, "failure_analysis"):
+            client = llm_factory.get_llm_client()
+            resp = await client.complete(
+                [Message(role="user", content=_CLASSIFY_PROMPT + json.dumps(evidence, indent=1)[:60000])],
+                tools=[],
+            )
+        match = re.search(r"\{.*\}", resp.text, re.DOTALL)
+        data = json.loads(match.group(0)) if match else None
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    for cluster in data.get("clusters") or []:
+        if isinstance(cluster, dict):
+            cluster["label"] = "contested, needs a domain expert"
+    return data
+
+
+_AUDIT_PROMPT = """You audit agent trials on a benchmark task. You get the task's instruction, the \
+hidden tests, and for each trial its reward, summary and failed tests.
+
+1. For the passing trials: list the tests that a trial could pass only by making an assumption or \
+guess the instruction and files do not establish. Name the test and the assumption. If every \
+passing test follows from the given material, return an empty list.
+2. For the single best failing trial (the one that passed the most tests): rule on each failed \
+test as "agent_error" (the material was enough and the agent got it wrong), "documentation_gap" \
+(the instruction or files did not establish what the test needs) or "grader_error" (the test is \
+wrong or stricter than the instruction). Give one sentence of reasoning each.
+3. If the instruction or documentation contains worked examples, say whether the tests would \
+accept them. Report an example the tests would reject.
+
+Respond with ONLY JSON:
+{"passing": [{"trial": "<trial_name>", "assumptions": [{"test": "...", "assumption": "..."}]}],
+ "best_failed": {"trial": "<trial_name>", "misses": [{"test": "...", "ruling": "agent_error|documentation_gap|grader_error", "reason": "..."}]} or null,
+ "examples": ["example the tests would reject", ...]}
+"""
+
+
+async def _audit_trials(
+    db, submission_id: str, task_root: Path, job_dirs: list[Path], results: list[dict]
+) -> dict | None:
+    """Looks at passes that may have relied on a guess and at the best failing
+    trial's misses (4.0 category A). One extra judge call; advisory."""
+    evidence = _trial_evidence(job_dirs, results)
+    if not evidence:
+        return None
+    def score(item: dict) -> int:
+        return len(item.get("failed_tests") or [])
+    failing = [e for e in evidence if (e.get("reward") or 0) < 1]
+    passing = [e for e in evidence if (e.get("reward") or 0) >= 1]
+    if not passing and not failing:
+        return None
+    best = min(failing, key=score)["trial"] if failing else None
+    instruction = (task_root / "instruction.md").read_text(errors="replace") if (task_root / "instruction.md").is_file() else ""
+    from app.services.judge_files import read_text_files
+
+    payload = (
+        f"=== instruction.md ===\n{instruction}\n\n"
+        f"=== environment/ (documents the agent can read) ===\n"
+        f"{read_text_files(task_root / 'environment') if (task_root / 'environment').is_dir() else ''}\n\n"
+        f"=== tests/ (hidden) ===\n{read_text_files(task_root / 'tests') if (task_root / 'tests').is_dir() else ''}\n\n"
+        f"=== TRIALS (best failing trial: {best}) ===\n{json.dumps(evidence, indent=1)[:40000]}"
+    )
+    try:
+        with _track_llm_spend(db, submission_id, "failure_analysis"):
+            client = llm_factory.get_llm_client()
+            resp = await client.complete([Message(role="user", content=_AUDIT_PROMPT + "\n" + payload)], tools=[])
+        match = re.search(r"\{.*\}", resp.text, re.DOTALL)
+        data = json.loads(match.group(0)) if match else None
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    best_failed = data.get("best_failed")
+    if isinstance(best_failed, dict) and isinstance(best_failed.get("misses"), list):
+        # Parametrised tests repeat the same miss; show each once with a count.
+        merged: dict[tuple, dict] = {}
+        for miss in best_failed["misses"]:
+            if isinstance(miss, dict):
+                key = (miss.get("test"), miss.get("ruling"), miss.get("reason"))
+                if key in merged:
+                    merged[key]["times"] = merged[key].get("times", 1) + 1
+                else:
+                    merged[key] = dict(miss)
+        best_failed["misses"] = list(merged.values())
+    return data
+
+
 async def run_failure_analysis(submission_id: str, rubric: str = "default") -> None:
     """`harbor analyze` over every agent job of this submission (append=true
     leaves several). rubric="tb" swaps in the vendored, richer 6-criterion
@@ -1171,6 +1410,14 @@ async def run_failure_analysis(submission_id: str, rubric: str = "default") -> N
             except Exception:
                 job_summary = None
 
+        classification = await _classify_failures(db, submission_id, job_dirs, results) if results else None
+        submission = db.get(Submission, submission_id)
+        audit = (
+            await _audit_trials(db, submission_id, Path(submission.extracted_path), job_dirs, results)
+            if results and submission is not None and submission.extracted_path
+            else None
+        )
+
         run.logs = json.dumps(
             {
                 "agent": settings.analyze_agent,
@@ -1180,6 +1427,8 @@ async def run_failure_analysis(submission_id: str, rubric: str = "default") -> N
                 "results": results,
                 "rubric": rubric,
                 "job_summary": job_summary,
+                "classification": classification,
+                "audit": audit,
             }
         )
         # "passed" = the analysis ran and produced results; it's advisory, not a verdict.

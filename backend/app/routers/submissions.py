@@ -2,15 +2,18 @@ import json
 import uuid
 from datetime import UTC, datetime
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile
 from sqlalchemy import func, select
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
 from app.models import LlmSpend, Run, Submission
 from app.schemas import SubmissionListItem, SubmissionSchema, UploadResponse
-from app.services import budget, submission_service, task_runner
+from app.services import budget, submission_diff, submission_service, task_runner
 from app.workers import task_queue
 
 router = APIRouter()
@@ -185,7 +188,13 @@ async def trigger_agent_trials(
 
 
 @router.post("/submissions/{submission_id}/sufficiency", status_code=202)
-async def trigger_sufficiency(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+async def trigger_sufficiency(
+    submission_id: str, runs: int = 1, db: Session = Depends(get_db)
+) -> dict[str, str]:
+    """`runs` (1 to 3) independent judge calls; the majority decides and
+    disagreement is reported. Cost grows with the number of runs."""
+    if not 1 <= runs <= 3:
+        raise HTTPException(status_code=400, detail="runs must be 1, 2 or 3")
     _raise_if_over_budget(db, budget.judge_exceeded_message(db))
     submission = db.get(Submission, submission_id)
     if submission is None:
@@ -205,7 +214,7 @@ async def trigger_sufficiency(submission_id: str, db: Session = Depends(get_db))
     db.commit()
 
     await task_queue.submit(
-        f"{submission_id}:sufficiency", task_runner.run_sufficiency_check(submission_id)
+        f"{submission_id}:sufficiency", task_runner.run_sufficiency_check(submission_id, runs)
     )
     return {"status": "started"}
 
@@ -414,6 +423,99 @@ async def trigger_rubric_check(
     return {"status": "started"}
 
 
+@router.post("/submissions/{submission_id}/variant-probe", status_code=202)
+async def trigger_variant_probe(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """Advisory. A model proposes forms of the Oracle's answer that the
+    instruction allows; each runs through the real verifier as an Oracle trial
+    on a temporary copy of the task (sequentially, up to 4). A rejected variant
+    means the grader may accept fewer forms than the instruction does. Needs a
+    passing Oracle run first, so a failure can't be blamed on a broken task."""
+    _raise_if_over_budget(db, budget.judge_exceeded_message(db))
+    _require_built_submission(submission_id, db)
+    oracle_passed = (
+        db.query(Run).filter_by(submission_id=submission_id, kind="oracle", reward=1).first() is not None
+    )
+    if not oracle_passed:
+        raise HTTPException(status_code=400, detail="run the Oracle and get a pass first")
+
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="variant_probe", run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind="variant_probe", run_index=0)
+        db.add(run)
+    run.status = "pending"
+    db.commit()
+
+    await task_queue.submit(
+        f"{submission_id}:variant_probe", task_runner.run_variant_probe(submission_id)
+    )
+    return {"status": "started"}
+
+
+@router.get("/submissions/{submission_id}/changes")
+def get_changes(submission_id: str, against: str | None = None, db: Session = Depends(get_db)) -> dict:
+    """What changed since an earlier upload of the same task: files added,
+    removed and changed, tests removed or added, instruction length. `against`
+    names the earlier submission; by default the latest earlier upload with
+    the same task name."""
+    current = db.get(Submission, submission_id)
+    if current is None or current.extracted_path is None:
+        raise HTTPException(status_code=404, detail="submission not found or not extracted")
+    if against:
+        earlier = db.get(Submission, against)
+    else:
+        earlier = (
+            db.query(Submission)
+            .filter(
+                Submission.task_name == current.task_name,
+                Submission.id != current.id,
+                Submission.uploaded_at < current.uploaded_at,
+                Submission.extracted_path.is_not(None),
+            )
+            .order_by(Submission.uploaded_at.desc())
+            .first()
+        )
+    if earlier is None or earlier.extracted_path is None:
+        return {"against": None}
+    result = submission_diff.diff_tasks(Path(earlier.extracted_path), Path(current.extracted_path))
+    return {"against": earlier.id, "against_uploaded_at": earlier.uploaded_at.isoformat(), **result}
+
+
+class ReviewerDecision(BaseModel):
+    key: str
+    decision: str  # grader_wrong | agent_wrong | hard_not_ambiguous | unsure
+    note: str = ""
+
+
+_DECISIONS = ("grader_wrong", "agent_wrong", "hard_not_ambiguous", "unsure")
+
+
+@router.put("/submissions/{submission_id}/reviewer-decision")
+def set_reviewer_decision(
+    submission_id: str, body: ReviewerDecision, db: Session = Depends(get_db)
+) -> dict:
+    """Records a reviewer's ruling on a contested flag (key identifies the flag,
+    e.g. the trials in a cluster). Kept with the submission; never changes a gate."""
+    if db.get(Submission, submission_id) is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if body.decision not in _DECISIONS:
+        raise HTTPException(status_code=400, detail=f"decision must be one of {', '.join(_DECISIONS)}")
+    if not body.key or len(body.key) > 500 or len(body.note) > 2000:
+        raise HTTPException(status_code=400, detail="key or note is empty or too long")
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="reviewer_decision", run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind="reviewer_decision", run_index=0, status="passed")
+        db.add(run)
+    decisions = submission_service._reviewer_decisions(run)
+    decisions[body.key] = {
+        "decision": body.decision,
+        "note": body.note,
+        "at": datetime.now(UTC).isoformat(),
+    }
+    run.logs = json.dumps(decisions)
+    db.commit()
+    return decisions
+
+
 @router.post("/submissions/{submission_id}/static-checks", status_code=202)
 async def trigger_static_checks(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
     """Mechanical, LLM-free checks over instruction.md/test.sh/Dockerfile/zip
@@ -543,6 +645,12 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
             "not_run": schema.tb_static_checks.status == "not-run",
             "report": _json_or_raw(schema.tb_static_checks.logs),
         },
+        "variant_probe": {
+            "status": schema.variant_probe.status,
+            "not_run": schema.variant_probe.status == "not-run",
+            "report": _json_or_raw(schema.variant_probe.logs),
+        },
+        "reviewer_decisions": schema.reviewer_decisions,
         "rubric_check": {
             "status": schema.rubric_check.status,
             "not_run": schema.rubric_check.status == "not-run",
