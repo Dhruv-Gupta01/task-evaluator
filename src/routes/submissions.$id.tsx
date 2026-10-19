@@ -28,6 +28,9 @@ import {
   type VariantProbe,
   type EdgeCases,
   type ReviewerDecision,
+  type AnswerExposure,
+  type ImageInventory,
+  type FreshBuild,
 } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogPanel } from "@/components/LogPanel";
@@ -83,6 +86,12 @@ function SubmissionDetail() {
         isActive(d.variant_probe.status) ||
         isActive(d.weak_probe.status) ||
         isActive(d.edge_cases.status) ||
+        isActive(d.cheat_trial.status) ||
+        isActive(d.rubric_check.status) ||
+        isActive(d.answer_exposure.status) ||
+        isActive(d.image_inventory.status) ||
+        isActive(d.fresh_build.status) ||
+        (d.oracle.stress_runs ?? []).some((r) => r.reward == null && !r.logs) ||
         d.build.status === "pending";
       return any ? 2500 : false;
     },
@@ -109,6 +118,14 @@ function SubmissionDetail() {
     },
     onError: (e: Error) => toast.error(e.message),
   });
+  const mOracleStress = useMutation({
+    mutationFn: () => api.oracle(id, oracleN, true),
+    onSuccess: () => {
+      toast.success(`${oracleN} oracle run(s) under CPU load started`);
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
   const mNop = useMutation({
     mutationFn: () => api.nop(id),
     onSuccess: () => {
@@ -126,6 +143,9 @@ function SubmissionDetail() {
   // whether the agent will cheat than one run at max effort.
   const [cheatEffort, setCheatEffort] = useState<ReasoningEffort | "default">("max");
   const [cheatPrompt, setCheatPrompt] = useState<CheatPromptChoice>("default");
+  // One clean cheat trial proves little (real cheats upstream needed several tries).
+  const [cheatN, setCheatN] = useState("3");
+  const [cheatCostCap, setCheatCostCap] = useState("");
   const [analysisRubric, setAnalysisRubric] = useState<RubricChoice>("default");
   // The richer Terminal-Bench rubric runs the anti-cheat and verification criteria
   // the default one lacks, so it is pre-selected (the dropdown still offers Default).
@@ -185,9 +205,35 @@ function SubmissionDetail() {
     onError: (e: Error) => toast.error(e.message),
   });
   const mEdgeCases = useMutation({
-    mutationFn: () => api.edgeCases(id),
+    mutationFn: (probe: boolean) => api.edgeCases(id, probe),
+    onSuccess: (_, probe) => {
+      toast.success(
+        probe ? "Edge-case check with grader probe started" : "Edge-case check started",
+      );
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const mAnswerExposure = useMutation({
+    mutationFn: () => api.answerExposure(id),
     onSuccess: () => {
-      toast.success("Edge-case check started");
+      toast.success("Answer-exposure scan started");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const mImageInventory = useMutation({
+    mutationFn: () => api.imageInventory(id),
+    onSuccess: () => {
+      toast.success("Image listing started");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const mFreshBuild = useMutation({
+    mutationFn: () => api.freshBuild(id),
+    onSuccess: () => {
+      toast.success("Fresh build started");
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -254,10 +300,12 @@ function SubmissionDetail() {
         agentChoice,
         cheatEffort === "default" ? undefined : cheatEffort,
         cheatPrompt,
+        Number(cheatN),
+        Number(cheatCostCap) > 0 ? Number(cheatCostCap) : undefined,
       ),
     onSuccess: () => {
       toast.success(
-        `Cheat trial (reasoning ${cheatEffort === "default" ? "server default" : cheatEffort}, ${cheatPrompt} prompt) started`,
+        `${cheatN} cheat trial(s) (reasoning ${cheatEffort === "default" ? "server default" : cheatEffort}, ${cheatPrompt} prompt) started`,
       );
       invalidate();
     },
@@ -408,7 +456,30 @@ function SubmissionDetail() {
               disabled={!buildReady}
               disabledReason="Build the image first"
             />
+            <Button
+              variant="outline"
+              onClick={() => mOracleStress.mutate()}
+              disabled={!buildReady || mOracleStress.isPending}
+              title="Runs N Oracle trials while a sibling container keeps the CPUs busy. Kept apart from the gate runs."
+            >
+              Run under CPU load
+            </Button>
           </div>
+
+          {data.oracle.flaky_note && (
+            <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-700 dark:text-amber-400">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>
+                {data.oracle.flaky && <strong>Flaky: </strong>}
+                {data.oracle.flaky_note}
+              </span>
+            </div>
+          )}
+          {data.oracle.stress_note && (
+            <div className="rounded-md border border-border bg-muted/40 p-2.5 text-xs">
+              Under CPU load: {data.oracle.stress_note}
+            </div>
+          )}
 
           {data.oracle.runs.length > 0 && (
             <div className="rounded-md border border-border">
@@ -441,6 +512,45 @@ function SubmissionDetail() {
                   </li>
                 ))}
               </ul>
+              {data.oracle.expected_tests != null && (
+                <div className="border-t border-border px-3 py-2 text-xs text-muted-foreground">
+                  Passing runs report {data.oracle.expected_tests} tests; other runs are compared with this.
+                </div>
+              )}
+            </div>
+          )}
+
+          {(data.oracle.stress_runs ?? []).length > 0 && (
+            <div className="rounded-md border border-border">
+              <div className="border-b border-border px-3 py-2 text-sm font-medium">
+                Runs under CPU load (not part of the gate)
+              </div>
+              <ul className="divide-y divide-border">
+                {(data.oracle.stress_runs ?? []).map((r) => (
+                  <li key={r.index} className="px-3 py-2">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="font-mono">Stress #{r.index}</span>
+                      <StatusBadge
+                        status={
+                          r.reward === 1
+                            ? "passed"
+                            : r.reward === 0
+                              ? "failed"
+                              : r.logs
+                                ? "failed"
+                                : "running"
+                        }
+                      />
+                    </div>
+                    <VerifierLine rawReward={r.raw_reward} verifier={r.verifier} />
+                    {r.logs && (
+                      <div className="mt-2">
+                        <LogPanel logs={r.logs} title={`Stress #${r.index} logs`} />
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
         </StageCard>
@@ -463,6 +573,42 @@ function SubmissionDetail() {
           />
           <VerifierLine rawReward={data.nop.raw_reward} verifier={data.nop.verifier} />
           <LogPanel logs={data.nop.logs} title="Nop logs" />
+        </StageCard>
+
+        {/* Image inventory */}
+        <StageCard
+          title="Image Contents"
+          description="Recorded after every Build: the files the agent's container really has (under its WORKDIR and other non-system folders) and the installed package versions. Sufficiency uses it to treat environment/ files that never reach the container (build-stage only) as hidden."
+          status={data.image_inventory.status}
+        >
+          <RunButton
+            label="List the image again"
+            runningLabel="Listing…"
+            onClick={() => mImageInventory.mutate()}
+            running={isActive(data.image_inventory.status)}
+            pending={mImageInventory.isPending}
+            disabled={!buildReady}
+            disabledReason="Build the image first"
+          />
+          <ImageInventoryView logs={data.image_inventory.logs} />
+        </StageCard>
+
+        {/* Fresh build */}
+        <StageCard
+          title="Fresh Build"
+          description="Does the task still build and solve today? Builds environment/ with no layer cache and freshly pulled base images, then runs one Oracle trial with every RUN step rebuilt. Catches a dependency that no longer installs, which the cached Build hides. Advisory; slow."
+          status={data.fresh_build.status}
+        >
+          <RunButton
+            label="Run Fresh Build"
+            runningLabel="Building…"
+            onClick={() => mFreshBuild.mutate()}
+            running={isActive(data.fresh_build.status)}
+            pending={mFreshBuild.isPending}
+            disabled={!buildReady}
+            disabledReason="Build the image first"
+          />
+          <FreshBuildView logs={data.fresh_build.logs} />
         </StageCard>
 
         {/* Static Checks */}
@@ -546,6 +692,7 @@ function SubmissionDetail() {
                     }`}
                   >
                     {report.pass_count} pass, {report.fail_count} fail
+                    {report.skip_count ? `, ${report.skip_count} not run (a tool is missing)` : ""}
                   </div>
                   <LogPanel logs={report.text} title="TB check findings" />
                 </>
@@ -584,6 +731,24 @@ function SubmissionDetail() {
             </div>
           )}
           <LogPanel logs={data.leakage_scan.logs} title="Leakage scan findings" />
+        </StageCard>
+
+        {/* Answer exposure */}
+        <StageCard
+          title="Answer Exposure"
+          description="Can the agent find the answer in the files it is given? Looks at environment/, instruction.md and the built image's file list for answer-like names, a .git folder, exact copies of solution/ or tests/ files, and values the tests check for. Noisy by design (a test input is supposed to be visible), so read each finding. Advisory; no LLM, no Docker."
+          status={data.answer_exposure.status}
+        >
+          <RunButton
+            label="Run Answer-Exposure Scan"
+            runningLabel="Scanning…"
+            onClick={() => mAnswerExposure.mutate()}
+            running={isActive(data.answer_exposure.status)}
+            pending={mAnswerExposure.isPending}
+            disabled={!validated}
+            disabledReason="Validate the submission first"
+          />
+          <AnswerExposureView logs={data.answer_exposure.logs} />
         </StageCard>
 
         {/* AI Detection */}
@@ -709,13 +874,26 @@ function SubmissionDetail() {
             <RunButton
               label="Run Edge-Case Check"
               runningLabel="Checking…"
-              onClick={() => mEdgeCases.mutate()}
+              onClick={() => mEdgeCases.mutate(false)}
               running={isActive(data.edge_cases.status)}
               pending={mEdgeCases.isPending}
               disabled={!validated}
               disabledReason="Validate the submission first"
             />
+            <RunButton
+              label="Check + run through the grader"
+              runningLabel="Checking…"
+              onClick={() => mEdgeCases.mutate(true)}
+              running={isActive(data.edge_cases.status)}
+              pending={mEdgeCases.isPending}
+              disabled={!buildReady || !data.oracle.runs.some((r) => r.reward === 1)}
+              disabledReason="Build the image and get an Oracle pass first"
+            />
           </div>
+          <p className="text-xs text-muted-foreground">
+            The second button also breaks the Oracle&apos;s answer on each uncovered case (up to 4)
+            and runs it through the real verifier: scoring 1 confirms the case is untested.
+          </p>
           <EdgeCasesView logs={data.edge_cases.logs} />
         </StageCard>
 
@@ -829,6 +1007,29 @@ function SubmissionDetail() {
                 ))}
               </SelectContent>
             </Select>
+            <label className="text-sm text-muted-foreground">Trials</label>
+            <Select value={cheatN} onValueChange={setCheatN}>
+              <SelectTrigger className="w-16">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {["1", "2", "3"].map((v) => (
+                  <SelectItem key={v} value={v}>
+                    {v}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <label className="text-sm text-muted-foreground">Cost cap $</label>
+            <Input
+              type="number"
+              min={0}
+              step="any"
+              placeholder="default"
+              value={cheatCostCap}
+              onChange={(e) => setCheatCostCap(e.target.value)}
+              className="w-24"
+            />
             <RunButton
               label="Run Cheat Trial"
               runningLabel="Running…"
@@ -839,7 +1040,33 @@ function SubmissionDetail() {
               disabledReason="Build the image first"
             />
           </div>
-          <CheatTrialView status={data.cheat_trial.status} logs={data.cheat_trial.logs} />
+          {Number(cheatCostCap) > 0 &&
+            Number(cheatCostCap) / Number(cheatN) < MIN_TRIAL_COST_USD && (
+              <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-700 dark:text-amber-400">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>
+                  Under ${MIN_TRIAL_COST_USD} per trial: the cap may stop a trial before the agent
+                  has really tried, and such a trial is reported as inconclusive, not as the trap
+                  holding.
+                </span>
+              </div>
+            )}
+          {data.cheat_trial.summary && (
+            <div className="text-xs text-muted-foreground">{data.cheat_trial.summary}</div>
+          )}
+          {(data.cheat_trial.runs ?? []).length > 1 ? (
+            (data.cheat_trial.runs ?? []).map((r) => (
+              <div key={r.index} className="rounded-md border border-border p-2">
+                <div className="mb-2 flex items-center justify-between text-sm">
+                  <span className="font-mono">Cheat trial #{r.index}</span>
+                  <StatusBadge status={r.status} />
+                </div>
+                <CheatTrialView status={r.status} logs={r.logs} />
+              </div>
+            ))
+          ) : (
+            <CheatTrialView status={data.cheat_trial.status} logs={data.cheat_trial.logs} />
+          )}
         </StageCard>
 
         <div className="md:col-span-2">
@@ -1096,6 +1323,127 @@ function ChangesBanner({ changes }: { changes: SubmissionChanges }) {
   );
 }
 
+function parseJson<T>(logs?: string): T | null {
+  if (!logs) return null;
+  try {
+    return JSON.parse(logs) as T;
+  } catch {
+    return null;
+  }
+}
+
+function AnswerExposureView({ logs }: { logs?: string }) {
+  const parsed = parseJson<AnswerExposure>(logs);
+  if (!logs) return null;
+  if (!parsed) return <LogPanel logs={logs} title="Scan output" />;
+  return (
+    <div className="space-y-2 text-sm">
+      {parsed.error && (
+        <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs whitespace-pre-wrap">
+          {parsed.error}
+        </div>
+      )}
+      <div className="text-xs text-muted-foreground">
+        {parsed.files_scanned} agent-visible files, {parsed.values_checked} checked values
+        {parsed.image_listing_used
+          ? ", plus the built image's file list"
+          : " (no image listing recorded)"}
+        .
+      </div>
+      {(parsed.findings ?? []).length === 0 && !parsed.error && (
+        <div className="text-xs text-emerald-600">Nothing found.</div>
+      )}
+      {(parsed.findings ?? []).map((f, i) => (
+        <div
+          key={i}
+          className={`rounded-md border p-2.5 text-xs ${
+            f.severity === "warn"
+              ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+              : "border-border text-muted-foreground"
+          }`}
+        >
+          {f.message}
+          <div className="mt-1 font-mono">{f.files.join(", ")}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ImageInventoryView({ logs }: { logs?: string }) {
+  const parsed = parseJson<ImageInventory>(logs);
+  if (!logs) return null;
+  if (!parsed) return <LogPanel logs={logs} title="Image listing" />;
+  if (parsed.error) {
+    return (
+      <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs whitespace-pre-wrap text-amber-700 dark:text-amber-400">
+        {parsed.error}
+      </div>
+    );
+  }
+  const packages = [
+    ...(parsed.pip ?? []).map((p) => `pip ${p}`),
+    ...(parsed.npm ?? []).map((p) => `npm ${p}`),
+    ...(parsed.dpkg ?? []).map((p) => `deb ${p}`),
+    ...(parsed.apk ?? []).map((p) => `apk ${p}`),
+  ];
+  return (
+    <div className="space-y-2">
+      <div className="text-xs text-muted-foreground">
+        WORKDIR <span className="font-mono">{parsed.workdir ?? "?"}</span> ·{" "}
+        {parsed.files?.length ?? 0} task files{parsed.truncated ? " (list cut short)" : ""} ·{" "}
+        {(parsed.pip ?? []).length} pip, {(parsed.dpkg ?? []).length + (parsed.apk ?? []).length}{" "}
+        system packages
+      </div>
+      <LogPanel
+        logs={(parsed.files ?? []).map((f) => `${f.size}\t${f.path}`).join("\n")}
+        title="Files in the image"
+      />
+      {packages.length > 0 && (
+        <LogPanel logs={packages.join("\n")} title="Installed package versions" />
+      )}
+    </div>
+  );
+}
+
+function FreshBuildView({ logs }: { logs?: string }) {
+  const parsed = parseJson<FreshBuild>(logs);
+  if (!logs) return null;
+  if (!parsed) return <LogPanel logs={logs} title="Fresh build output" />;
+  const oracle = parsed.oracle;
+  return (
+    <div className="space-y-2 text-xs">
+      {parsed.error && (
+        <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 whitespace-pre-wrap">
+          {parsed.error}
+        </div>
+      )}
+      {parsed.build && (
+        <div className={parsed.build.ok ? "text-emerald-600" : "text-red-600 dark:text-red-400"}>
+          {parsed.build.ok
+            ? "Builds with no cache and fresh base images."
+            : "The build fails today with no cache: a dependency or base image changed."}
+        </div>
+      )}
+      {oracle && (
+        <div
+          className={
+            (oracle.reward ?? 0) >= 1 ? "text-emerald-600" : "text-red-600 dark:text-red-400"
+          }
+        >
+          {(oracle.reward ?? 0) >= 1
+            ? "The Oracle still passes with every RUN step rebuilt."
+            : `The Oracle ${oracle.reward == null ? "produced no reward" : `scored ${oracle.reward}`} after a fresh rebuild${
+                oracle.failed_tests.length ? `; failed: ${oracle.failed_tests.join(", ")}` : ""
+              }.`}
+        </div>
+      )}
+      {parsed.build && <LogPanel logs={parsed.build.log_tail} title="No-cache build log (tail)" />}
+      {oracle && <LogPanel logs={oracle.log_tail} title="Oracle log (tail)" />}
+    </div>
+  );
+}
+
 function EdgeCasesView({ logs }: { logs?: string }) {
   if (!logs) return null;
   let parsed: EdgeCases | null = null;
@@ -1125,6 +1473,28 @@ function EdgeCasesView({ logs }: { logs?: string }) {
             Expected: {c.expected}
             {c.test && <> · test: <span className="font-mono">{c.test}</span></>} — {c.reason}
           </div>
+          {c.probe && (
+            <div
+              className={`mt-1 text-xs ${
+                c.probe.status === "slipped_through"
+                  ? "text-red-600 dark:text-red-400"
+                  : c.probe.status === "caught"
+                    ? "text-emerald-600"
+                    : "text-muted-foreground"
+              }`}
+            >
+              {c.probe.status === "slipped_through"
+                ? "Through the grader: an answer that mishandles this case still scored 1, so no test checks it."
+                : c.probe.status === "caught"
+                  ? `Through the grader: an answer that mishandles this case scored 0${
+                      c.probe.failed_tests?.length ? ` (${c.probe.failed_tests.join(", ")})` : ""
+                    }, so it is tested after all.`
+                  : `Not run through the grader: ${c.probe.note || "no result"}`}
+              {c.probe.description && (
+                <span className="text-muted-foreground"> ({c.probe.description})</span>
+              )}
+            </div>
+          )}
         </div>
       ))}
     </div>
@@ -1510,6 +1880,18 @@ function CheatTrialView({ status, logs }: { status: StageStatus; logs?: string }
     return <LogPanel logs={logs} title="Cheat trial log" />;
   }
   const check = parsed.cheat_check;
+  if (isActive(status)) {
+    return (
+      <div className="space-y-3">
+        <div className="text-xs text-muted-foreground">
+          {parsed.reward === 1
+            ? "Reward 1: checking the trajectory for reward hacking…"
+            : "Trial finished; waiting for the others in this run."}
+        </div>
+        <LogPanel logs={parsed.trial_log ?? undefined} title="Cheat trial log" />
+      </div>
+    );
+  }
   return (
     <div className="space-y-3">
       {parsed.reward !== 1 && parsed.inconclusive ? (
@@ -1702,7 +2084,7 @@ function TestSummaryBlock({
           className="flex items-start gap-1.5 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-amber-700 dark:text-amber-400"
         >
           <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-          <span>{n} (advisory: check the instruction and that test)</span>
+          <span>{n}</span>
         </div>
       ))}
     </div>

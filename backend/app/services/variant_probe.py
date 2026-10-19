@@ -22,24 +22,24 @@ from app.services.llm.factory import get_llm_client
 MAX_VARIANTS = 4
 MAX_BREAKS = 6
 
-SYSTEM_PROMPT = f"""You help find graders that are stricter than their task instruction. You are \\
-shown a task's instruction.md and its reference solution (solution/). The reference solution \\
+SYSTEM_PROMPT = f"""You help find graders that are stricter than their task instruction. You are \
+shown a task's instruction.md and its reference solution (solution/). The reference solution \
 produces one correct answer in one particular form.
 
-Propose up to {MAX_VARIANTS} variants of the reference solution that change only the FORM of the answer \\
-and are still fully correct under the instruction: for example a different but equivalent number \\
-format (11800.0 vs 11800.00), the other identifier or spelling the instruction says is acceptable, \\
-a different order where the instruction leaves order free, different whitespace, or a different \\
+Propose up to {MAX_VARIANTS} variants of the reference solution that change only the FORM of the answer \
+and are still fully correct under the instruction: for example a different but equivalent number \
+format (11800.0 vs 11800.00), the other identifier or spelling the instruction says is acceptable, \
+a different order where the instruction leaves order free, different whitespace, or a different \
 allowed option. Rules:
-- Every variant must be allowed by a sentence in instruction.md. Copy that sentence exactly into \\
+- Every variant must be allowed by a sentence in instruction.md. Copy that sentence exactly into \
 "instruction_quote". If the instruction allows only one form, propose nothing.
 - Do not change what the answer means, and do not weaken or skip any requirement.
-- Make the smallest edit. Express it as exact find/replace pairs on files under solution/. \\
+- Make the smallest edit. Express it as exact find/replace pairs on files under solution/. \
 "find" must be text that appears exactly once in that file.
 - Prefer variants most likely to expose a grader that compares against one exact form.
 
 Respond with ONLY JSON:
-{{"variants": [{{"description": "what changes", "instruction_quote": "exact sentence from instruction.md", \\
+{{"variants": [{{"description": "what changes", "instruction_quote": "exact sentence from instruction.md", \
 "edits": [{{"file": "solution/solve.sh", "find": "exact text", "replace": "new text"}}]}}],
  "reason": "if no variants, why"}}"""
 
@@ -67,8 +67,61 @@ Respond with ONLY JSON:
  "reason": "if none, why"}}"""
 
 
+MAX_EDGE_PROBES = 4
+
+EDGE_PROMPT = """You help check whether a grader tests the edge cases an expert would handle. You are \
+shown a task's instruction.md, its reference solution (solution/), and edge cases the tests may not cover.
+
+For each edge case, propose one BROKEN version of the reference solution that handles exactly that case \
+wrongly and every other input as before, so a grader that tests the case must reject it. Make the smallest \
+edit, as exact find/replace pairs on files under solution/; "find" must appear exactly once in that file. If \
+the reference solution has no code path you can change for a case, leave that case out.
+
+Respond with ONLY JSON:
+{"variants": [{"case": "<the edge case text, copied exactly>", "description": "how it now mishandles the case", \
+"edits": [{"file": "solution/solve.sh", "find": "exact text", "replace": "new text"}]}]}"""
+
+
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().lower()
+
+
+async def propose_edge_breaks(task_root: Path, cases: list[str]) -> list[dict]:
+    """E.3: one deliberately wrong solution per edge case, keyed by the case text."""
+    instruction = (task_root / "instruction.md").read_text(errors="replace")
+    solution = read_text_files(task_root / "solution") if (task_root / "solution").is_dir() else ""
+    response = await get_llm_client().complete(
+        [
+            Message(role="system", content=EDGE_PROMPT),
+            Message(
+                role="user",
+                content=(
+                    f"=== instruction.md ===\n{instruction}\n\n=== solution/ ===\n{solution}\n\n"
+                    f"=== EDGE CASES ===\n{json.dumps(cases[:MAX_EDGE_PROBES], indent=1)}\n"
+                ),
+            ),
+        ],
+        tools=[],
+    )
+    match = re.search(r"\{.*\}", response.text, re.DOTALL)
+    try:
+        data = json.loads(match.group(0)) if match else {}
+    except ValueError:
+        data = {}
+    wanted = {_norm(c): c for c in cases}
+    out: list[dict] = []
+    for raw in (data.get("variants") if isinstance(data, dict) else None) or []:
+        if not isinstance(raw, dict) or _norm(str(raw.get("case", ""))) not in wanted or not isinstance(raw.get("edits"), list):
+            continue
+        out.append(
+            {
+                "case": wanted[_norm(str(raw["case"]))],
+                "description": str(raw.get("description", ""))[:300],
+                "instruction_quote": "",
+                "edits": [{k: str(e.get(k, "")) for k in ("file", "find", "replace")} for e in raw["edits"] if isinstance(e, dict)],
+            }
+        )
+    return out
 
 
 async def propose_variants(task_root: Path, mode: str = "valid") -> dict:

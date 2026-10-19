@@ -108,6 +108,14 @@ export interface OracleRunsResult {
   n: number;
   runs: TrialResult[];
   all_passed: boolean | null;
+  // Some finished runs scored 1 and others 0: the solution or verifier is flaky.
+  flaky?: boolean | null;
+  flaky_note?: string | null;
+  // Runs made while a sibling container kept the CPUs busy; never part of the gate.
+  stress_runs?: TrialResult[];
+  stress_note?: string | null;
+  // Tests the passing runs reported; other runs' reports are compared with it.
+  expected_tests?: number | null;
 }
 
 export interface SufficiencyResult {
@@ -192,6 +200,20 @@ export interface CheatTrialResult {
   // Recorded for audit only -- never compared against ChecksumInfo.canonical.
   // This trial's task copy always has an intentionally edited instruction.md.
   task_checksum?: string | null;
+  // A run can hold 1 to 3 trials; the fields above describe the first one.
+  n?: number;
+  runs?: CheatTrialRun[];
+  summary?: string | null;
+}
+
+export interface CheatTrialRun {
+  index: number;
+  status: StageStatus;
+  reward: 0 | 1 | null;
+  raw_reward?: number | null;
+  verifier?: VerifierReport | null;
+  logs?: string;
+  task_checksum?: string | null;
 }
 
 export interface CheatCheck {
@@ -223,8 +245,77 @@ export interface EdgeCasesResult {
   status: StageStatus;
   logs?: string;
 }
+export interface EdgeCaseProbe {
+  // "slipped_through": a solution that mishandles the case still scored 1.
+  status: "caught" | "slipped_through" | "did_not_run";
+  reward?: number | null;
+  failed_tests?: string[];
+  flags?: string[];
+  note?: string;
+  description?: string;
+}
 export interface EdgeCases {
-  cases: { case: string; expected: string; covered: boolean; test: string | null; reason: string }[];
+  cases: {
+    case: string;
+    expected: string;
+    covered: boolean;
+    test: string | null;
+    reason: string;
+    probe?: EdgeCaseProbe;
+  }[];
+  error?: string;
+  probed?: boolean;
+  in_progress?: boolean;
+}
+
+// Answer-exposure scan (advisory): can the agent find the answer in its files?
+export interface AnswerExposureResult {
+  status: StageStatus;
+  logs?: string;
+}
+export interface AnswerExposure {
+  findings: {
+    severity: "warn" | "info" | string;
+    kind: string;
+    message: string;
+    files: string[];
+  }[];
+  warn_count: number;
+  values_checked: number;
+  files_scanned: number;
+  image_listing_used: boolean;
+  error?: string;
+}
+
+// What the built image contains, recorded after Build.
+export interface ImageInventoryResult {
+  status: StageStatus;
+  logs?: string;
+}
+export interface ImageInventory {
+  workdir?: string | null;
+  files?: { path: string; size: number }[];
+  truncated?: boolean;
+  pip?: string[];
+  dpkg?: string[];
+  apk?: string[];
+  npm?: string[];
+  error?: string;
+}
+
+// Still builds and solves today: no-cache build plus one Oracle run.
+export interface FreshBuildResult {
+  status: StageStatus;
+  logs?: string;
+}
+export interface FreshBuild {
+  build: { ok: boolean; log_tail: string } | null;
+  oracle: {
+    reward: number | null;
+    failed_tests: string[];
+    flags: string[];
+    log_tail: string;
+  } | null;
   error?: string;
 }
 
@@ -328,11 +419,14 @@ export interface TbCheckFinding {
   name: string;
   passed: boolean;
   output: string;
+  // The check could not run here (a tool it needs is missing); not a failure.
+  skipped?: boolean;
 }
 
 export interface TbStaticCheckReport {
   pass_count: number;
   fail_count: number;
+  skip_count?: number;
   results: TbCheckFinding[];
   text: string;
 }
@@ -411,6 +505,9 @@ export interface Submission {
   static_checks: StaticChecksResult;
   tb_static_checks: TbStaticChecksResult;
   ai_detection: AiDetectionResult;
+  answer_exposure: AnswerExposureResult;
+  image_inventory: ImageInventoryResult;
+  fresh_build: FreshBuildResult;
   checksum: ChecksumInfo;
 }
 
@@ -453,11 +550,12 @@ export const api = {
     fetch(`${API_BASE_URL}/submissions/${id}/validate`, { method: "POST" }).then(
       handle<unknown>,
     ),
-  // Always appends to any earlier oracle runs on this submission.
-  oracle: (id: string, n: number) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/oracle?n=${n}`, { method: "POST" }).then(
-      handle<unknown>,
-    ),
+  // Always appends to any earlier oracle runs on this submission. stress runs
+  // them under CPU load; those are kept apart and never count for the gate.
+  oracle: (id: string, n: number, stress = false) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/oracle?n=${n}${stress ? "&stress=true" : ""}`, {
+      method: "POST",
+    }).then(handle<unknown>),
   nop: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/nop`, { method: "POST" }).then(
       handle<unknown>,
@@ -489,12 +587,15 @@ export const api = {
         (rubric && rubric !== "default" ? `?rubric=${rubric}` : ""),
       { method: "POST" },
     ).then(handle<unknown>),
-  // agent undefined = the server's default (HARBOR_AGENT).
+  // agent undefined = the server's default (HARBOR_AGENT). n = 1 to 3 trials,
+  // run one after another; maxCost undefined = AGENT_RUN_BUDGET_USD.
   cheatTrial: (
     id: string,
     agent?: AgentChoice,
     reasoningEffort?: ReasoningEffort,
     cheatPrompt?: CheatPromptChoice,
+    n = 1,
+    maxCost?: number,
   ) =>
     fetch(
       `${API_BASE_URL}/submissions/${id}/cheat-trial?` +
@@ -502,6 +603,8 @@ export const api = {
           agent ? `agent=${agent}` : "",
           reasoningEffort ? `reasoning_effort=${reasoningEffort}` : "",
           cheatPrompt && cheatPrompt !== "default" ? `cheat_prompt=${cheatPrompt}` : "",
+          `n=${n}`,
+          maxCost ? `max_cost_usd=${maxCost}` : "",
         ]
           .filter(Boolean)
           .join("&"),
@@ -513,8 +616,23 @@ export const api = {
     ),
   weakProbe: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/weak-probe`, { method: "POST" }).then(handle<unknown>),
-  edgeCases: (id: string) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/edge-cases`, { method: "POST" }).then(handle<unknown>),
+  // probe also runs the uncovered cases through the real verifier (needs an Oracle pass).
+  edgeCases: (id: string, probe = false) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/edge-cases${probe ? "?probe=true" : ""}`, {
+      method: "POST",
+    }).then(handle<unknown>),
+  answerExposure: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/answer-exposure`, { method: "POST" }).then(
+      handle<unknown>,
+    ),
+  imageInventory: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/image-inventory`, { method: "POST" }).then(
+      handle<unknown>,
+    ),
+  freshBuild: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/fresh-build`, { method: "POST" }).then(
+      handle<unknown>,
+    ),
   changes: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/changes`).then(handle<SubmissionChanges>),
   setReviewerDecision: (id: string, body: { key: string } & ReviewerDecision) =>
@@ -523,12 +641,12 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(handle<unknown>),
-  rubricCheck: (id: string, rubric?: RubricChoice) =>
-    fetch(
-      `${API_BASE_URL}/submissions/${id}/rubric-check` +
-        (rubric && rubric !== "default" ? `?rubric=${rubric}` : ""),
-      { method: "POST" },
-    ).then(handle<unknown>),
+  // Always sends the choice: the backend default is "tb", so leaving it out
+  // would never select Harbor's own rubric.
+  rubricCheck: (id: string, rubric: RubricChoice = "tb") =>
+    fetch(`${API_BASE_URL}/submissions/${id}/rubric-check?rubric=${rubric}`, {
+      method: "POST",
+    }).then(handle<unknown>),
   // runs 1..3: independent judge calls, majority decides (cost grows with runs)
   sufficiency: (id: string, runs = 1) =>
     fetch(`${API_BASE_URL}/submissions/${id}/sufficiency?runs=${runs}`, { method: "POST" }).then(

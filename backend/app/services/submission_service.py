@@ -1,15 +1,22 @@
 import json
 import math
 import re
+from collections import Counter
 
+from app.config import get_settings
 from app.models import LlmSpend, Run, Submission
 from app.services import verifier_report
 from app.services.harbor_runner import CODEX_BAKE_NOTE_MARKER
+from app.services.task_config import TaskConfig
 from app.schemas import (
     AgentTrialsResult,
+    AnswerExposureResult,
     BuildResult,
     ChecksumInfo,
     CheatTrialResult,
+    CheatTrialRun,
+    FreshBuildResult,
+    ImageInventoryResult,
     FailureAnalysisResult,
     RubricCheckResult,
     VariantProbeResult,
@@ -61,14 +68,38 @@ def _get_run(submission: Submission, kind: str, run_index: int = 0) -> Run | Non
     return None
 
 
-def _verifier(run: Run) -> dict | None:
-    """The stored verifier report as a dict (None for older rows)."""
+def _verifier(run: Run, expected_tests: int | None = None) -> dict | None:
+    """The stored verifier report as a dict (None for older rows). With
+    expected_tests, a report listing a different number of tests gets a flag
+    (A.2), computed here so runs recorded before it existed get it too."""
     if not run.verifier_json:
         return None
     try:
-        return json.loads(run.verifier_json)
+        data = json.loads(run.verifier_json)
     except ValueError:
         return None
+    flag = verifier_report.count_flag(data, expected_tests)
+    if flag:
+        data["flags"] = [*(data.get("flags") or []), flag]
+    return data
+
+
+def _expected_tests(submission: Submission) -> int | None:
+    """The number of tests the passing Oracle runs reported (the most common one)."""
+    counts: Counter = Counter()
+    for r in submission.runs:
+        if r.kind == "oracle" and r.reward == 1:
+            ctrf = (_verifier(r) or {}).get("ctrf") or {}
+            if ctrf.get("tests"):
+                counts[ctrf["tests"]] += 1
+    return counts.most_common(1)[0][0] if counts else None
+
+
+def _trial(r: Run, expected_tests: int | None) -> TrialResult:
+    return TrialResult(
+        index=r.run_index, reward=r.reward, raw_reward=r.raw_reward, verifier=_verifier(r, expected_tests),
+        logs=r.logs, task_checksum=r.task_checksum,
+    )
 
 
 def _stage_result(run: Run | None) -> StageResult:
@@ -101,13 +132,33 @@ def _nop_stage_result(run: Run | None) -> StageResult:
     return result.model_copy(update={"status": _invert_status(result.status)})
 
 
+# Static-check findings that make a task's tests sensitive to load or timing.
+_FRAGILE_CHECKS = ("test_timing_assertions", "test_live_directory_scan")
+_SUGGESTED_ORACLE_RUNS = 5
+
+
+def _fragile_findings(submission: Submission) -> list[str]:
+    run = _get_run(submission, "static_checks")
+    try:
+        results = json.loads(run.logs)["results"] if run and run.logs else []
+    except (ValueError, KeyError, TypeError):
+        return []
+    return [r["name"] for r in results if r.get("name") in _FRAGILE_CHECKS and r.get("severity") == "warn"]
+
+
 def _oracle_runs_result(submission: Submission) -> OracleRunsResult:
     oracle_runs = sorted(
         (r for r in submission.runs if r.kind == "oracle"), key=lambda r: r.run_index
     )
+    stress = sorted((r for r in submission.runs if r.kind == "oracle_stress"), key=lambda r: r.run_index)
+    expected = _expected_tests(submission)
+    stress_runs = [_trial(r, expected) for r in stress]
+    stress_note = _stress_note(oracle_runs, stress)
     n = len(oracle_runs)
     if n == 0:
-        return OracleRunsResult(status="not-run", n=0, runs=[], all_passed=None)
+        return OracleRunsResult(
+            status="not-run", n=0, runs=[], all_passed=None, stress_runs=stress_runs, stress_note=stress_note
+        )
 
     statuses = {r.status for r in oracle_runs}
     all_terminal = statuses <= _TERMINAL
@@ -119,14 +170,43 @@ def _oracle_runs_result(submission: Submission) -> OracleRunsResult:
     else:
         status = "running"
 
-    runs = [
-        TrialResult(
-            index=r.run_index, reward=r.reward, raw_reward=r.raw_reward, verifier=_verifier(r),
-            logs=r.logs, task_checksum=r.task_checksum,
+    # G.1: a mix of 1s and 0s means the solution or the verifier is not deterministic.
+    scored = [r.reward for r in oracle_runs if r.status in _TERMINAL and r.reward is not None]
+    flaky = None if not scored else (0 in scored and 1 in scored)
+    flaky_note = None
+    if flaky:
+        flaky_note = (
+            f"{scored.count(0)} of {len(scored)} Oracle runs scored 0 while the others scored 1: the reference "
+            "solution or the verifier is flaky, and an agent trial can fail for the same reason. Run "
+            f"{_SUGGESTED_ORACLE_RUNS} or more Oracle runs and a stress run before trusting the gate."
         )
-        for r in oracle_runs
-    ]
-    return OracleRunsResult(status=status, n=n, runs=runs, all_passed=all_passed)
+    elif scored and len(scored) < _SUGGESTED_ORACLE_RUNS and _fragile_findings(submission):
+        flaky_note = (
+            f"Only {len(scored)} Oracle run(s), and Static Checks found tests that time things or scan folders "
+            f"the solution writes to ({', '.join(_fragile_findings(submission))}): run at least "
+            f"{_SUGGESTED_ORACLE_RUNS}, plus a stress run, since such tests fail only some of the time."
+        )
+    return OracleRunsResult(
+        status=status, n=n, runs=[_trial(r, expected) for r in oracle_runs], all_passed=all_passed,
+        flaky=flaky, flaky_note=flaky_note, stress_runs=stress_runs, stress_note=stress_note,
+        expected_tests=expected,
+    )
+
+
+def _stress_note(oracle_runs: list[Run], stress: list[Run]) -> str | None:
+    done = [r for r in stress if r.status in _TERMINAL and r.reward is not None]
+    if not done:
+        return None
+    failed = sum(1 for r in done if r.reward == 0)
+    if not failed:
+        return f"All {len(done)} stress run(s) passed under CPU load."
+    quiet_passes = any(r.reward == 1 for r in oracle_runs)
+    return (
+        f"{failed} of {len(done)} stress run(s) failed under CPU load"
+        + (" while the normal Oracle runs passed: the tests or the solution depend on a quiet machine "
+           "(a timing assertion, a race, a tight timeout)" if quiet_passes else "")
+        + "."
+    )
 
 
 def _pass_at_k(n: int, c: int, k: int) -> float:
@@ -171,13 +251,8 @@ def _agent_trials_result(submission: Submission) -> AgentTrialsResult:
         pass_rate = passed / n
         pass_at_k = _pass_at_k_table(n, passed)
 
-    trials = [
-        TrialResult(
-            index=r.run_index, reward=r.reward, raw_reward=r.raw_reward, verifier=_verifier(r),
-            logs=r.logs, task_checksum=r.task_checksum,
-        )
-        for r in agent_runs
-    ]
+    expected = _expected_tests(submission)
+    trials = [_trial(r, expected) for r in agent_runs]
     test_summary = None
     if all_terminal:
         test_summary = verifier_report.cluster_failures(
@@ -207,12 +282,49 @@ def _failure_analysis_result(run: Run | None) -> FailureAnalysisResult:
     return FailureAnalysisResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
 
 
-def _cheat_trial_result(run: Run | None) -> CheatTrialResult:
-    if run is None:
+def _cheat_outcome(run: Run) -> str | None:
+    """One word for what a finished cheat trial showed."""
+    if run.status not in ("passed", "failed"):
+        return None
+    try:
+        data = json.loads(run.logs or "")
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    check = (data.get("cheat_check") or {}).get("outcome")
+    if run.reward == 1:
+        return {"pass": "solved honestly", "fail": "reward hacking found"}.get(check, "unresolved, read by hand")
+    if data.get("inconclusive"):
+        return "inconclusive (agent did not try)"
+    return "trap held" if run.status == "passed" else "failed to run"
+
+
+def _cheat_trial_result(submission: Submission) -> CheatTrialResult:
+    rows = sorted((r for r in submission.runs if r.kind == "cheat_trial"), key=lambda r: r.run_index)
+    if not rows:
         return CheatTrialResult(status="not-run", reward=None, logs=None)
+    expected = _expected_tests(submission)
+    runs = [
+        CheatTrialRun(
+            index=r.run_index, status=r.status, reward=r.reward, raw_reward=r.raw_reward,  # type: ignore[arg-type]
+            verifier=_verifier(r, expected), logs=r.logs, task_checksum=r.task_checksum,
+        )
+        for r in rows
+    ]
+    statuses = {r.status for r in rows}
+    if statuses & {"pending", "running"}:
+        status: StageStatus = "running"
+    else:
+        status = "failed" if "failed" in statuses else "passed"
+    counts = Counter(o for o in (_cheat_outcome(r) for r in rows) if o)
+    summary = (
+        f"{len(rows)} trial(s): " + ", ".join(f"{c} {o}" for o, c in counts.most_common()) if counts else None
+    )
+    first = runs[0]
     return CheatTrialResult(
-        status=run.status, reward=run.reward, raw_reward=run.raw_reward, verifier=_verifier(run),  # type: ignore[arg-type]
-        logs=run.logs, task_checksum=run.task_checksum,
+        status=status, reward=first.reward, raw_reward=first.raw_reward, verifier=first.verifier,
+        logs=first.logs, task_checksum=first.task_checksum, n=len(rows), runs=runs, summary=summary,
     )
 
 
@@ -228,7 +340,7 @@ def _checksum_info(submission: Submission) -> ChecksumInfo:
     not_comparable: list[str] = []
     seen_any = False
     for r in submission.runs:
-        if r.kind not in ("oracle", "nop", "agent") or not r.task_checksum:
+        if r.kind not in ("oracle", "oracle_stress", "nop", "agent") or not r.task_checksum:
             continue
         label = r.kind if r.kind == "nop" else f"{r.kind}#{r.run_index}"
         # A trial with Codex baked into its task copy ran a Dockerfile the
@@ -284,6 +396,24 @@ def _edge_cases_result(run: Run | None) -> EdgeCasesResult:
     return EdgeCasesResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
 
 
+def _answer_exposure_result(run: Run | None) -> AnswerExposureResult:
+    if run is None:
+        return AnswerExposureResult(status="not-run", logs=None)
+    return AnswerExposureResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
+
+
+def _image_inventory_result(run: Run | None) -> ImageInventoryResult:
+    if run is None:
+        return ImageInventoryResult(status="not-run", logs=None)
+    return ImageInventoryResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
+
+
+def _fresh_build_result(run: Run | None) -> FreshBuildResult:
+    if run is None:
+        return FreshBuildResult(status="not-run", logs=None)
+    return FreshBuildResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
+
+
 def _reviewer_decisions(run: Run | None) -> dict:
     if run is None or not run.logs:
         return {}
@@ -327,7 +457,7 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         leakage_scan=_leakage_scan_result(leakage_scan_run),
         review_report=_review_report_result(review_report_run),
         failure_analysis=_failure_analysis_result(_get_run(submission, "failure_analysis")),
-        cheat_trial=_cheat_trial_result(_get_run(submission, "cheat_trial")),
+        cheat_trial=_cheat_trial_result(submission),
         rubric_check=_rubric_check_result(_get_run(submission, "rubric_check")),
         variant_probe=_variant_probe_result(_get_run(submission, "variant_probe")),
         weak_probe=_weak_probe_result(_get_run(submission, "weak_probe")),
@@ -336,6 +466,9 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         static_checks=_static_checks_result(_get_run(submission, "static_checks")),
         tb_static_checks=_tb_static_checks_result(_get_run(submission, "tb_static_checks")),
         ai_detection=_ai_detection_result(_get_run(submission, "ai_detection")),
+        answer_exposure=_answer_exposure_result(_get_run(submission, "answer_exposure")),
+        image_inventory=_image_inventory_result(_get_run(submission, "image_inventory")),
+        fresh_build=_fresh_build_result(_get_run(submission, "fresh_build")),
         checksum=_checksum_info(submission),
     )
 
@@ -445,8 +578,10 @@ def _verifier_lines(schema: SubmissionSchema) -> list[str]:
     and the failing-test summary, as plain bullets. Empty when nothing was
     recorded, so a submission from before this existed shows no section."""
     labelled: list[tuple[str, object]] = [(f"Oracle run {r.index + 1}", r) for r in schema.oracle.runs]
+    labelled += [(f"Stress Oracle run {r.index + 1}", r) for r in schema.oracle.stress_runs]
     labelled.append(("Nop", schema.nop))
     labelled += [(f"Agent trial {t.index + 1}", t) for t in schema.agent_trials.trials]
+    labelled += [(f"Cheat trial {t.index + 1}", t) for t in schema.cheat_trial.runs]
     lines: list[str] = []
     for label, r in labelled:
         v = getattr(r, "verifier", None)
@@ -464,6 +599,65 @@ def _verifier_lines(schema: SubmissionSchema) -> list[str]:
             lines.append(f"- Test `{t.name}` failed in {t.failed_in} of {ts.failing_trials} failing trials")
         lines += [f"- NOTE: {n}" for n in ts.notes]
     return lines
+
+
+def _json_field(logs: str | None, key: str):
+    try:
+        return json.loads(logs or "").get(key)
+    except (ValueError, AttributeError):
+        return None
+
+
+# Terminal-Bench 4.0's flat agent timeout.
+POLICY_AGENT_TIMEOUT_SEC = 28800
+
+
+def run_limits(submission: Submission, schema: SubmissionSchema) -> dict:
+    """4.0 E.1: the limits trials ran with, as applied (AGENT_TIMEOUT_SEC
+    overrides the task's own timeout), and how the latest recorded trial
+    actually ran, with a warning when the agent timeout is below the 8 h policy."""
+    settings = get_settings()
+    config = TaskConfig.model_validate_json(submission.task_config_json) if submission.task_config_json else TaskConfig()
+    applied = settings.agent_timeout_sec or config.agent.timeout_sec
+    recorded = next(
+        (
+            t.verifier.facts
+            for t in [*reversed(schema.agent_trials.trials), *reversed(schema.oracle.runs)]
+            if t.verifier and t.verifier.facts
+        ),
+        None,
+    )
+    warnings = []
+    if applied < POLICY_AGENT_TIMEOUT_SEC:
+        warnings.append(
+            f"agent timeout {applied:g}s is below Terminal-Bench 4.0's flat {POLICY_AGENT_TIMEOUT_SEC}s (8 h)"
+            + ("" if settings.agent_timeout_sec else "; AGENT_TIMEOUT_SEC is not set, so the task's own value is used")
+        )
+    return {
+        "agent_timeout_sec": applied,
+        "agent_timeout_source": "AGENT_TIMEOUT_SEC" if settings.agent_timeout_sec else "task.toml",
+        "verifier_timeout_sec": config.verifier.timeout_sec,
+        "cpus": config.environment.cpus,
+        "memory_mb": config.environment.memory_mb,
+        "docker_platform": settings.docker_platform,
+        "latest_recorded_trial": recorded,
+        "warnings": warnings,
+    }
+
+
+def verifier_reports(schema: SubmissionSchema) -> list[dict]:
+    """4.1 A.1/A.3: every run's per-test report, score-details file and flags,
+    for the evidence download."""
+    labelled: list[tuple[str, object]] = [(f"oracle#{r.index}", r) for r in schema.oracle.runs]
+    labelled += [(f"oracle_stress#{r.index}", r) for r in schema.oracle.stress_runs]
+    labelled.append(("nop", schema.nop))
+    labelled += [(f"agent#{t.index}", t) for t in schema.agent_trials.trials]
+    labelled += [(f"cheat_trial#{t.index}", t) for t in schema.cheat_trial.runs]
+    return [
+        {"run": label, "reward": r.reward, **r.verifier.model_dump()}  # type: ignore[attr-defined]
+        for label, r in labelled
+        if getattr(r, "verifier", None) is not None
+    ]
 
 
 def build_summary_markdown(
@@ -504,6 +698,9 @@ def build_summary_markdown(
                 else ", not all runs passed" if schema.oracle.all_passed is False else ""
             )
         ),
+        *([f"  - FLAKY: {schema.oracle.flaky_note}"] if schema.oracle.flaky else
+          [f"  - NOTE: {schema.oracle.flaky_note}"] if schema.oracle.flaky_note else []),
+        *([f"  - Under CPU load: {schema.oracle.stress_note}"] if schema.oracle.stress_note else []),
         f"- Nop: {_fmt_status(schema.nop.status)}"
         + (f" (reward={schema.nop.reward})" if schema.nop.reward is not None else ""),
         f"- Sufficiency: {_fmt_status(schema.sufficiency.status)}",
@@ -548,7 +745,11 @@ def build_summary_markdown(
             )
         ),
         f"- Rubric Check: {_fmt_status(schema.rubric_check.status)}",
-        f"- Cheat Trial: {_fmt_status(schema.cheat_trial.status)}",
+        f"- Cheat Trial: {_fmt_status(schema.cheat_trial.status)}"
+        + (f" ({schema.cheat_trial.summary})" if schema.cheat_trial.summary else ""),
+        f"- Answer Exposure: {_fmt_status(schema.answer_exposure.status)}"
+        + (f" ({_json_field(schema.answer_exposure.logs, 'warn_count')} warning(s))" if schema.answer_exposure.logs else ""),
+        f"- Fresh build (no cache, Oracle): {_fmt_status(schema.fresh_build.status)}",
         f"- Failure Analysis: {_fmt_status(schema.failure_analysis.status)}",
         f"- Review Report: {_fmt_status(schema.review_report.status)}",
         "",

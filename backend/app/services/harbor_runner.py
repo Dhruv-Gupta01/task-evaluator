@@ -11,6 +11,7 @@ import shutil
 import signal
 import subprocess
 import tomllib
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date
@@ -96,6 +97,8 @@ class TrialOutcome:
     # Tool calls the agent made, from its trajectory.json (None if unreadable).
     # The Cheat Trial uses it to tell "the trap held" from "the agent never tried".
     tool_calls: int | None = None
+    # Harbor's folder for this trial (None when Harbor produced no result.json).
+    trial_dir: Path | None = None
 
 
 @dataclass
@@ -276,18 +279,46 @@ _CHEAT_INSTRUCTION = (
 )
 
 
+FRESH_BUILD_NOTE_MARKER = "every RUN step was rebuilt without the layer cache"
+
+
+def _bust_build_cache(env_dir: Path) -> int:
+    """H.1: an ENV line right after every FROM in every Dockerfile of a task
+    copy. RUN steps include the environment in their cache key, so each one
+    after it rebuilds and re-downloads what it fetches; COPY steps stay cached,
+    which is correct (they depend only on the copied files). ENV needs no
+    shell, so it also works in scratch and distroless stages. Returns the
+    number of FROM lines changed."""
+    token = uuid.uuid4().hex
+    changed = 0
+    for dockerfile in sorted(env_dir.rglob("*")):
+        if not dockerfile.is_file() or not (dockerfile.name == "Dockerfile" or dockerfile.name.startswith("Dockerfile.")):
+            continue
+        lines = dockerfile.read_text().splitlines()
+        out = []
+        for line in lines:
+            out.append(line)
+            if re.match(r"\s*FROM\s", line, re.I):
+                out.append(f"ENV TASKEVAL_FRESH_BUILD={token}")
+                changed += 1
+        dockerfile.write_text("\n".join(out) + "\n")
+    return changed
+
+
 def _prepare_task(
     task_root: Path,
     work_dir: Path,
     agent: str = "",
     cheat_instruction: bool = False,
     cheat_instruction_text: str | None = None,
+    fresh_build: bool = False,
 ) -> tuple[Path, str | None]:
     """Returns (task path for Harbor, notes for the logs). When
     HARBOR_NETWORK_MODE or AGENT_TIMEOUT_SEC differ from the task file, or
     Codex is to be baked into the image, or cheat_instruction is set (the Cheat
-    Trial stage), Harbor runs a temporary copy of the task with those changes;
-    the extracted files are never edited."""
+    Trial stage), or fresh_build is set (the fresh-build check), Harbor runs a
+    temporary copy of the task with those changes; the extracted files are
+    never edited."""
     mode = settings.harbor_network_mode
     timeout = settings.agent_timeout_sec
     toml_path = task_root / "task.toml"
@@ -315,7 +346,7 @@ def _prepare_task(
         and settings.codex_bake_into_image
         and (task_root / "environment" / "Dockerfile").is_file()
     )
-    if not edits and not bake and not cheat_instruction:
+    if not edits and not bake and not cheat_instruction and not fresh_build:
         return task_root, None
 
     if work_dir.exists():
@@ -339,6 +370,12 @@ def _prepare_task(
                 f"(Codex {version} {CODEX_BAKE_NOTE_MARKER} by "
                 "CODEX_BAKE_INTO_IMAGE, so the trial needs no download)"
             )
+    if fresh_build:
+        count = _bust_build_cache(work_dir / "environment")
+        notes.append(
+            f"(fresh-build check: {FRESH_BUILD_NOTE_MARKER} ({count} FROM line(s) followed by a one-off ENV), "
+            "so every RUN step fetched its packages again today)"
+        )
     if cheat_instruction:
         instr_path = work_dir / "instruction.md"
         text = instr_path.read_text()
@@ -606,6 +643,7 @@ def _parse_trial(
         task_checksum=result.get("task_checksum"),
         agent_version=agent_version,
         tool_calls=tool_calls,
+        trial_dir=trial_dir,
     )
     try:
         outcome.report = verifier_report.read_verifier_report(trial_dir / "verifier", reward)
@@ -615,6 +653,8 @@ def _parse_trial(
             outcome.report = {"reward_raw": reward, "ctrf": None, "details": None, "flags": []}
         outcome.report["facts"] = facts
         outcome.report["flags"] += facts_flags
+        outcome.report["flags"] += verifier_report.reward_file_flags(trial_dir / "verifier", reward)
+        outcome.report["flags"] += verifier_report.harness_error_flags(trial_dir, reward)
         # E.6: a trial that ended on a model-request timeout, a full disk or a
         # Docker error was not decided by the task.
         exc = result.get("exception_info") or {}
@@ -726,6 +766,7 @@ async def run_job(
     cheat_instruction: bool = False,
     cheat_instruction_text: str | None = None,
     extra_note: str = "",
+    fresh_build: bool = False,
 ) -> HarborJobResult:
     """Run `harbor run` with `n_attempts` trials of `agent` against the task
     at `task_root`. If `cost_cap_usd` is set, the job is stopped once the cost
@@ -738,6 +779,7 @@ async def run_job(
         task_root, jobs_dir.parent / f"{jobs_dir.name}-task", agent,
         cheat_instruction=cheat_instruction,
         cheat_instruction_text=cheat_instruction_text,
+        fresh_build=fresh_build,
     )
     job_dir = jobs_dir / job_name
     hosts_overlay = _write_build_hosts_overlay(jobs_dir.parent / f"{jobs_dir.name}-build-hosts.yaml")
@@ -949,13 +991,22 @@ async def run_job(
 
 
 async def run_single(
-    task_root: Path, agent: str, jobs_dir: Path, job_name: str, timeout_sec: float
+    task_root: Path,
+    agent: str,
+    jobs_dir: Path,
+    job_name: str,
+    timeout_sec: float,
+    extra_note: str = "",
+    fresh_build: bool = False,
 ) -> TrialOutcome:
     """One trial of a model-free agent (oracle/nop)."""
-    result = await run_job(task_root, agent, jobs_dir, job_name, timeout_sec)
+    result = await run_job(
+        task_root, agent, jobs_dir, job_name, timeout_sec, extra_note=extra_note, fresh_build=fresh_build
+    )
     if result.trials:
         return result.trials[0]
-    return TrialOutcome(reward=None, logs=result.error or "harbor produced no trial result")
+    note = f"{extra_note}\n\n" if extra_note else ""
+    return TrialOutcome(reward=None, logs=note + (result.error or "harbor produced no trial result"))
 
 
 @dataclass

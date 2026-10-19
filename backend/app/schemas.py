@@ -97,11 +97,22 @@ class OracleRunsResult(BaseModel):
     (Gate 1 needs 3 *consecutive* 1.0 runs, so history matters -- unlike Nop,
     which stays a single StageResult). "passed" only once every run in `runs`
     has reward=1; any run still pending/running keeps status "running".
-    all_passed is None until every run is terminal."""
+    all_passed is None until every run is terminal.
+
+    `flaky` (G.1) is true when some finished runs scored 1 and others 0: the
+    reference solution or the verifier is not deterministic. `stress_runs`
+    (G.3) are Oracle runs made while a sibling container kept the CPUs busy;
+    they never count for the gate. `expected_tests` is the number of tests the
+    passing runs reported, which other runs' reports are compared with (A.2)."""
     status: StageStatus
     n: int
     runs: list[TrialResult]
     all_passed: bool | None = None
+    flaky: bool | None = None
+    flaky_note: str | None = None
+    stress_runs: list[TrialResult] = []
+    stress_note: str | None = None
+    expected_tests: int | None = None
 
 
 class SufficiencyResult(BaseModel):
@@ -158,6 +169,25 @@ class CheatTrialResult(BaseModel):
     # checksum -- this trial's task copy always has an intentionally edited
     # instruction.md, so it legitimately never matches. See ChecksumInfo.
     task_checksum: str | None = None
+    # B.2: a run can hold 1 to 3 cheat trials. The fields above describe the
+    # first one (as before); `runs` has every trial, `status` is "failed" when
+    # any trial needs a human, and `summary` counts the outcomes.
+    n: int = 0
+    runs: list["CheatTrialRun"] = []
+    summary: str | None = None
+
+
+class CheatTrialRun(BaseModel):
+    index: int
+    status: StageStatus
+    reward: int | None = None
+    raw_reward: float | None = None
+    verifier: VerifierReport | None = None
+    logs: str | None = None
+    task_checksum: str | None = None
+
+
+CheatTrialResult.model_rebuild()
 
 
 class StaticChecksResult(BaseModel):
@@ -220,6 +250,31 @@ class EdgeCasesResult(BaseModel):
     logs: str | None = None
 
 
+class AnswerExposureResult(BaseModel):
+    """Answer-exposure scan (4.1 C.1, 4.0 item 61). Advisory: can the agent
+    find the answer in the files it is given? "failed" = at least one warning.
+    `logs` is JSON: {findings: [{severity, kind, message, files}], warn_count,
+    values_checked, files_scanned, image_listing_used}."""
+    status: StageStatus
+    logs: str | None = None
+
+
+class ImageInventoryResult(BaseModel):
+    """What the built image contains (4.1 F.1, H.2), recorded after Build.
+    `logs` is JSON: {workdir, files: [{path, size}], truncated, pip, dpkg, apk,
+    npm} or {error}."""
+    status: StageStatus
+    logs: str | None = None
+
+
+class FreshBuildResult(BaseModel):
+    """Still builds and solves today (4.1 H.1): a no-cache build plus one
+    Oracle run with every RUN step rebuilt. Advisory. `logs` is JSON:
+    {build: {ok, log_tail}, oracle: {reward, failed_tests, flags, log_tail} | null}."""
+    status: StageStatus
+    logs: str | None = None
+
+
 class RubricCheckResult(BaseModel):
     """`harbor check`: an evaluator agent scores the whole task against
     Harbor's quality rubric (not the agent trials -- see FailureAnalysisResult
@@ -275,6 +330,9 @@ class SubmissionSchema(BaseModel):
     static_checks: StaticChecksResult
     tb_static_checks: TbStaticChecksResult
     ai_detection: AiDetectionResult
+    answer_exposure: AnswerExposureResult
+    image_inventory: ImageInventoryResult
+    fresh_build: FreshBuildResult
     checksum: ChecksumInfo
 
 

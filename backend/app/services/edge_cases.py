@@ -15,19 +15,19 @@ from app.services.llm.factory import get_llm_client
 
 MAX_CASES = 10
 
-LIST_PROMPT = f"""You are an expert reviewing a task for a coding-agent benchmark. From the instruction \\
-alone, list up to {MAX_CASES} edge cases that a careful solver must handle correctly: empty or missing \\
-input, duplicates, boundary values, ordering and ties, malformed or unusual input, units and rounding, \\
-cases the instruction explicitly warns about. Only include cases that apply to this instruction and \\
+LIST_PROMPT = f"""You are an expert reviewing a task for a coding-agent benchmark. From the instruction \
+alone, list up to {MAX_CASES} edge cases that a careful solver must handle correctly: empty or missing \
+input, duplicates, boundary values, ordering and ties, malformed or unusual input, units and rounding, \
+cases the instruction explicitly warns about. Only include cases that apply to this instruction and \
 have a clear correct outcome under it.
 
 Respond with ONLY JSON: {{"cases": [{{"case": "short description", "expected": "what a correct solution does"}}]}}"""
 
-COVER_PROMPT = """You are checking test coverage. You get a list of edge cases and a task's hidden tests. \\
-For each case decide whether some test would FAIL a solution that mishandles it. A test that only \\
+COVER_PROMPT = """You are checking test coverage. You get a list of edge cases and a task's hidden tests. \
+For each case decide whether some test would FAIL a solution that mishandles it. A test that only \
 runs on inputs not exercising the case does not cover it.
 
-Respond with ONLY JSON: {"cases": [{"case": "<same text>", "covered": true or false, \\
+Respond with ONLY JSON: {"cases": [{"case": "<same text>", "covered": true or false, \
 "test": "name of the covering test or null", "reason": "one sentence"}]}"""
 
 

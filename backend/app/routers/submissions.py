@@ -92,28 +92,31 @@ def _require_built_submission(submission_id: str, db: Session) -> Submission:
 
 @router.post("/submissions/{submission_id}/oracle", status_code=202)
 async def trigger_oracle(
-    submission_id: str, n: int = 3, db: Session = Depends(get_db)
+    submission_id: str, n: int = 3, stress: bool = False, db: Session = Depends(get_db)
 ) -> dict[str, str]:
     """Runs n oracle trials, sequentially, always appended to any earlier
     ones on this submission (Gate 1 needs 3 *consecutive* 1.0 runs, so every
-    run's own result stays visible, not just the latest)."""
+    run's own result stays visible, not just the latest). stress=true runs
+    them under CPU load (kind "oracle_stress"); those never count for
+    the gate."""
     if n < 1 or n > settings.max_agent_trials:
         raise HTTPException(
             status_code=400, detail=f"n must be between 1 and {settings.max_agent_trials}"
         )
     _require_built_submission(submission_id, db)
+    kind = "oracle_stress" if stress else "oracle"
 
     last = (
         db.query(func.max(Run.run_index))
-        .filter_by(submission_id=submission_id, kind="oracle")
+        .filter_by(submission_id=submission_id, kind=kind)
         .scalar()
     )
     first_index = 0 if last is None else last + 1
     for run_index in range(first_index, first_index + n):
-        db.add(Run(submission_id=submission_id, kind="oracle", run_index=run_index, status="pending"))
+        db.add(Run(submission_id=submission_id, kind=kind, run_index=run_index, status="pending"))
     db.commit()
 
-    await task_queue.submit(f"{submission_id}:oracle", task_runner.run_oracle_trials(submission_id, n))
+    await task_queue.submit(f"{submission_id}:{kind}", task_runner.run_oracle_trials(submission_id, n, stress))
     return {"status": "started"}
 
 
@@ -347,11 +350,15 @@ async def trigger_cheat_trial(
     agent: str | None = None,
     reasoning_effort: str | None = None,
     cheat_prompt: str = "default",
+    n: int = 1,
+    max_cost_usd: float | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
-    """One trial run with an explicit directive to cheat spliced into the
-    instruction, to confirm the anti-cheat design holds when the agent is told
-    to cheat, not just when it happens to behave. agent picks codex,
+    """n (1 to 3) trials, one after another, with an explicit directive to
+    cheat spliced into the instruction, to confirm the anti-cheat design holds
+    when the agent is told to cheat, not just when it happens to behave. They
+    replace earlier cheat trials. max_cost_usd caps the whole run instead of
+    AGENT_RUN_BUDGET_USD (the monthly budget still applies). agent picks codex,
     claude-code or terminus-2 for this trial only (default: HARBOR_AGENT).
     reasoning_effort overrides AGENT_REASONING_EFFORT for this trial only,
     same as agent-trials -- otherwise this trial silently inherits whatever
@@ -374,33 +381,33 @@ async def trigger_cheat_trial(
             status_code=400,
             detail=f"cheat_prompt must be one of {', '.join(task_runner.CHEAT_PROMPTS)}",
         )
+    if not 1 <= n <= 3:
+        raise HTTPException(status_code=400, detail="n must be 1, 2 or 3")
+    if max_cost_usd is not None and not 0 < max_cost_usd <= 10_000:
+        raise HTTPException(status_code=400, detail="max_cost_usd must be between 0 and 10000")
     _raise_if_over_budget(db, budget.exceeded_message(db))
     _require_built_submission(submission_id, db)
 
-    run = (
-        db.query(Run).filter_by(submission_id=submission_id, kind="cheat_trial", run_index=0).one_or_none()
-    )
-    if run is None:
-        run = Run(submission_id=submission_id, kind="cheat_trial", run_index=0)
-        db.add(run)
-    run.status = "pending"
+    db.query(Run).filter_by(submission_id=submission_id, kind="cheat_trial").delete()
+    for run_index in range(n):
+        db.add(Run(submission_id=submission_id, kind="cheat_trial", run_index=run_index, status="pending"))
     db.commit()
 
     await task_queue.submit(
         f"{submission_id}:cheat_trial",
-        task_runner.run_cheat_trial(submission_id, agent, reasoning_effort, cheat_prompt),
+        task_runner.run_cheat_trial(submission_id, agent, reasoning_effort, cheat_prompt, max_cost_usd),
     )
     return {"status": "started"}
 
 
 @router.post("/submissions/{submission_id}/rubric-check", status_code=202)
 async def trigger_rubric_check(
-    submission_id: str, rubric: str = "default", db: Session = Depends(get_db)
+    submission_id: str, rubric: str = "tb", db: Session = Depends(get_db)
 ) -> dict[str, str]:
     """`harbor check`: an evaluator agent scores the whole task against a
     rubric. Advisory. Needs ANTHROPIC_API_KEY (CHECK_AGENT defaults to
-    claude-code). rubric="tb" swaps in the vendored, richer 35-criterion
-    Terminal-Bench rubric instead of Harbor's own default 11-criterion one."""
+    claude-code). The default is the vendored 36-criterion Terminal-Bench
+    rubric (4.1 A.4); rubric="default" uses Harbor's own 11-criterion one."""
     if rubric not in task_runner.RUBRICS:
         raise HTTPException(
             status_code=400, detail=f"rubric must be one of {', '.join(task_runner.RUBRICS)}"
@@ -472,23 +479,79 @@ async def trigger_weak_probe(submission_id: str, db: Session = Depends(get_db)) 
 
 
 @router.post("/submissions/{submission_id}/edge-cases", status_code=202)
-async def trigger_edge_cases(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+async def trigger_edge_cases(
+    submission_id: str, probe: bool = False, db: Session = Depends(get_db)
+) -> dict[str, str]:
     """Advisory. One judge call lists the edge cases an expert would handle
     (from the instruction alone), a second checks each against the tests.
-    Uncovered cases are findings for a human. No Docker needed."""
+    Uncovered cases are findings for a human. No Docker needed, unless
+    probe=true: then up to 4 uncovered cases also run through the real
+    verifier as deliberately wrong Oracle copies (needs an Oracle pass)."""
     _raise_if_over_budget(db, budget.judge_exceeded_message(db))
     submission = db.get(Submission, submission_id)
     if submission is None:
         raise HTTPException(status_code=404, detail="submission not found")
     if submission.extracted_path is None:
         raise HTTPException(status_code=400, detail="validate the submission first (files must be extracted)")
+    if probe:
+        _require_built_submission(submission_id, db)
+        if db.query(Run).filter_by(submission_id=submission_id, kind="oracle", reward=1).first() is None:
+            raise HTTPException(status_code=400, detail="run the Oracle and get a pass first")
     run = db.query(Run).filter_by(submission_id=submission_id, kind="edge_cases", run_index=0).one_or_none()
     if run is None:
         run = Run(submission_id=submission_id, kind="edge_cases", run_index=0)
         db.add(run)
     run.status = "pending"
     db.commit()
-    await task_queue.submit(f"{submission_id}:edge_cases", task_runner.run_edge_case_check(submission_id))
+    await task_queue.submit(f"{submission_id}:edge_cases", task_runner.run_edge_case_check(submission_id, probe))
+    return {"status": "started"}
+
+
+def _queue_row(db: Session, submission_id: str, kind: str) -> None:
+    run = db.query(Run).filter_by(submission_id=submission_id, kind=kind, run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind=kind, run_index=0)
+        db.add(run)
+    run.status = "pending"
+    db.commit()
+
+
+@router.post("/submissions/{submission_id}/answer-exposure", status_code=202)
+async def trigger_answer_exposure(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """Advisory, no LLM, no Docker: can the agent find the answer in the files
+    it is given (names, copies of solution/ or tests/ files, asserted values)?
+    Uses the built image's file list too when Build recorded one."""
+    submission = db.get(Submission, submission_id)
+    if submission is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if submission.extracted_path is None:
+        raise HTTPException(status_code=400, detail="validate the submission first (files must be extracted)")
+    _queue_row(db, submission_id, "answer_exposure")
+    await task_queue.submit(
+        f"{submission_id}:answer_exposure", task_runner.run_answer_exposure_stage(submission_id)
+    )
+    return {"status": "started"}
+
+
+@router.post("/submissions/{submission_id}/image-inventory", status_code=202)
+async def trigger_image_inventory(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """List the built image's files and package versions again (Build does it
+    automatically; this is for submissions built before that)."""
+    _require_built_submission(submission_id, db)
+    _queue_row(db, submission_id, "image_inventory")
+    await task_queue.submit(
+        f"{submission_id}:image_inventory", task_runner.run_image_inventory_stage(submission_id)
+    )
+    return {"status": "started"}
+
+
+@router.post("/submissions/{submission_id}/fresh-build", status_code=202)
+async def trigger_fresh_build(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """Advisory: does the task still build and solve today? A no-cache,
+    freshly pulled build plus one Oracle run with every RUN step rebuilt."""
+    _require_built_submission(submission_id, db)
+    _queue_row(db, submission_id, "fresh_build")
+    await task_queue.submit(f"{submission_id}:fresh_build", task_runner.run_fresh_build(submission_id))
     return {"status": "started"}
 
 
@@ -706,6 +769,40 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
             "status": schema.rubric_check.status,
             "not_run": schema.rubric_check.status == "not-run",
             "report": _json_or_raw(schema.rubric_check.logs),
+        },
+        "run_limits": submission_service.run_limits(submission, schema),
+        "oracle": {
+            "flaky": schema.oracle.flaky,
+            "flaky_note": schema.oracle.flaky_note,
+            "stress_note": schema.oracle.stress_note,
+            "expected_tests": schema.oracle.expected_tests,
+        },
+        # Per-test results, score-details files and flags of every Harbor run.
+        "verifier_reports": submission_service.verifier_reports(schema),
+        "cheat_trial": {
+            "status": schema.cheat_trial.status,
+            "summary": schema.cheat_trial.summary,
+            "trials": [
+                {k: v for k, v in (_json_or_raw(r.logs) or {}).items() if k != "trial_log"}
+                if isinstance(_json_or_raw(r.logs), dict) else None
+                for r in schema.cheat_trial.runs
+            ],
+        },
+        "answer_exposure": {
+            "status": schema.answer_exposure.status,
+            "not_run": schema.answer_exposure.status == "not-run",
+            "report": _json_or_raw(schema.answer_exposure.logs),
+        },
+        "fresh_build": {
+            "status": schema.fresh_build.status,
+            "not_run": schema.fresh_build.status == "not-run",
+            "report": _json_or_raw(schema.fresh_build.logs),
+        },
+        # Installed package versions in the built image (and its task files).
+        "image_inventory": {
+            "status": schema.image_inventory.status,
+            "not_run": schema.image_inventory.status == "not-run",
+            "report": _json_or_raw(schema.image_inventory.logs),
         },
         "cost": cost_report,
         "summary_markdown": submission_service.build_summary_markdown(

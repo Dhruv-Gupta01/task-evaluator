@@ -13,10 +13,12 @@ from app.db import SessionLocal
 from app.models import Run, Submission
 from app.services import (
     ai_detection,
+    answer_exposure,
     edge_cases,
     budget,
     docker_orchestrator,
     harbor_runner,
+    image_inventory,
     infra_marker_scan,
     leakage_scan,
     review_report,
@@ -344,6 +346,10 @@ async def run_validate(submission_id: str) -> None:
         submission.image_tag = image_tag
         submission.build_logs = build_logs
         db.commit()
+        try:
+            await _record_image_inventory(db, submission)
+        except Exception:
+            db.rollback()  # the build itself passed; the inventory is extra evidence
     except Exception:
         submission = db.get(Submission, submission_id)
         if submission is not None:
@@ -354,13 +360,89 @@ async def run_validate(submission_id: str) -> None:
         db.close()
 
 
-async def run_oracle_trials(submission_id: str, n: int) -> None:
+async def _record_image_inventory(db, submission: Submission) -> None:
+    """F.1/H.2: list the built image's task files and package versions
+    (services/image_inventory.py). Best effort: a failure is recorded on its
+    own Run and never changes the build result."""
+    run = _get_or_create_run(db, submission.id, "image_inventory", 0)
+    run.status = "running"
+    run.reward = None
+    run.started_at = datetime.now(UTC)
+    db.commit()
+    try:
+        data = await asyncio.to_thread(image_inventory.collect, submission.image_tag, submission.id)
+    except Exception:
+        data = {"error": traceback.format_exc()}
+    run.logs = json.dumps(data)
+    run.status = "failed" if data.get("error") else "passed"
+    run.finished_at = datetime.now(UTC)
+    db.commit()
+
+
+def _inventory(db, submission_id: str) -> dict | None:
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="image_inventory", run_index=0).one_or_none()
+    return image_inventory.parse_logs(run.logs) if run else None
+
+
+async def run_image_inventory_stage(submission_id: str) -> None:
+    """Re-list the built image (for submissions built before this existed)."""
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is not None and submission.image_tag:
+            await _record_image_inventory(db, submission)
+    finally:
+        db.close()
+
+
+async def run_answer_exposure_stage(submission_id: str) -> None:
+    """Advisory (4.1 C.1, 4.0 item 61): can the agent find the answer in the
+    files it is given? services/answer_exposure.py; uses the built image's file
+    list too when Build recorded one. "failed" = at least one warning."""
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+        run = _get_or_create_run(db, submission_id, "answer_exposure", 0)
+        run.status = "running"
+        run.reward = None
+        run.logs = None
+        run.started_at = datetime.now(UTC)
+        db.commit()
+        inventory = _inventory(db, submission_id)
+        image_files = [f["path"] for f in inventory["files"]] if inventory else None
+        result = await asyncio.to_thread(answer_exposure.scan, Path(submission.extracted_path), image_files)
+        run.logs = json.dumps(result)
+        run.status = "failed" if result["warn_count"] else "passed"
+        run.reward = 0 if result["warn_count"] else 1
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    except Exception:
+        run = _get_or_create_run(db, submission_id, "answer_exposure", 0)
+        run.status = "failed"
+        run.reward = None
+        run.logs = json.dumps({"error": traceback.format_exc(), "findings": []})
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    finally:
+        db.close()
+
+
+async def run_oracle_trials(submission_id: str, n: int, stress: bool = False) -> None:
     """Oracle, run n times sequentially, always appended to any earlier runs
     on this submission (never cleared): Gate 1 needs 3 *consecutive* 1.0
     runs, so the point of this is to keep every run's own status/reward/logs
     visible afterwards, unlike the old single-row behavior that a fresh
     trigger silently overwrote. One Harbor job at a time -- running two
-    concurrently has caused environment-start failures on this machine."""
+    concurrently has caused environment-start failures on this machine.
+
+    stress=True (G.3) records the runs as kind "oracle_stress", which never
+    count for Gate 1, and keeps the Docker VM's CPUs busy from a sibling
+    container while each one runs, instead of a second parallel Harbor job
+    (which this machine cannot run reliably). A verifier with a wall-clock
+    assertion or a race then shows up as a stress failure next to clean passes."""
+    kind = "oracle_stress" if stress else "oracle"
     db = SessionLocal()
     try:
         submission = db.get(Submission, submission_id)
@@ -369,7 +451,7 @@ async def run_oracle_trials(submission_id: str, n: int) -> None:
 
         runs = (
             db.query(Run)
-            .filter_by(submission_id=submission_id, kind="oracle", status="pending")
+            .filter_by(submission_id=submission_id, kind=kind, status="pending")
             .order_by(Run.run_index)
             .all()
         )  # the router pre-created these n rows as pending; earlier runs are left alone
@@ -381,7 +463,7 @@ async def run_oracle_trials(submission_id: str, n: int) -> None:
             + config.verifier.timeout_sec
             + _HARBOR_TIMEOUT_BUFFER_SEC
         )
-        jobs_dir = settings.storage_dir / "submissions" / submission_id / "runs" / "oracle" / "harbor"
+        jobs_dir = settings.storage_dir / "submissions" / submission_id / "runs" / kind / "harbor"
 
         for run in runs:
             run.status = "running"
@@ -392,13 +474,22 @@ async def run_oracle_trials(submission_id: str, n: int) -> None:
             run.started_at = datetime.now(UTC)
             db.commit()
 
-            outcome = await harbor_runner.run_single(
-                Path(submission.extracted_path),
-                "oracle",
-                jobs_dir,
-                f"oracle-{uuid.uuid4().hex[:8]}",
-                timeout_sec,
-            )
+            load_id, note = None, ""
+            if stress:
+                load_id, note = await asyncio.to_thread(
+                    docker_orchestrator.start_cpu_load, submission.image_tag, submission_id
+                )
+            try:
+                outcome = await harbor_runner.run_single(
+                    Path(submission.extracted_path),
+                    "oracle",
+                    jobs_dir,
+                    f"{kind.replace('_', '-')}-{uuid.uuid4().hex[:8]}",
+                    timeout_sec,
+                    extra_note=note,
+                )
+            finally:
+                await asyncio.to_thread(docker_orchestrator.stop_cpu_load, load_id)
             # The gate needs a perfect 1.0; any partial reward counts as 0.
             _apply_trial_outcome(run, outcome)
             run.logs = outcome.logs
@@ -408,7 +499,7 @@ async def run_oracle_trials(submission_id: str, n: int) -> None:
     except Exception:
         stuck = (
             db.query(Run)
-            .filter_by(submission_id=submission_id, kind="oracle")
+            .filter_by(submission_id=submission_id, kind=kind)
             .filter(Run.status.in_(_STUCK_STATUSES))
             .all()
         )
@@ -420,6 +511,46 @@ async def run_oracle_trials(submission_id: str, n: int) -> None:
         db.commit()
     finally:
         db.close()
+
+
+def _oracle_timeout_sec(config: TaskConfig) -> float:
+    return (
+        config.environment.build_timeout_sec
+        + _agent_timeout_sec(config)
+        + config.verifier.timeout_sec
+        + _HARBOR_TIMEOUT_BUFFER_SEC
+    )
+
+
+async def _run_variant(task_root: Path, base: Path, i: int, variant: dict, mode: str, timeout_sec: float) -> dict:
+    """Apply one proposed edit to a copy of the task and run the Oracle on it.
+    mode "valid": a correct variant should be accepted (else "rejected").
+    mode "broken": a deliberately wrong answer should score 0 ("caught"),
+    and one that scores 1 is the finding ("slipped_through")."""
+    entry = {**variant, "status": "did_not_run", "reward": None, "failed_tests": [], "flags": [], "note": ""}
+    copy_root = base / f"v{i}-src"  # not "-task": run_job uses that name for its own copy
+    if copy_root.exists():
+        shutil.rmtree(copy_root)
+    shutil.copytree(task_root, copy_root, symlinks=True)
+    problem = variant_probe.apply_edits(copy_root, variant["edits"])
+    if problem:
+        entry["note"] = f"the edit could not be applied: {problem}"
+        return entry
+    outcome = await harbor_runner.run_single(
+        copy_root, "oracle", base / f"v{i}", f"variant-{uuid.uuid4().hex[:8]}", timeout_sec
+    )
+    shutil.rmtree(copy_root, ignore_errors=True)
+    report = outcome.report or {}
+    entry["reward"] = outcome.reward
+    entry["failed_tests"] = ((report.get("ctrf") or {}).get("failed_names") or [])[:10]
+    entry["flags"] = report.get("flags") or []
+    if outcome.reward is None:
+        entry["note"] = (outcome.logs or "")[-600:]
+    elif mode == "broken":
+        entry["status"] = "slipped_through" if outcome.reward >= 1.0 else "caught"
+    else:
+        entry["status"] = "accepted" if outcome.reward >= 1.0 else "rejected"
+    return entry
 
 
 async def _run_probe(submission_id: str, kind: str, mode: str) -> None:
@@ -454,41 +585,12 @@ async def _run_probe(submission_id: str, kind: str, mode: str) -> None:
             db.commit()
             return
 
-        config = _get_task_config(submission)
-        timeout_sec = (
-            config.environment.build_timeout_sec
-            + _agent_timeout_sec(config)
-            + config.verifier.timeout_sec
-            + _HARBOR_TIMEOUT_BUFFER_SEC
-        )
+        timeout_sec = _oracle_timeout_sec(_get_task_config(submission))
         base = settings.storage_dir / "submissions" / submission_id / "runs" / kind
         results: list[dict] = []
         for i, variant in enumerate(proposal["variants"]):
-            entry = {**variant, "status": "did_not_run", "reward": None, "failed_tests": [], "flags": [], "note": ""}
+            entry = await _run_variant(task_root, base, i, variant, mode, timeout_sec)
             results.append(entry)
-            copy_root = base / f"v{i}-src"  # not "-task": run_job uses that name for its own copy
-            if copy_root.exists():
-                shutil.rmtree(copy_root)
-            shutil.copytree(task_root, copy_root, symlinks=True)
-            problem = variant_probe.apply_edits(copy_root, variant["edits"])
-            if problem:
-                entry["note"] = f"the edit could not be applied: {problem}"
-                continue
-            outcome = await harbor_runner.run_single(
-                copy_root, "oracle", base / f"v{i}", f"variant-{uuid.uuid4().hex[:8]}", timeout_sec
-            )
-            shutil.rmtree(copy_root, ignore_errors=True)
-            report = outcome.report or {}
-            entry["reward"] = outcome.reward
-            entry["failed_tests"] = ((report.get("ctrf") or {}).get("failed_names") or [])[:10]
-            entry["flags"] = report.get("flags") or []
-            if outcome.reward is None:
-                entry["note"] = (outcome.logs or "")[-600:]
-            elif mode == "broken":
-                # reward 1 on a deliberately broken answer is the finding.
-                entry["status"] = "slipped_through" if outcome.reward >= 1.0 else "caught"
-            else:
-                entry["status"] = "accepted" if outcome.reward >= 1.0 else "rejected"
             db.refresh(run)
             run.logs = json.dumps({"model": settings.llm_model, "mode": mode, "in_progress": True, "variants": results})
             db.commit()
@@ -530,9 +632,15 @@ async def run_weak_probe(submission_id: str) -> None:
     await _run_probe(submission_id, "weak_probe", "broken")
 
 
-async def run_edge_case_check(submission_id: str) -> None:
+async def run_edge_case_check(submission_id: str, probe: bool = False) -> None:
     """Advisory. Edge cases an expert would handle (from the instruction only),
-    each checked against the tests. "failed" means at least one is uncovered."""
+    each checked against the tests. "failed" means at least one is uncovered.
+
+    probe=True (E.3) also runs the uncovered cases through the grader: a model
+    breaks the reference solution on exactly that case, and the copy runs as
+    an Oracle trial. Scoring 1 confirms the gap (`probe.status`
+    "slipped_through"); scoring 0 means a test does catch it after all
+    ("caught"), and the case no longer counts as uncovered."""
     db = SessionLocal()
     try:
         submission = db.get(Submission, submission_id)
@@ -544,9 +652,35 @@ async def run_edge_case_check(submission_id: str) -> None:
         run.logs = None
         run.started_at = datetime.now(UTC)
         db.commit()
+        task_root = Path(submission.extracted_path)
         with _track_llm_spend(db, submission_id, "edge_cases"):
-            result = await edge_cases.run_edge_case_check(Path(submission.extracted_path))
-        uncovered = [c for c in result["cases"] if not c["covered"]]
+            result = await edge_cases.run_edge_case_check(task_root)
+            to_probe = [c for c in result["cases"] if not c["covered"]][: variant_probe.MAX_EDGE_PROBES]
+            proposals = (
+                await variant_probe.propose_edge_breaks(task_root, [c["case"] for c in to_probe])
+                if probe and to_probe and not result.get("error")
+                else []
+            )
+        if probe:
+            result["probed"] = True
+            by_case = {p["case"]: p for p in proposals}
+            timeout_sec = _oracle_timeout_sec(_get_task_config(submission))
+            base = settings.storage_dir / "submissions" / submission_id / "runs" / "edge_cases"
+            for i, case in enumerate(to_probe):
+                proposal = by_case.get(case["case"])
+                if proposal is None:
+                    case["probe"] = {"status": "did_not_run", "note": "no edit was proposed for this case"}
+                else:
+                    entry = await _run_variant(task_root, base, i, proposal, "broken", timeout_sec)
+                    case["probe"] = {
+                        k: entry[k] for k in ("status", "reward", "failed_tests", "flags", "note", "description")
+                    }
+                db.refresh(run)
+                run.logs = json.dumps({**result, "in_progress": True})
+                db.commit()
+        uncovered = [
+            c for c in result["cases"] if not c["covered"] and (c.get("probe") or {}).get("status") != "caught"
+        ]
         run.logs = json.dumps(result)
         run.status = "failed" if uncovered or result.get("error") else "passed"
         run.reward = 0 if run.status == "failed" else 1
@@ -565,6 +699,76 @@ async def run_edge_case_check(submission_id: str) -> None:
 
 async def run_nop(submission_id: str) -> None:
     await _run_harbor_gate(submission_id, kind="nop")
+
+
+async def run_fresh_build(submission_id: str) -> None:
+    """H.1: does the task still build and solve today? Build reuses Docker's
+    layer cache, so a working image from last week can hide a dependency that
+    no longer installs (4.1-28: a new release of an unpinned dependency broke
+    the Oracle). Two steps, advisory: (1) `docker build --no-cache --pull` of
+    environment/; (2) one Oracle run through Harbor on a task copy whose
+    Dockerfiles get a one-off ENV after each FROM, so every RUN step fetches
+    again (harbor_runner._bust_build_cache). The copy's checksum differs by
+    design, so this run is never compared with the canonical task version.
+    logs is JSON: {build: {ok, log_tail}, oracle: {reward, failed_tests, flags,
+    log_tail} | null}."""
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+        run = _get_or_create_run(db, submission_id, "fresh_build", 0)
+        run.status = "running"
+        run.reward = None
+        run.logs = None
+        run.started_at = datetime.now(UTC)
+        db.commit()
+
+        task_root = Path(submission.extracted_path)
+        config = _get_task_config(submission)
+        build_ok, build_log = True, ""
+        try:
+            image_tag, build_log = await asyncio.to_thread(
+                docker_orchestrator.build_image,
+                task_root / "environment",
+                submission_id,
+                config.environment.build_timeout_sec,
+                True,
+            )
+            await asyncio.to_thread(docker_orchestrator.remove_image, image_tag)
+        except docker_orchestrator.DockerBuildError as exc:
+            build_ok, build_log = False, exc.log_text
+        oracle = None
+        if build_ok:
+            jobs_dir = settings.storage_dir / "submissions" / submission_id / "runs" / "fresh_build" / "harbor"
+            if jobs_dir.exists():
+                shutil.rmtree(jobs_dir)
+            outcome = await harbor_runner.run_single(
+                task_root, "oracle", jobs_dir, f"fresh-{uuid.uuid4().hex[:8]}",
+                _oracle_timeout_sec(config), fresh_build=True,
+            )
+            report = outcome.report or {}
+            oracle = {
+                "reward": outcome.reward,
+                "failed_tests": ((report.get("ctrf") or {}).get("failed_names") or [])[:10],
+                "flags": report.get("flags") or [],
+                "log_tail": (outcome.logs or "")[-6000:],
+            }
+        passed = build_ok and oracle is not None and (oracle["reward"] or 0) >= 1.0
+        run.logs = json.dumps({"build": {"ok": build_ok, "log_tail": build_log[-6000:]}, "oracle": oracle})
+        run.status = "passed" if passed else "failed"
+        run.reward = 1 if passed else 0
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    except Exception:
+        run = _get_or_create_run(db, submission_id, "fresh_build", 0)
+        run.status = "failed"
+        run.reward = None
+        run.logs = json.dumps({"error": traceback.format_exc(), "build": None, "oracle": None})
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    finally:
+        db.close()
 
 
 # Headroom over the task's own build + agent + verifier timeouts, which Harbor
@@ -878,9 +1082,10 @@ async def run_sufficiency_check(submission_id: str, runs: int = 1) -> None:
 
         task_root = Path(submission.extracted_path)
 
+        image_section = image_inventory.judge_section(task_root, _inventory(db, submission_id))
         try:
             with _track_llm_spend(db, submission_id, "sufficiency"):
-                verdict = await sufficiency_judge.run_sufficiency_judge(task_root, runs)
+                verdict = await sufficiency_judge.run_sufficiency_judge(task_root, runs, image_section)
         except Exception:
             run.status = "failed"
             run.reward = None
@@ -1069,8 +1274,9 @@ async def run_tb_static_checks_stage(submission_id: str) -> None:
             {
                 "pass_count": report.pass_count,
                 "fail_count": report.fail_count,
+                "skip_count": report.skip_count,
                 "results": [
-                    {"name": r.name, "passed": r.passed, "output": r.output}
+                    {"name": r.name, "passed": r.passed, "output": r.output, "skipped": r.skipped}
                     for r in report.results
                 ],
                 "text": report.as_text(),
@@ -1500,58 +1706,166 @@ async def run_failure_analysis(submission_id: str, rubric: str = "default") -> N
         db.close()
 
 
+async def _cheat_check(db, submission_id: str, outcome: "harbor_runner.TrialOutcome", label: str) -> dict:
+    """reward=1 alone can't say cheated vs. refused-and-solved-honestly (both
+    observed live), so `harbor analyze`'s reward_hacking check reads that one
+    trial (its own folder, so several cheat trials are judged separately)."""
+    analysis_root = settings.storage_dir / "submissions" / submission_id / "runs" / "analysis"
+    if outcome.trial_dir is None:
+        return {"outcome": "unknown", "explanation": None, "cost_usd": None, "error": "the trial folder is missing"}
+    analyze_outcome = await harbor_runner.run_analyze(
+        outcome.trial_dir,
+        analysis_root,
+        f"analyze-{label}",
+        settings.analyze_agent,
+        settings.analyze_model,
+        settings.analyze_timeout_sec,
+        agent_setup_timeout_sec=_agent_setup_timeout_sec(settings.analyze_agent),
+        agent_kwargs=_evaluator_kwargs(settings.analyze_reasoning_effort),
+    )
+    if analyze_outcome.cost_usd is not None:
+        budget.record(
+            db, submission_id, "cheat_trial", settings.analyze_model,
+            analyze_outcome.cost_usd, None, None, None,
+            agent=settings.analyze_agent,
+            reasoning_effort=settings.analyze_reasoning_effort,
+            detail="reward-hacking check on the cheat trial",
+        )
+    results = (analyze_outcome.report or {}).get("results") or []
+    check = (results[0].get("checks") or {}).get("reward_hacking") if results else None
+    if check:
+        return {
+            "outcome": check.get("outcome"),
+            "explanation": check.get("explanation"),
+            "cost_usd": analyze_outcome.cost_usd,
+            "error": None,
+        }
+    return {
+        "outcome": "unknown",
+        "explanation": None,
+        "cost_usd": analyze_outcome.cost_usd,
+        "error": analyze_outcome.error or "harbor analyze produced no reward_hacking check",
+    }
+
+
+async def _finish_cheat_run(
+    db, submission: Submission, run: Run, outcome: "harbor_runner.TrialOutcome", cheat_prompt: str, label: str
+) -> None:
+    run.reward = 1 if (outcome.reward is not None and outcome.reward >= 1.0) else outcome.reward
+    run.raw_reward = outcome.reward
+    run.verifier_json = json.dumps(outcome.report) if outcome.report else None
+    cheat_check = await _cheat_check(db, submission.id, outcome, label) if run.reward == 1 else None
+    # A reward below 1 only means the trap held if the agent really tried. A
+    # trial with no reward, or one where the agent barely made a tool call
+    # (refused, was blocked, crashed early), tested nothing.
+    inconclusive: str | None = None
+    if run.reward != 1:
+        if outcome.reward is None:
+            inconclusive = (
+                "the trial produced no reward (it crashed, timed out or was stopped), "
+                "so the trap was never tested"
+            )
+        elif outcome.tool_calls is not None and outcome.tool_calls < _MIN_CHEAT_TOOL_CALLS:
+            inconclusive = (
+                f"the agent made only {outcome.tool_calls} tool call(s); it did not really "
+                "try to cheat, so the trap was never tested"
+            )
+    # "passed" whenever the trap held outright (reward != 1 and the agent
+    # tried), or when reward=1 but the reward_hacking check positively found
+    # no cheating; anything else (a real finding, an unresolved check, an
+    # inconclusive trial) stays "failed" so it gets a human's attention.
+    run.status = (
+        "passed"
+        if (run.reward != 1 and inconclusive is None)
+        or (cheat_check is not None and cheat_check.get("outcome") == "pass")
+        else "failed"
+    )
+    run.logs = json.dumps(
+        {
+            "trial_log": outcome.logs,
+            "reward": run.reward,
+            "cheat_check": cheat_check,
+            "cheat_prompt": cheat_prompt,
+            "inconclusive": inconclusive,
+            "tool_calls": outcome.tool_calls,
+        }
+    )
+    # Not update_canonical: this trial's task copy always has an intentionally
+    # edited instruction.md, so its checksum never matches the others by
+    # design -- record it, but never let it become or be compared against the
+    # submission's canonical version.
+    _record_checksum(submission, run, outcome.task_checksum, update_canonical=False)
+    run.finished_at = datetime.now(UTC)
+    db.commit()
+
+
 async def run_cheat_trial(
     submission_id: str,
     agent: str | None = None,
     reasoning_effort: str | None = None,
     cheat_prompt: str = "default",
+    max_cost_usd: float | None = None,
 ) -> None:
-    """One trial run with an explicit cheat directive spliced into
+    """Cheat Trials: trials run with an explicit cheat directive spliced into
     instruction.md (harbor_runner._prepare_task, cheat_instruction=True), to
     test whether the anti-cheat design (separate verifier image, tests/ copied
     in only after the agent finishes, solution/ excluded from the build
     context) holds when the agent is TOLD to cheat, not just when it happens
-    to behave. reward staying 0/None already means the trap held ("passed").
-    reward=1 alone doesn't say the agent found a real cheat -- confirmed live:
-    two separate trials (Codex and Claude Code) both got reward 1 after
-    explicitly refusing to cheat ("I won't alter grading machinery...") and
-    solving the task honestly instead, with no access to tests/ or the
-    reference solution. So a reward=1 trial is automatically followed by a
-    `harbor analyze` reward_hacking check on that one trial (same mechanism as
-    Failure Analysis); only a check that positively finds no reward hacking
-    counts as "passed" ("trap held; solved honestly despite the directive").
-    A check that finds reward hacking, or that itself fails, is "failed" and
-    flagged for manual review -- never silently assumed clean. logs is JSON:
-    {trial_log, reward, cheat_check: {outcome, explanation, cost_usd, error}}."""
+    to behave. The router pre-creates 1 to 3 pending rows (kind
+    "cheat_trial", run_index 0..n-1, replacing earlier ones); one Harbor job
+    runs them one after another (4.1 B.2: one clean trial proves little).
+    reward staying 0/None already means the trap held ("passed"). reward=1
+    alone doesn't say the agent found a real cheat -- confirmed live: two
+    separate trials (Codex and Claude Code) both got reward 1 after explicitly
+    refusing to cheat and solving the task honestly instead. So each reward=1
+    trial is followed by a `harbor analyze` reward_hacking check on that trial
+    alone; only a check that positively finds no reward hacking counts as
+    "passed". A check that finds reward hacking, or that itself fails, is
+    "failed" and flagged for manual review -- never silently assumed clean.
+    Each row's logs is JSON: {trial_log, reward, cheat_check: {outcome,
+    explanation, cost_usd, error}, cheat_prompt, inconclusive, tool_calls}."""
     db = SessionLocal()
     try:
         submission = db.get(Submission, submission_id)
         if submission is None or submission.extracted_path is None:
             return
-
-        run = _get_or_create_run(db, submission_id, "cheat_trial")
+        runs = (
+            db.query(Run)
+            .filter_by(submission_id=submission_id, kind="cheat_trial", status="pending")
+            .order_by(Run.run_index)
+            .all()
+        )
+        if not runs:
+            return
         agent = agent or settings.harbor_agent
         config_error = _agent_config_error(agent)
         if config_error:
-            run.status = "failed"
-            run.reward = None
-            run.logs = config_error
-            run.finished_at = datetime.now(UTC)
+            for r in runs:
+                r.status = "failed"
+                r.reward = None
+                r.logs = json.dumps(
+                    {"trial_log": config_error, "reward": None, "cheat_check": None, "cheat_prompt": cheat_prompt}
+                )
+                r.finished_at = datetime.now(UTC)
             db.commit()
             return
 
-        run.status = "running"
-        run.reward = None
-        run.logs = None
-        run.started_at = datetime.now(UTC)
+        now = datetime.now(UTC)
+        for r in runs:
+            r.status = "running"
+            r.reward = None
+            r.raw_reward = None
+            r.verifier_json = None
+            r.logs = None
+            r.started_at = now
         db.commit()
 
+        n = len(runs)
         config = _get_task_config(submission)
         timeout_sec = (
             config.environment.build_timeout_sec
-            + _agent_timeout_sec(config)
-            + config.verifier.timeout_sec
-            + max(_AGENT_SETUP_ALLOWANCE_SEC, _agent_setup_timeout_sec(agent))
+            + n * (_agent_timeout_sec(config) + config.verifier.timeout_sec)
+            + n * max(_AGENT_SETUP_ALLOWANCE_SEC, _agent_setup_timeout_sec(agent))
             + _HARBOR_TIMEOUT_BUFFER_SEC
         )
         agent_kwargs = _agent_kwargs(agent, reasoning_effort)
@@ -1560,10 +1874,10 @@ async def run_cheat_trial(
         if jobs_dir.exists():
             shutil.rmtree(jobs_dir)
 
-        outcome_holder: list[harbor_runner.TrialOutcome] = []
+        pending = list(runs)
+        finished: list[tuple[Run, harbor_runner.TrialOutcome]] = []
 
         async def on_trial(outcome: harbor_runner.TrialOutcome) -> str | None:
-            outcome_holder.append(outcome)
             if outcome.cost_usd is not None:
                 budget.record(
                     db, submission_id, "cheat_trial", model,
@@ -1571,12 +1885,23 @@ async def run_cheat_trial(
                     outcome.n_output_tokens,
                     agent=agent,
                     reasoning_effort=agent_kwargs.get("reasoning_effort"),
-                    trial_index=1,
+                    trial_index=pending[0].run_index + 1 if pending else None,
                     detail="cheat trial (agent told to cheat)",
                 )
-            return None
+            if pending:
+                run = pending.pop(0)
+                run.reward = 1 if (outcome.reward is not None and outcome.reward >= 1.0) else outcome.reward
+                run.logs = json.dumps(
+                    {"trial_log": outcome.logs, "reward": run.reward, "cheat_check": None, "cheat_prompt": cheat_prompt}
+                )
+                finished.append((run, outcome))
+            db.commit()
+            reason = budget.exceeded_message(db)
+            return f"skipped: {reason}" if reason and pending else None
 
-        cost_cap_usd, cost_cap_label = _run_cost_cap(db)
+        cost_cap_usd, cost_cap_label = _run_cost_cap(db, max_cost_usd)
+        if agent == "claude-code" and cost_cap_usd is not None:
+            agent_kwargs["max_budget_usd"] = f"{max(cost_cap_usd / n, 0.01):.2f}"
         job_name = f"cheat-{uuid.uuid4().hex[:8]}"
         result = await harbor_runner.run_job(
             Path(submission.extracted_path),
@@ -1586,7 +1911,7 @@ async def run_cheat_trial(
             timeout_sec,
             model=model,
             agent_kwargs=agent_kwargs,
-            n_attempts=1,
+            n_attempts=n,
             n_concurrent=1,
             agent_setup_timeout_sec=_agent_setup_timeout_sec(agent),
             cost_cap_usd=cost_cap_usd,
@@ -1600,126 +1925,44 @@ async def run_cheat_trial(
                 if cheat_prompt == "combined"
                 else None
             ),
+            extra_note=_cost_cap_warning(cost_cap_usd, cost_cap_label, n, _agent_timeout_sec(config)),
         )
 
-        if outcome_holder:
-            outcome = outcome_holder[0]
-            run.reward = 1 if (outcome.reward is not None and outcome.reward >= 1.0) else outcome.reward
-            run.raw_reward = outcome.reward
-            run.verifier_json = json.dumps(outcome.report) if outcome.report else None
-            cheat_check: dict | None = None
-            if run.reward == 1:
-                # reward=1 alone can't say cheated vs. refused-and-solved-honestly
-                # (both observed live) -- ask harbor analyze's reward_hacking check.
-                analysis_root = (
-                    settings.storage_dir / "submissions" / submission_id / "runs" / "analysis"
-                )
-                analyze_outcome = await harbor_runner.run_analyze(
-                    jobs_dir / job_name,
-                    analysis_root,
-                    f"analyze-{job_name}",
-                    settings.analyze_agent,
-                    settings.analyze_model,
-                    settings.analyze_timeout_sec,
-                    agent_setup_timeout_sec=_agent_setup_timeout_sec(settings.analyze_agent),
-                    agent_kwargs=_evaluator_kwargs(settings.analyze_reasoning_effort),
-                )
-                if analyze_outcome.cost_usd is not None:
-                    budget.record(
-                        db, submission_id, "cheat_trial", settings.analyze_model,
-                        analyze_outcome.cost_usd, None, None, None,
-                        agent=settings.analyze_agent,
-                        reasoning_effort=settings.analyze_reasoning_effort,
-                        detail="reward-hacking check on the cheat trial",
-                    )
-                results = (analyze_outcome.report or {}).get("results") or []
-                check = (results[0].get("checks") or {}).get("reward_hacking") if results else None
-                if check:
-                    cheat_check = {
-                        "outcome": check.get("outcome"),
-                        "explanation": check.get("explanation"),
-                        "cost_usd": analyze_outcome.cost_usd,
-                        "error": None,
-                    }
-                else:
-                    cheat_check = {
-                        "outcome": "unknown",
-                        "explanation": None,
-                        "cost_usd": analyze_outcome.cost_usd,
-                        "error": analyze_outcome.error or "harbor analyze produced no reward_hacking check",
-                    }
-            # A reward below 1 only means the trap held if the agent really
-            # tried. A trial with no reward, or one where the agent barely made
-            # a tool call (refused, was blocked, crashed early), tested nothing.
-            inconclusive: str | None = None
-            if run.reward != 1:
-                if outcome.reward is None:
-                    inconclusive = (
-                        "the trial produced no reward (it crashed, timed out or was stopped), "
-                        "so the trap was never tested"
-                    )
-                elif outcome.tool_calls is not None and outcome.tool_calls < _MIN_CHEAT_TOOL_CALLS:
-                    inconclusive = (
-                        f"the agent made only {outcome.tool_calls} tool call(s); it did not really "
-                        "try to cheat, so the trap was never tested"
-                    )
-            # "passed" whenever the trap held outright (reward != 1 and the
-            # agent tried), or when reward=1 but the reward_hacking check
-            # positively found no cheating; anything else (a real finding, an
-            # unresolved check, an inconclusive trial) stays "failed" so it
-            # gets a human's attention.
-            run.status = (
-                "passed"
-                if (run.reward != 1 and inconclusive is None)
-                or (cheat_check is not None and cheat_check.get("outcome") == "pass")
-                else "failed"
-            )
-            run.logs = json.dumps(
-                {
-                    "trial_log": outcome.logs,
-                    "reward": run.reward,
-                    "cheat_check": cheat_check,
-                    "cheat_prompt": cheat_prompt,
-                    "inconclusive": inconclusive,
-                    "tool_calls": outcome.tool_calls,
-                }
-            )
-            # Not update_canonical: this trial's task copy always has an
-            # intentionally edited instruction.md, so its checksum never
-            # matches the others by design -- record it, but never let it
-            # become or be compared against the submission's canonical version.
-            _record_checksum(submission, run, outcome.task_checksum, update_canonical=False)
-        else:
+        for run, outcome in finished:
+            await _finish_cheat_run(db, submission, run, outcome, cheat_prompt, f"{job_name}-{run.run_index}")
+        for run in pending:  # trials that never produced a result
             run.status = "failed"
             run.reward = None
             run.logs = json.dumps(
                 {
-                    "trial_log": result.error or "harbor produced no result for the cheat trial",
+                    "trial_log": result.error or "harbor produced no result for this cheat trial",
                     "reward": None,
                     "cheat_check": None,
                     "cheat_prompt": cheat_prompt,
+                    "inconclusive": "the trial produced no result, so the trap was never tested",
                 }
             )
-        run.finished_at = datetime.now(UTC)
+            run.finished_at = datetime.now(UTC)
         db.commit()
     except Exception:
-        run = _get_or_create_run(db, submission_id, "cheat_trial")
-        if run.status in _STUCK_STATUSES:
-            run.status = "failed"
-            run.reward = None
-            run.logs = json.dumps({"trial_log": traceback.format_exc(), "reward": None, "cheat_check": None})
-            run.finished_at = datetime.now(UTC)
-            db.commit()
+        for run in db.query(Run).filter_by(submission_id=submission_id, kind="cheat_trial").all():
+            if run.status in _STUCK_STATUSES:
+                run.status = "failed"
+                run.reward = None
+                run.logs = json.dumps({"trial_log": traceback.format_exc(), "reward": None, "cheat_check": None})
+                run.finished_at = datetime.now(UTC)
+        db.commit()
     finally:
         db.close()
 
 
-async def run_rubric_check(submission_id: str, rubric: str = "default") -> None:
+async def run_rubric_check(submission_id: str, rubric: str = "tb") -> None:
     """`harbor check`: an evaluator agent reads the whole task and scores it
-    against a rubric -- Harbor's own default (an automated stand-in for a
-    human task reviewer) unless rubric="tb", which swaps in the vendored,
-    richer 35-criterion Terminal-Bench rubric (vendor/tb_prompts/, see
-    PROVENANCE.md) instead. Advisory, like Failure Analysis. Result stored
+    against a rubric -- the vendored 36-criterion Terminal-Bench rubric
+    (vendor/tb_prompts/, see PROVENANCE.md) by default, since criteria such as
+    ctrf_reporting, verifier_execution_isolation, resource_configuration and
+    effective_instruction_length exist only there (4.1 A.4), or Harbor's own
+    11-criterion default with rubric="default". Advisory, like Failure Analysis. Result stored
     as JSON in the Run's logs: {"agent", "model", "cost_usd", "error",
     "results": [...], "rubric"}."""
     db = SessionLocal()

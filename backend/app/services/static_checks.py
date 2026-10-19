@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.services.hygiene_checks import _own_files, run_hygiene_checks
+from app.services.reproducibility_checks import run_reproducibility_checks
+from app.services.verifier_isolation import run_isolation_checks
 
 Severity = str  # "fail" | "warn" | "info"
 
@@ -295,4 +297,6 @@ def run_static_checks(task_root: Path) -> StaticCheckReport:
     check_zip_layout(task_root, report)
     check_rubric(task_root, report)
     run_hygiene_checks(task_root, report)
+    run_isolation_checks(task_root, report)
+    run_reproducibility_checks(task_root, report)
     return report

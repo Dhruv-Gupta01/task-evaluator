@@ -21,6 +21,9 @@ a file whose contents are not shown (binary, truncated, or over the size budget)
 sandbox — never report it as missing.
 2. HIDDEN TEST SUITE — the grading code, which the agent never sees.
 3. REFERENCE SOLUTION (solution/) — what the Oracle runs; the agent never sees it.
+4. Sometimes AUTHOR NOTES (README.md) and an AGENT IMAGE section. The agent never sees README.md. The \
+AGENT IMAGE section comes from the built image and names environment/ files that never reach the agent's \
+container (copied only into a build stage, or never copied): treat those as hidden, not agent-visible.
 
 Your job: for every discrete requirement, value, or behavior the hidden tests actually check, \
 decide whether it is stated or derivable from the agent-visible material alone. Flag anything \
@@ -61,6 +64,14 @@ without a test tying the two together?
 would pass?
 - [oracle] Does the reference solution compute its output from the inputs, or does it read from \
 tests/, embed the expected output, or copy a ground-truth file? Only the latter is a gap.
+- [invisible] Does any rule or value the tests enforce appear only in a file the agent cannot see: \
+README.md, solution/, tests/, or an environment/ file the AGENT IMAGE section says is not in the agent's \
+container? Name the file. A rule stated only there is a gap even when the task's own files contain it.
+- [formula] For every formula, constant, correction or conversion the expected values depend on, say \
+whether the instruction states it, the agent-visible files let an expert derive it (say how), or neither. \
+Only "neither" is a gap; a step an expert can derive is difficulty. If the author notes say a step is left \
+unstated on purpose and explain how to derive it, weigh that explanation, but check the derivation really \
+works from the agent-visible material.
 
 Respond with ONLY a JSON object, no other text, in exactly this shape:
 {
@@ -148,9 +159,12 @@ def _merge(verdicts: list[dict], grouping: list[list[int]] | None = None) -> dic
     return {"passed": passed, "verdict": verdict, "gaps": gaps}
 
 
-async def run_sufficiency_judge(task_root: Path, runs: int = 1) -> dict:
+async def run_sufficiency_judge(task_root: Path, runs: int = 1, image_section: str = "") -> dict:
     """`runs` independent judge calls (the later ones see the sections in a
-    different order); the majority decides and disagreement is reported."""
+    different order); the majority decides and disagreement is reported.
+    `image_section` (image_inventory.judge_section) says which environment/
+    files really reach the agent's container; empty when Build recorded no
+    image listing, and then every environment/ file counts as visible."""
     instruction_path = task_root / "instruction.md"
     environment_dir = task_root / "environment"
     tests_dir = task_root / "tests"
@@ -160,12 +174,15 @@ async def run_sufficiency_judge(task_root: Path, runs: int = 1) -> dict:
     tests_text = _read_text_files(tests_dir) if tests_dir.is_dir() else ""
     solution_dir = task_root / "solution"
     solution_text = _read_text_files(solution_dir) if solution_dir.is_dir() else ""
+    readme_path = task_root / "README.md"
+    readme_text = readme_path.read_text(errors="replace")[:60_000] if readme_path.is_file() else ""
 
     visible = (
         "=== AGENT-VISIBLE: instruction.md ===\n"
         f"{instruction_text}\n\n"
         "=== AGENT-VISIBLE: environment/ ===\n"
         f"{environment_text}\n\n"
+        f"{image_section}\n"
     )
     hidden = (
         "=== HIDDEN: tests/ (the agent never sees this) ===\n"
@@ -173,6 +190,8 @@ async def run_sufficiency_judge(task_root: Path, runs: int = 1) -> dict:
         "=== HIDDEN: solution/ (the reference solution the Oracle runs) ===\n"
         f"{solution_text}\n"
     )
+    if readme_text:
+        hidden += f"\n=== HIDDEN: README.md (author notes; the agent never sees them) ===\n{readme_text}\n"
 
     client = get_llm_client()
     verdicts = []

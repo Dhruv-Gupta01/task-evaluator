@@ -1,14 +1,36 @@
 # Vendored: Terminal-Bench official static checks
 
 Source: https://github.com/harbor-framework/terminal-bench
-Path: `scripts/checks/check-*.sh`, `scripts/checks/check_ai_detection.py`
-Commit: `1dcda8716784493721921c23e4bc7f7d988b4494` (2026-09-28)
+Path: `scripts/checks/check-*.sh`, `scripts/checks/check-cpu-threads.py`, `scripts/checks/check_ai_detection.py`
+Commit: `2e29ca91d5f1cb6fb60924bf867acc755565c044` (2026-10-15)
 License: Apache License 2.0 (see upstream repo's `LICENSE`)
+
+Refreshed on 2026-10-19 from the 2026-09-28 pin (`1dcda87`), which brought in:
+
+- `check-compose-volumes.sh` (upstream #1520): rejects every compose volume,
+  named or bind. It replaces `check-compose-host-binds.sh`, which upstream
+  removed and which is removed here too.
+- `check-task-changelog.sh` (upstream #2193): a new Change Log entry must add,
+  not replace, a line and must carry the task version as `X.Y.Z` after the PR
+  link; with `PR_NUMBER` and `REPO_URL` set it must also link that PR. Neither
+  variable is set here, so the PR-link part does not run on this platform.
+- `check-cpu-threads.sh` + `check-cpu-threads.py`: an advisory scan of thread
+  pool settings (OMP/MKL/OpenBLAS) against `[environment].cpus`. It prints
+  `WARN` lines and exits 0, so its output is shown even when it passes.
+- `check-image-digests.sh`: every `FROM` and compose `image:` must be digest
+  pinned. It needs the `dockerfile-pin` CLI on PATH (upstream CI installs
+  v1.5.0 from github.com/azu/dockerfile-pin); without it the result is
+  reported as "not run", not as a task failure.
+
+Upstream's `test-*.sh`/`test-*.py` files test the checks themselves and
+`rubric_review.py` drives their CI; neither is vendored. The canary change
+discussed upstream (#2200/#2210) is not merged as of this commit, so
+`check-canary.sh` is unchanged.
 
 `check_ai_detection.py` (Layer 3 of Terminal-Bench's own three-layer AI-usage
 detection -- see `docs/prompts/task-implementation.toml`'s `instruction_concision`
 criterion for Layer 2, already run via the platform's Rubric Check "TB" option)
-is genuinely NOT one of the 26 `check-*.sh` scripts and is NOT wired into any
+is genuinely NOT one of the `check-*.sh` scripts (29 since the refresh) and is NOT wired into any
 of TB's own automatic CI workflows -- confirmed directly against their
 `.github/workflows/`: it's optional, off by default, enabled only by adding a
 step with a `GPTZERO_API_KEY` secret. It calls a real third-party service
