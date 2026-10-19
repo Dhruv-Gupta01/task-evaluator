@@ -466,7 +466,7 @@ async def _run_probe(submission_id: str, kind: str, mode: str) -> None:
         for i, variant in enumerate(proposal["variants"]):
             entry = {**variant, "status": "did_not_run", "reward": None, "failed_tests": [], "flags": [], "note": ""}
             results.append(entry)
-            copy_root = base / f"v{i}-task"
+            copy_root = base / f"v{i}-src"  # not "-task": run_job uses that name for its own copy
             if copy_root.exists():
                 shutil.rmtree(copy_root)
             shutil.copytree(task_root, copy_root, symlinks=True)
@@ -477,6 +477,7 @@ async def _run_probe(submission_id: str, kind: str, mode: str) -> None:
             outcome = await harbor_runner.run_single(
                 copy_root, "oracle", base / f"v{i}", f"variant-{uuid.uuid4().hex[:8]}", timeout_sec
             )
+            shutil.rmtree(copy_root, ignore_errors=True)
             report = outcome.report or {}
             entry["reward"] = outcome.reward
             entry["failed_tests"] = ((report.get("ctrf") or {}).get("failed_names") or [])[:10]

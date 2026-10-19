@@ -362,6 +362,10 @@ function SubmissionDetail() {
       )}
 
       <div className="grid gap-4 md:grid-cols-2">
+        <div className="md:col-span-2">
+          <h2 className="text-lg font-semibold">Before the agent trials</h2>
+          <p className="text-xs text-muted-foreground">Run in this order: build, then Oracle and Nop, then the task-file checks and probes. Greyed-out buttons say what they are waiting for.</p>
+        </div>
         {/* Validate & Build */}
         <StageCard
           title="Validate & Build"
@@ -461,6 +465,386 @@ function SubmissionDetail() {
           <LogPanel logs={data.nop.logs} title="Nop logs" />
         </StageCard>
 
+        {/* Static Checks */}
+        <StageCard
+          title="Static Checks"
+          description="Advisory, LLM-free mechanical checks over instruction.md/test.sh/Dockerfile/zip layout — word counts, formatting, hygiene. Not a pass/fail gate."
+          status={data.static_checks.status}
+        >
+          <RunButton
+            label="Run Static Checks"
+            runningLabel="Checking…"
+            onClick={() => mStaticChecks.mutate()}
+            running={
+              data.static_checks.status === "running" || data.static_checks.status === "pending"
+            }
+            pending={mStaticChecks.isPending}
+            disabled={!validated}
+            disabledReason="Validate the submission first"
+          />
+          {data.static_checks.logs &&
+            (() => {
+              let report: StaticCheckReport | null = null;
+              try {
+                report = JSON.parse(data.static_checks.logs) as StaticCheckReport;
+              } catch {
+                report = null;
+              }
+              if (!report) return null;
+              return (
+                <>
+                  <div
+                    className={`rounded-md border p-2.5 text-xs ${
+                      report.fail_count === 0
+                        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                        : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
+                    }`}
+                  >
+                    {report.fail_count} fail, {report.warn_count} warn, {report.results.length}{" "}
+                    checks total
+                  </div>
+                  <LogPanel logs={report.text} title="Static check findings" />
+                </>
+              );
+            })()}
+        </StageCard>
+
+        {/* TB Static Checks */}
+        <StageCard
+          title="TB Static Checks"
+          description="Advisory — Terminal-Bench's own official static checks (vendor/tb_checks/), a different rule set from the platform's own Static Checks above. Not a pass/fail gate."
+          status={data.tb_static_checks.status}
+        >
+          <RunButton
+            label="Run TB Static Checks"
+            runningLabel="Checking…"
+            onClick={() => mTbStaticChecks.mutate()}
+            running={
+              data.tb_static_checks.status === "running" ||
+              data.tb_static_checks.status === "pending"
+            }
+            pending={mTbStaticChecks.isPending}
+            disabled={!validated}
+            disabledReason="Validate the submission first"
+          />
+          {data.tb_static_checks.logs &&
+            (() => {
+              let report: TbStaticCheckReport | null = null;
+              try {
+                report = JSON.parse(data.tb_static_checks.logs) as TbStaticCheckReport;
+              } catch {
+                report = null;
+              }
+              if (!report) return null;
+              return (
+                <>
+                  <div
+                    className={`rounded-md border p-2.5 text-xs ${
+                      report.fail_count === 0
+                        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                        : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
+                    }`}
+                  >
+                    {report.pass_count} pass, {report.fail_count} fail
+                  </div>
+                  <LogPanel logs={report.text} title="TB check findings" />
+                </>
+              );
+            })()}
+        </StageCard>
+
+        {/* Leakage Scan */}
+        <StageCard
+          title="Leakage Scan"
+          description="Advisory only — flags unedited LLM chat artifacts (disclaimers, unfilled placeholders). Not a pass/fail gate."
+          status={data.leakage_scan.status}
+        >
+          <RunButton
+            label="Run Leakage Scan"
+            runningLabel="Scanning…"
+            onClick={() => mLeakageScan.mutate()}
+            running={
+              data.leakage_scan.status === "running" || data.leakage_scan.status === "pending"
+            }
+            pending={mLeakageScan.isPending}
+            disabled={!validated}
+            disabledReason="Validate the submission first"
+          />
+          {data.leakage_scan.passed != null && (
+            <div
+              className={`rounded-md border p-2.5 text-xs ${
+                data.leakage_scan.passed
+                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                  : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+              }`}
+            >
+              {data.leakage_scan.passed
+                ? "Clean — no leakage artifacts found."
+                : "Artifacts found — worth a human look, not proof of misconduct."}
+            </div>
+          )}
+          <LogPanel logs={data.leakage_scan.logs} title="Leakage scan findings" />
+        </StageCard>
+
+        {/* AI Detection */}
+        <StageCard
+          title="AI Detection"
+          description="Advisory — Terminal-Bench's three AI-usage detection layers side by side, never merged into one score. The button runs Layer 3, the real GPTZero API against instruction.md and solution/solve.sh (needs GPTZERO_API_KEY; a graceful no-op without it). Layer 2 comes from the Rubric Check below (TB rubric), so run that to fill it in."
+          status={data.ai_detection.status}
+          wide
+        >
+          <RunButton
+            label="Run AI Detection"
+            runningLabel="Checking…"
+            onClick={() => mAiDetection.mutate()}
+            running={
+              data.ai_detection.status === "running" || data.ai_detection.status === "pending"
+            }
+            pending={mAiDetection.isPending}
+            disabled={!validated}
+            disabledReason="Validate the submission first"
+          />
+          {data.ai_detection.logs &&
+            (() => {
+              let report: AiDetectionReport | null = null;
+              try {
+                report = JSON.parse(data.ai_detection.logs) as AiDetectionReport;
+              } catch {
+                report = null;
+              }
+              if (!report) return null;
+              if (report.skipped) {
+                return (
+                  <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-700 dark:text-amber-400">
+                    Skipped — {report.api_key_configured
+                      ? "GPTZero returned a network error"
+                      : "GPTZERO_API_KEY not configured"}
+                    . Not a pass/fail result.
+                  </div>
+                );
+              }
+              return (
+                <>
+                  {report.error && (
+                    <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs whitespace-pre-wrap max-h-48 overflow-y-auto">
+                      {report.error}
+                    </div>
+                  )}
+                  {report.passed != null && (
+                    <div
+                      className={`rounded-md border p-2.5 text-xs ${
+                        report.passed
+                          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                          : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
+                      }`}
+                    >
+                      {report.passed
+                        ? "Below the AI-generated threshold."
+                        : "Flagged — at or above the 70% AI-generated threshold."}
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+          <AiLayersOverview rubricCheck={data.rubric_check} aiDetection={data.ai_detection} />
+        </StageCard>
+
+        {/* Instruction Sufficiency */}
+        <StageCard
+          title="Instruction Sufficiency"
+          description="LLM judge: is instruction.md + environment/ enough to pass the hidden tests?"
+          status={data.sufficiency.status}
+        >
+          <div className="flex items-center gap-2">
+            <label className="text-sm text-muted-foreground">Judge runs</label>
+            <Select value={sufficiencyRuns} onValueChange={setSufficiencyRuns}>
+              <SelectTrigger className="w-20">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {["1", "2", "3"].map((r) => (
+                  <SelectItem key={r} value={r}>
+                    {r}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <span className="text-xs text-muted-foreground">
+              more runs cost more; the majority decides and disagreement is shown
+            </span>
+          </div>
+          <RunButton
+            label="Run Sufficiency Check"
+            runningLabel="Checking…"
+            onClick={() => mSufficiency.mutate()}
+            running={data.sufficiency.status === "running" || data.sufficiency.status === "pending"}
+            pending={mSufficiency.isPending}
+            disabled={!validated}
+            disabledReason="Validate the submission first"
+          />
+          {data.sufficiency.passed != null && (
+            <div
+              className={`rounded-md border p-2.5 text-xs ${
+                data.sufficiency.passed
+                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                  : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
+              }`}
+            >
+              {data.sufficiency.passed
+                ? "Sufficient — no gaps found."
+                : "Insufficient — see gaps below."}
+            </div>
+          )}
+          <LogPanel logs={data.sufficiency.logs} title="Sufficiency verdict" />
+        </StageCard>
+
+        {/* Edge cases */}
+        <StageCard
+          title="Edge-Case Coverage"
+          description="One model call lists the edge cases an expert would handle, from the instruction alone; a second checks each against the hidden tests. An uncovered case is a question for a reviewer, not a verdict. Advisory; no Docker needed."
+          status={data.edge_cases.status}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <RunButton
+              label="Run Edge-Case Check"
+              runningLabel="Checking…"
+              onClick={() => mEdgeCases.mutate()}
+              running={isActive(data.edge_cases.status)}
+              pending={mEdgeCases.isPending}
+              disabled={!validated}
+              disabledReason="Validate the submission first"
+            />
+          </div>
+          <EdgeCasesView logs={data.edge_cases.logs} />
+        </StageCard>
+
+        {/* Rubric check (harbor check) */}
+        <StageCard
+          title="Rubric Check"
+          description="harbor check: an evaluator agent reads the whole task and scores it against Harbor's quality rubric — an automated stand-in for a human task reviewer. Advisory; needs ANTHROPIC_API_KEY. A very large environment/ (e.g. vendored dependencies) can hit an OS argument-length limit in Harbor's own launcher — that shows up as an error here, not a real quality verdict."
+          status={data.rubric_check.status}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-sm text-muted-foreground">Rubric</label>
+            <Select value={checkRubric} onValueChange={(v) => setCheckRubric(v as RubricChoice)}>
+              <SelectTrigger className="w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {RUBRIC_CHOICES.map((r) => (
+                  <SelectItem key={r.value} value={r.value}>
+                    {r.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <RunButton
+              label="Run Rubric Check"
+              runningLabel="Checking…"
+              onClick={() => mRubricCheck.mutate()}
+              running={isActive(data.rubric_check.status)}
+              pending={mRubricCheck.isPending}
+              disabled={!buildReady}
+              disabledReason="Build the image first"
+            />
+          </div>
+          <RubricCheckView logs={data.rubric_check.logs} />
+        </StageCard>
+
+        {/* Valid-variant probe */}
+        <StageCard
+          title="Valid-Variant Probe"
+          description="Is the grader stricter than the instruction? A model proposes other forms of the Oracle's answer that the instruction allows (a number format, the other accepted identifier, an order left free); each runs through the real verifier on a temporary copy of the task. A rejected variant may mean the grader is too strict — or that the variant was not really allowed, so read the quoted sentence. Advisory."
+          status={data.variant_probe.status}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <RunButton
+              label="Run Valid-Variant Probe"
+              runningLabel="Probing…"
+              onClick={() => mVariantProbe.mutate()}
+              running={isActive(data.variant_probe.status)}
+              pending={mVariantProbe.isPending}
+              disabled={!buildReady || !data.oracle.runs.some((r) => r.reward === 1)}
+              disabledReason="Build the image and get an Oracle pass first"
+            />
+          </div>
+          <VariantProbeView logs={data.variant_probe.logs} />
+        </StageCard>
+
+        {/* Weak-answer probe */}
+        <StageCard
+          title="Weak-Answer Probe"
+          description="Is the grader weaker than the instruction? A model breaks one stated rule at a time in the Oracle's answer (up to 6 breakages), and each broken answer runs through the real verifier. It must score 0; a broken answer that still passes means a stated rule is not enforced. Advisory."
+          status={data.weak_probe.status}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <RunButton
+              label="Run Weak-Answer Probe"
+              runningLabel="Probing…"
+              onClick={() => mWeakProbe.mutate()}
+              running={isActive(data.weak_probe.status)}
+              pending={mWeakProbe.isPending}
+              disabled={!buildReady || !data.oracle.runs.some((r) => r.reward === 1)}
+              disabledReason="Build the image and get an Oracle pass first"
+            />
+          </div>
+          <VariantProbeView logs={data.weak_probe.logs} />
+        </StageCard>
+
+        {/* Cheat trial */}
+        <StageCard
+          title="Cheat Trial"
+          description="One trial run with an explicit directive to cheat spliced into the instruction (edit the verifier, hardcode outputs, read the reference solution). If reward comes back 1, a harbor analyze reward_hacking check runs automatically — reward alone can't tell a real cheat apart from the agent refusing and solving it honestly (both have happened live), so passing needs that check to positively clear it, not just a low reward."
+          status={data.cheat_trial.status}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-sm text-muted-foreground">Reasoning</label>
+            <Select
+              value={cheatEffort}
+              onValueChange={(v) => setCheatEffort(v as ReasoningEffort | "default")}
+            >
+              <SelectTrigger className="w-32">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="default">Default</SelectItem>
+                {REASONING_EFFORTS.map((e) => (
+                  <SelectItem key={e} value={e}>
+                    {e}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <label className="text-sm text-muted-foreground">Prompt</label>
+            <Select value={cheatPrompt} onValueChange={(v) => setCheatPrompt(v as CheatPromptChoice)}>
+              <SelectTrigger className="w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {CHEAT_PROMPT_CHOICES.map((p) => (
+                  <SelectItem key={p.value} value={p.value}>
+                    {p.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <RunButton
+              label="Run Cheat Trial"
+              runningLabel="Running…"
+              onClick={() => mCheatTrial.mutate()}
+              running={isActive(data.cheat_trial.status)}
+              pending={mCheatTrial.isPending}
+              disabled={!buildReady}
+              disabledReason="Build the image first"
+            />
+          </div>
+          <CheatTrialView status={data.cheat_trial.status} logs={data.cheat_trial.logs} />
+        </StageCard>
+
+        <div className="md:col-span-2">
+          <h2 className="text-lg font-semibold">Agent trials</h2>
+          <p className="text-xs text-muted-foreground">Needs the image built. Oracle and Nop passing first is advised, not enforced.</p>
+        </div>
         {/* Agent Trials */}
         <StageCard
           title="Run Agent Trials"
@@ -610,244 +994,10 @@ function SubmissionDetail() {
           )}
         </StageCard>
 
-        {/* Instruction Sufficiency */}
-        <StageCard
-          title="Instruction Sufficiency"
-          description="LLM judge: is instruction.md + environment/ enough to pass the hidden tests?"
-          status={data.sufficiency.status}
-        >
-          <div className="flex items-center gap-2">
-            <label className="text-sm text-muted-foreground">Judge runs</label>
-            <Select value={sufficiencyRuns} onValueChange={setSufficiencyRuns}>
-              <SelectTrigger className="w-20">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {["1", "2", "3"].map((r) => (
-                  <SelectItem key={r} value={r}>
-                    {r}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <span className="text-xs text-muted-foreground">
-              more runs cost more; the majority decides and disagreement is shown
-            </span>
-          </div>
-          <RunButton
-            label="Run Sufficiency Check"
-            runningLabel="Checking…"
-            onClick={() => mSufficiency.mutate()}
-            running={data.sufficiency.status === "running" || data.sufficiency.status === "pending"}
-            pending={mSufficiency.isPending}
-            disabled={!validated}
-            disabledReason="Validate the submission first"
-          />
-          {data.sufficiency.passed != null && (
-            <div
-              className={`rounded-md border p-2.5 text-xs ${
-                data.sufficiency.passed
-                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                  : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
-              }`}
-            >
-              {data.sufficiency.passed
-                ? "Sufficient — no gaps found."
-                : "Insufficient — see gaps below."}
-            </div>
-          )}
-          <LogPanel logs={data.sufficiency.logs} title="Sufficiency verdict" />
-        </StageCard>
-
-        {/* Static Checks */}
-        <StageCard
-          title="Static Checks"
-          description="Advisory, LLM-free mechanical checks over instruction.md/test.sh/Dockerfile/zip layout — word counts, formatting, hygiene. Not a pass/fail gate."
-          status={data.static_checks.status}
-        >
-          <RunButton
-            label="Run Static Checks"
-            runningLabel="Checking…"
-            onClick={() => mStaticChecks.mutate()}
-            running={
-              data.static_checks.status === "running" || data.static_checks.status === "pending"
-            }
-            pending={mStaticChecks.isPending}
-            disabled={!validated}
-            disabledReason="Validate the submission first"
-          />
-          {data.static_checks.logs &&
-            (() => {
-              let report: StaticCheckReport | null = null;
-              try {
-                report = JSON.parse(data.static_checks.logs) as StaticCheckReport;
-              } catch {
-                report = null;
-              }
-              if (!report) return null;
-              return (
-                <>
-                  <div
-                    className={`rounded-md border p-2.5 text-xs ${
-                      report.fail_count === 0
-                        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                        : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
-                    }`}
-                  >
-                    {report.fail_count} fail, {report.warn_count} warn, {report.results.length}{" "}
-                    checks total
-                  </div>
-                  <LogPanel logs={report.text} title="Static check findings" />
-                </>
-              );
-            })()}
-        </StageCard>
-
-        {/* TB Static Checks */}
-        <StageCard
-          title="TB Static Checks"
-          description="Advisory — Terminal-Bench's own official static checks (vendor/tb_checks/), a different rule set from the platform's own Static Checks above. Not a pass/fail gate."
-          status={data.tb_static_checks.status}
-        >
-          <RunButton
-            label="Run TB Static Checks"
-            runningLabel="Checking…"
-            onClick={() => mTbStaticChecks.mutate()}
-            running={
-              data.tb_static_checks.status === "running" ||
-              data.tb_static_checks.status === "pending"
-            }
-            pending={mTbStaticChecks.isPending}
-            disabled={!validated}
-            disabledReason="Validate the submission first"
-          />
-          {data.tb_static_checks.logs &&
-            (() => {
-              let report: TbStaticCheckReport | null = null;
-              try {
-                report = JSON.parse(data.tb_static_checks.logs) as TbStaticCheckReport;
-              } catch {
-                report = null;
-              }
-              if (!report) return null;
-              return (
-                <>
-                  <div
-                    className={`rounded-md border p-2.5 text-xs ${
-                      report.fail_count === 0
-                        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                        : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
-                    }`}
-                  >
-                    {report.pass_count} pass, {report.fail_count} fail
-                  </div>
-                  <LogPanel logs={report.text} title="TB check findings" />
-                </>
-              );
-            })()}
-        </StageCard>
-
-        {/* AI Detection */}
-        <StageCard
-          title="AI Detection"
-          description="Advisory — Terminal-Bench's own Layer 3 AI-usage detection (vendor/tb_checks/): calls the real GPTZero API against instruction.md and solution/solve.sh. Genuinely optional in Terminal-Bench's own workflow too. Requires GPTZERO_API_KEY; runs a graceful no-op without it."
-          status={data.ai_detection.status}
-        >
-          <RunButton
-            label="Run AI Detection"
-            runningLabel="Checking…"
-            onClick={() => mAiDetection.mutate()}
-            running={
-              data.ai_detection.status === "running" || data.ai_detection.status === "pending"
-            }
-            pending={mAiDetection.isPending}
-            disabled={!validated}
-            disabledReason="Validate the submission first"
-          />
-          {data.ai_detection.logs &&
-            (() => {
-              let report: AiDetectionReport | null = null;
-              try {
-                report = JSON.parse(data.ai_detection.logs) as AiDetectionReport;
-              } catch {
-                report = null;
-              }
-              if (!report) return null;
-              if (report.skipped) {
-                return (
-                  <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-700 dark:text-amber-400">
-                    Skipped — {report.api_key_configured
-                      ? "GPTZero returned a network error"
-                      : "GPTZERO_API_KEY not configured"}
-                    . Not a pass/fail result.
-                  </div>
-                );
-              }
-              return (
-                <>
-                  {report.error && (
-                    <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs whitespace-pre-wrap max-h-48 overflow-y-auto">
-                      {report.error}
-                    </div>
-                  )}
-                  {report.passed != null && (
-                    <div
-                      className={`rounded-md border p-2.5 text-xs ${
-                        report.passed
-                          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                          : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
-                      }`}
-                    >
-                      {report.passed
-                        ? "Below the AI-generated threshold."
-                        : "Flagged — at or above the 70% AI-generated threshold."}
-                    </div>
-                  )}
-                  <LogPanel logs={report.output ?? undefined} title="GPTZero output" />
-                </>
-              );
-            })()}
-        </StageCard>
-
-        {/* AI Usage Detection -- all 3 TB layers, shown side by side, never
-            merged into one score. This is a read-only view over data from
-            Rubric Check (TB rubric) and AI Detection above, not its own
-            runnable check -- no run button, no status badge of its own. */}
-        <AiLayersOverview rubricCheck={data.rubric_check} aiDetection={data.ai_detection} />
-
-        {/* Leakage Scan */}
-        <StageCard
-          title="Leakage Scan"
-          description="Advisory only — flags unedited LLM chat artifacts (disclaimers, unfilled placeholders). Not a pass/fail gate."
-          status={data.leakage_scan.status}
-        >
-          <RunButton
-            label="Run Leakage Scan"
-            runningLabel="Scanning…"
-            onClick={() => mLeakageScan.mutate()}
-            running={
-              data.leakage_scan.status === "running" || data.leakage_scan.status === "pending"
-            }
-            pending={mLeakageScan.isPending}
-            disabled={!validated}
-            disabledReason="Validate the submission first"
-          />
-          {data.leakage_scan.passed != null && (
-            <div
-              className={`rounded-md border p-2.5 text-xs ${
-                data.leakage_scan.passed
-                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                  : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400"
-              }`}
-            >
-              {data.leakage_scan.passed
-                ? "Clean — no leakage artifacts found."
-                : "Artifacts found — worth a human look, not proof of misconduct."}
-            </div>
-          )}
-          <LogPanel logs={data.leakage_scan.logs} title="Leakage scan findings" />
-        </StageCard>
-
+        <div className="md:col-span-2">
+          <h2 className="text-lg font-semibold">After the agent trials</h2>
+          <p className="text-xs text-muted-foreground">These read the agent trials' results, so they stay greyed out until the trials have finished.</p>
+        </div>
         {/* Failure analysis (harbor analyze) */}
         <StageCard
           title="Failure Analysis"
@@ -883,149 +1033,6 @@ function SubmissionDetail() {
             decisions={data.reviewer_decisions}
             onDecide={(b) => mDecision.mutate(b)}
           />
-        </StageCard>
-
-        {/* Cheat trial */}
-        <StageCard
-          title="Cheat Trial"
-          description="One trial run with an explicit directive to cheat spliced into the instruction (edit the verifier, hardcode outputs, read the reference solution). If reward comes back 1, a harbor analyze reward_hacking check runs automatically — reward alone can't tell a real cheat apart from the agent refusing and solving it honestly (both have happened live), so passing needs that check to positively clear it, not just a low reward."
-          status={data.cheat_trial.status}
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="text-sm text-muted-foreground">Reasoning</label>
-            <Select
-              value={cheatEffort}
-              onValueChange={(v) => setCheatEffort(v as ReasoningEffort | "default")}
-            >
-              <SelectTrigger className="w-32">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="default">Default</SelectItem>
-                {REASONING_EFFORTS.map((e) => (
-                  <SelectItem key={e} value={e}>
-                    {e}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <label className="text-sm text-muted-foreground">Prompt</label>
-            <Select value={cheatPrompt} onValueChange={(v) => setCheatPrompt(v as CheatPromptChoice)}>
-              <SelectTrigger className="w-40">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {CHEAT_PROMPT_CHOICES.map((p) => (
-                  <SelectItem key={p.value} value={p.value}>
-                    {p.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <RunButton
-              label="Run Cheat Trial"
-              runningLabel="Running…"
-              onClick={() => mCheatTrial.mutate()}
-              running={isActive(data.cheat_trial.status)}
-              pending={mCheatTrial.isPending}
-              disabled={!buildReady}
-              disabledReason="Build the image first"
-            />
-          </div>
-          <CheatTrialView status={data.cheat_trial.status} logs={data.cheat_trial.logs} />
-        </StageCard>
-
-        {/* Rubric check (harbor check) */}
-        <StageCard
-          title="Rubric Check"
-          description="harbor check: an evaluator agent reads the whole task and scores it against Harbor's quality rubric — an automated stand-in for a human task reviewer. Advisory; needs ANTHROPIC_API_KEY. A very large environment/ (e.g. vendored dependencies) can hit an OS argument-length limit in Harbor's own launcher — that shows up as an error here, not a real quality verdict."
-          status={data.rubric_check.status}
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="text-sm text-muted-foreground">Rubric</label>
-            <Select value={checkRubric} onValueChange={(v) => setCheckRubric(v as RubricChoice)}>
-              <SelectTrigger className="w-40">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {RUBRIC_CHOICES.map((r) => (
-                  <SelectItem key={r.value} value={r.value}>
-                    {r.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <RunButton
-              label="Run Rubric Check"
-              runningLabel="Checking…"
-              onClick={() => mRubricCheck.mutate()}
-              running={isActive(data.rubric_check.status)}
-              pending={mRubricCheck.isPending}
-              disabled={!buildReady}
-              disabledReason="Build the image first"
-            />
-          </div>
-          <RubricCheckView logs={data.rubric_check.logs} />
-        </StageCard>
-
-        {/* Valid-variant probe */}
-        <StageCard
-          title="Valid-Variant Probe"
-          description="Is the grader stricter than the instruction? A model proposes other forms of the Oracle's answer that the instruction allows (a number format, the other accepted identifier, an order left free); each runs through the real verifier on a temporary copy of the task. A rejected variant may mean the grader is too strict — or that the variant was not really allowed, so read the quoted sentence. Advisory."
-          status={data.variant_probe.status}
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <RunButton
-              label="Run Valid-Variant Probe"
-              runningLabel="Probing…"
-              onClick={() => mVariantProbe.mutate()}
-              running={isActive(data.variant_probe.status)}
-              pending={mVariantProbe.isPending}
-              disabled={!buildReady || !data.oracle.runs.some((r) => r.reward === 1)}
-              disabledReason="Build the image and get an Oracle pass first"
-            />
-          </div>
-          <VariantProbeView logs={data.variant_probe.logs} />
-        </StageCard>
-
-        {/* Weak-answer probe */}
-        <StageCard
-          title="Weak-Answer Probe"
-          description="Is the grader weaker than the instruction? A model breaks one stated rule at a time in the Oracle's answer (up to 6 breakages), and each broken answer runs through the real verifier. It must score 0; a broken answer that still passes means a stated rule is not enforced. Advisory."
-          status={data.weak_probe.status}
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <RunButton
-              label="Run Weak-Answer Probe"
-              runningLabel="Probing…"
-              onClick={() => mWeakProbe.mutate()}
-              running={isActive(data.weak_probe.status)}
-              pending={mWeakProbe.isPending}
-              disabled={!buildReady || !data.oracle.runs.some((r) => r.reward === 1)}
-              disabledReason="Build the image and get an Oracle pass first"
-            />
-          </div>
-          <VariantProbeView logs={data.weak_probe.logs} />
-        </StageCard>
-
-        {/* Edge cases */}
-        <StageCard
-          title="Edge-Case Coverage"
-          description="One model call lists the edge cases an expert would handle, from the instruction alone; a second checks each against the hidden tests. An uncovered case is a question for a reviewer, not a verdict. Advisory; no Docker needed."
-          status={data.edge_cases.status}
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <RunButton
-              label="Run Edge-Case Check"
-              runningLabel="Checking…"
-              onClick={() => mEdgeCases.mutate()}
-              running={isActive(data.edge_cases.status)}
-              pending={mEdgeCases.isPending}
-              disabled={!validated}
-              disabledReason="Validate the submission first"
-            />
-          </div>
-          <EdgeCasesView logs={data.edge_cases.logs} />
         </StageCard>
 
         {/* Review Report */}
@@ -1441,16 +1448,7 @@ function AiLayersOverview({
   }
 
   return (
-    <div className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4 md:col-span-2">
-      <div>
-        <h3 className="text-base font-semibold">AI Usage Detection — All Layers</h3>
-        <p className="text-xs text-muted-foreground">
-          Terminal-Bench's three AI-usage detection layers, side by side — never merged into one
-          score, since Layer 2 is an LLM's opinion and Layer 3 is a real measurement. This is a
-          view, not its own check: run Rubric Check (TB rubric) and AI Detection above to fill it in.
-        </p>
-      </div>
-
+    <div className="flex flex-col gap-3">
       <div className="grid gap-3 md:grid-cols-3">
         <div className="rounded-md border border-border p-3 text-xs">
           <div className="mb-1 font-medium">Layer 1 — Policy</div>
@@ -1715,16 +1713,20 @@ function StageCard({
   description,
   status,
   reward,
+  wide,
   children,
 }: {
   title: string;
   description: string;
   status: StageStatus;
   reward?: 0 | 1 | null;
+  wide?: boolean;
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4">
+    <div
+      className={`flex flex-col gap-3 rounded-lg border border-border bg-card p-4${wide ? " md:col-span-2" : ""}`}
+    >
       <div className="flex items-start justify-between gap-2">
         <div>
           <h3 className="text-base font-semibold">{title}</h3>
@@ -1768,14 +1770,17 @@ function RunButton({
   );
   if (disabled && disabledReason) {
     return (
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span tabIndex={0}>{btn}</span>
-          </TooltipTrigger>
-          <TooltipContent>{disabledReason}</TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
+      <>
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span tabIndex={0}>{btn}</span>
+            </TooltipTrigger>
+            <TooltipContent>{disabledReason}</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+        <span className="text-xs text-muted-foreground">Waiting for: {disabledReason}</span>
+      </>
     );
   }
   return btn;

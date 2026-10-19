@@ -475,16 +475,29 @@ def _codex_cost_from_rollout_line(line: str, model: str | None) -> float | None:
     )
 
 
+def _trial_container_ids(trial_dir: Path, include_stopped: bool = False) -> list[str]:
+    """Ids of the containers of one trial. Harbor names a trial's compose
+    project after the lowercased trial directory plus a suffix ("<trial>__env"
+    in 0.23.0), so match by prefix instead of the exact name."""
+    prefix = trial_dir.name.lower()
+    out = subprocess.run(
+        ["docker", "ps", *(["-a"] if include_stopped else []), "--format",
+         '{{.ID}} {{.Label "com.docker.compose.project"}}'],
+        capture_output=True, text=True, timeout=20,
+    ).stdout
+    ids = []
+    for line in out.splitlines():
+        cid, _, project = line.partition(" ")
+        if project.strip().startswith(prefix):
+            ids.append(cid)
+    return ids
+
+
 def _live_cost_from_container(trial_dir: Path, model: str | None) -> float | None:
     """Blocking (docker CLI calls); run it in a thread. Harbor names a
     trial's compose project after the lowercased trial directory."""
-    project = trial_dir.name.lower()
     try:
-        ids = subprocess.run(
-            ["docker", "ps", "-q", "--filter", f"label=com.docker.compose.project={project}"],
-            capture_output=True, text=True, timeout=20,
-        ).stdout.split()
-        for cid in ids:
+        for cid in _trial_container_ids(trial_dir):
             line = subprocess.run(
                 ["docker", "exec", cid, "sh", "-c", _CODEX_SESSION_SCRIPT],
                 capture_output=True, text=True, timeout=20,
@@ -503,14 +516,9 @@ def _probe_container(trial_dir: Path) -> dict | None:
     cgroup memory counters and Docker's OOMKilled flag while it is still alive:
     Harbor removes the container when the trial ends. Returns None when there
     is no container or the counters are not available."""
-    project = trial_dir.name.lower()
     try:
-        ids = subprocess.run(
-            ["docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project={project}"],
-            capture_output=True, text=True, timeout=20,
-        ).stdout.split()
         probe: dict = {}
-        for cid in ids:
+        for cid in _trial_container_ids(trial_dir, include_stopped=True):
             state = subprocess.run(
                 ["docker", "inspect", "-f", "{{.State.OOMKilled}}", cid],
                 capture_output=True, text=True, timeout=20,

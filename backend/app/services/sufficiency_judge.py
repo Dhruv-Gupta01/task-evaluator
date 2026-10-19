@@ -92,17 +92,54 @@ def _parse_verdict(text: str) -> dict:
     }
 
 
-def _merge(verdicts: list[dict]) -> dict:
-    """Majority of the runs decides; every gap carries how many runs raised it."""
+GROUP_PROMPT = """Below is a numbered list of gaps reported by several runs of a task-review judge. \
+Different runs word the same problem differently. Group the gaps that describe the SAME underlying \
+problem (the same missing test, the same unenforced rule). Gaps about different problems stay in \
+separate groups, even when they share words. Every number appears in exactly one group.
+
+Respond with ONLY JSON: {"groups": [[0, 4, 8], [1], ...]}
+
+GAPS:
+"""
+
+
+async def _group_gaps(gaps: list[str]) -> list[list[int]]:
+    """Indices of `gaps` grouped by problem. One cheap judge call; falls back to
+    one group per distinct text if the call fails or answers inconsistently."""
+    fallback = [[i] for i in range(len(gaps))]
+    if len(gaps) < 2:
+        return fallback
+    listing = "\n".join(f"{i}. {g}" for i, g in enumerate(gaps))
+    try:
+        response = await get_llm_client().complete(
+            [Message(role="user", content=GROUP_PROMPT + listing)], tools=[]
+        )
+        match = re.search(r"\{.*\}", response.text, re.DOTALL)
+        groups = json.loads(match.group(0))["groups"] if match else None
+        flat = sorted(i for g in groups for i in g)
+        if flat == list(range(len(gaps))):
+            return [list(g) for g in groups if g]
+    except Exception:
+        pass
+    return fallback
+
+
+def _merge(verdicts: list[dict], grouping: list[list[int]] | None = None) -> dict:
+    """Majority of the runs decides; every gap carries how many runs raised it.
+    `grouping` (indices into the runs' gaps, in run order) merges gaps that
+    different runs worded differently but that mean the same thing."""
     if len(verdicts) == 1:
         return verdicts[0]
-    passed_runs = sum(1 for v in verdicts if v["passed"])
     n = len(verdicts)
-    counts: dict[str, int] = {}
-    for v in verdicts:
-        for gap in dict.fromkeys(v["gaps"]):
-            counts[gap] = counts.get(gap, 0) + 1
-    gaps = [f"{gap} (raised in {c} of {n} runs)" for gap, c in sorted(counts.items(), key=lambda kv: -kv[1])]
+    passed_runs = sum(1 for v in verdicts if v["passed"])
+    flat: list[tuple[int, str]] = [(r, g) for r, v in enumerate(verdicts) for g in dict.fromkeys(v["gaps"])]
+    grouping = grouping or [[i] for i in range(len(flat))]
+    merged = []
+    for members in grouping:
+        runs_raising = {flat[i][0] for i in members}
+        text = flat[members[0]][1]
+        merged.append((len(runs_raising), f"{text} (raised in {len(runs_raising)} of {n} runs)"))
+    gaps = [text for _, text in sorted(merged, key=lambda m: -m[0])]
     passed = passed_runs * 2 > n
     note = f"Judge runs: {n}; {passed_runs} found no gap, {n - passed_runs} found gaps."
     if 0 < passed_runs < n:
@@ -149,4 +186,5 @@ async def run_sufficiency_judge(task_root: Path, runs: int = 1) -> dict:
             tools=[],
         )
         verdicts.append(_parse_verdict(response.text))
-    return _merge(verdicts)
+    flat = [g for v in verdicts for g in dict.fromkeys(v["gaps"])]
+    return _merge(verdicts, await _group_gaps(flat) if len(verdicts) > 1 else None)
