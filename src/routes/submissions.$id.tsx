@@ -643,6 +643,7 @@ function SubmissionDetail() {
                         : "Flagged — at or above the 70% AI-generated threshold."}
                     </div>
                   )}
+                  <LogPanel logs={report.output ?? undefined} title="GPTZero output" />
                 </>
               );
             })()}
