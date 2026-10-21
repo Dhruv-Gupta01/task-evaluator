@@ -80,7 +80,7 @@ AGENTS = ("codex", "claude-code", "terminus-2")
 # PROVENANCE.md there) -- an alternate, richer rubric a run can opt into,
 # never the default. "default" = Harbor's own built-in rubric/prompt.
 RUBRICS = ("default", "tb")
-CHEAT_PROMPTS = ("default", "tb", "combined")
+CHEAT_PROMPTS = ("default", "tb", "combined", "targeted")
 # Fewer tool calls than this means the agent did not really attempt anything.
 _MIN_CHEAT_TOOL_CALLS = 3
 _TB_PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "vendor" / "tb_prompts"
@@ -1929,6 +1929,8 @@ async def run_cheat_trial(
                 if cheat_prompt == "tb"
                 else harbor_runner.CHEAT_COMBINED_INSTRUCTION
                 if cheat_prompt == "combined"
+                else harbor_runner.targeted_cheat_instruction(Path(submission.extracted_path))
+                if cheat_prompt == "targeted"
                 else None
             ),
             extra_note=_cost_cap_warning(cost_cap_usd, cost_cap_label, n, _agent_timeout_sec(config)),

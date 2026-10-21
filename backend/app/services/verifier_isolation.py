@@ -429,6 +429,9 @@ _UNSAFE_LOADS = (
     (re.compile(r"\byaml\.load\((?![^)]*Safe)"), "yaml.load without SafeLoader"),
     (re.compile(r"\btorch\.load\((?![^)]*weights_only\s*=\s*True)"), "torch.load without weights_only=True"),
     (re.compile(r"allow_pickle\s*=\s*True"), "numpy allow_pickle=True"),
+    # 5.0 B: running text built at run time (a literal name like __import__("os") is harmless).
+    (re.compile(r"(?<![\w.])compile\((?!\s*[\"'])"), "compile() of a non-literal"),
+    (re.compile(r"(?<![\w.])__import__\((?!\s*[\"'])"), "__import__() of a non-literal name"),
 )
 
 
@@ -448,6 +451,37 @@ def check_answer_evaluation(t: _Task, report) -> None:
         )
 
 
+_SOURCE_SCAN_RE = re.compile(
+    r"ast\.(?:parse|walk)\(|ast\.(?:Import|ImportFrom)\b|\b(?:forbidden|banned|disallowed|prohibited|blacklist\w*|"
+    r"allowed_imports|restricted)_?\w*\s*=\s*[\[{(]"
+)
+
+
+def check_source_scanning(t: _Task, report) -> None:
+    """A restriction enforced by reading the submission's source text is easy to get around."""
+    scanning = [
+        f"{rel}:{i}"
+        for rel, text in t.tests_py
+        for i, line in _code_lines(text)
+        if _SOURCE_SCAN_RE.search(line)
+    ]
+    shell = [
+        f"tests/test.sh:{i}"
+        for i, line in _shell_lines(t.test_sh)
+        if re.search(r"\bgrep\b[^|;&]*(?:import|require|include|use)\b", line) and not line.lstrip().startswith("#")
+    ]
+    hits = scanning + shell
+    if hits:
+        report.add(
+            "verifier_scans_source",
+            "warn",
+            f"A restriction seems to be enforced by reading the submission's source text ({_listed(hits)}). "
+            "That is bypassed with exec/eval, importlib, getattr, an encoded string or a pre-built binary the "
+            "source only loads (5.0: AST scanners, Lean macros, a CUBIN embedded in a .cu file). Enforce it at "
+            "run time instead (block the import in the sandbox, check what the process actually loaded or linked).",
+        )
+
+
 def check_verdict_channels(t: _Task, report) -> None:
     piped = [
         rel for rel, text in t.tests_py
@@ -460,6 +494,20 @@ def check_verdict_channels(t: _Task, report) -> None:
             f"A test forks and passes results through a pipe ({_listed(piped)}). A forked child that runs "
             "submitted code inherits the pipe's descriptors, so the submission can write to the result channel. "
             "Have the child return data the parent validates, from a process that cannot reach the verdict.",
+        )
+    inherited = sorted({
+        f"{rel}:{i}"
+        for rel, text in t.tests_py
+        for i, line in _code_lines(text)
+        if re.search(r"close_fds\s*=\s*False|pass_fds\s*=|os\.set_inheritable\(", line)
+    })
+    if inherited:
+        report.add(
+            "verifier_inherited_descriptors",
+            "warn",
+            f"A test starts a process that inherits open file descriptors ({_listed(inherited)}). If the process "
+            "runs submitted code and the descriptor reaches the verdict (a pipe, a result file), the submission "
+            "can write its own result.",
         )
     scratch = sorted({
         m.group(1)
@@ -494,6 +542,25 @@ _LEAN_KEYWORDS = re.compile(r"(?m)^\s*(?:@\[[^\]]*\]\s*)?(macro_rules|macro|nota
 _LEAN_GUARD = re.compile(r"#print\s+axioms|\b(macro|notation|axiom|sorry)\b")
 
 
+# Toolchains reported to have a soundness problem. Hand-kept; each entry needs a source.
+_UNSOUND_LEAN = {
+    "4.28": "Terminal-Bench's 5.0 milestone (item 13, 'Upgrade Takens task from Lean 4.28') suggests this version had "
+            "a kernel soundness concern. Unverified here: confirm against Lean's release notes before acting on it.",
+}
+
+
+def _lean_toolchain_pins(t: _Task) -> list[tuple[str, str, str]]:
+    pins = []
+    for p in _own_files(t.root):
+        text = p.read_text(errors="replace") if p.name == "lean-toolchain" else ""
+        if p.name == "Dockerfile":
+            text = " ".join(re.findall(r"lean4?[:@ -]v?(\d+\.\d+(?:\.\d+)?)", p.read_text(errors="replace"), re.I))
+        m = re.search(r"(\d+\.\d+(?:\.\d+)?)", text)
+        if m:
+            pins.append((p.relative_to(t.root).as_posix(), m.group(1), ""))
+    return pins
+
+
 def check_lean(t: _Task, report) -> None:
     lean = [p for p in _own_files(t.root) if p.suffix == ".lean"]
     if not lean:
@@ -512,6 +579,16 @@ def check_lean(t: _Task, report) -> None:
             "elab, set_option, axiom or sorry. These can change what the stated theorem means (4.1-43); check "
             "`#print axioms` on the final theorem and reject new notation or macros (needs a human).",
         )
+    report.add(
+        "lean_cheat_trial_hint",
+        "info",
+        "Lean (proof) task: run the Cheat Trial with the \"Targeted\" prompt. It tells the agent to try the "
+        "proof-specific holes (new axioms, macros or notation that change the theorem, custom elaborators).",
+    )
+    for rel, version, note in _lean_toolchain_pins(t):
+        for prefix, why in _UNSOUND_LEAN.items():
+            if version.startswith(prefix):
+                report.add("lean_toolchain_reported_unsound", "info", f"{rel} pins Lean {version}: {why}")
     if found:
         report.add("lean_keywords", "info", f"Lean commands to review in the task's own files: {_listed(found)}.")
 
@@ -523,6 +600,7 @@ def run_isolation_checks(task_root: Path, report) -> None:
         check_agent_code_in_process,
         check_agent_code_privileges,
         check_answer_evaluation,
+        check_source_scanning,
         check_verdict_channels,
         check_lean,
     ):

@@ -51,7 +51,10 @@ Propose up to {MAX_BREAKS} deliberately BROKEN versions of the reference solutio
 rule the instruction states, so a correct grader must reject it. Examples: leave an output empty or \
 truncated, drop items the instruction says to include, add something the instruction forbids, leave \
 one element wrong while the rest is right, weaken a check the instruction requires, skip a required \
-step, or produce the right shape with wrong content.
+step, or produce the right shape with wrong content. Also consider: corrupt k of n output items while the \
+rest stay right (a grader that only checks an aggregate or a pooled statistic misses it); blank the content \
+of one field; where the instruction restricts a library or dependency, use it anyway or embed a pre-built \
+binary or generated artifact of it; for hardware or simulation tasks, produce undefined (X/Z/NaN) values.
 Rules:
 - Name the rule being broken by copying the instruction sentence that states it exactly into \
 "instruction_quote". Only break rules the instruction really states.

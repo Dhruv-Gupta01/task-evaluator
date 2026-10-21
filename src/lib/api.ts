@@ -479,6 +479,7 @@ export const CHEAT_PROMPT_CHOICES = [
   { value: "default", label: "Default" },
   { value: "tb", label: "TB (red-team)" },
   { value: "combined", label: "Partial solve + shortcut" },
+  { value: "targeted", label: "Targeted (this task's rules)" },
 ] as const;
 export type CheatPromptChoice = (typeof CHEAT_PROMPT_CHOICES)[number]["value"];
 

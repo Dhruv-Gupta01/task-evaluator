@@ -407,6 +407,19 @@ def check_oracle_honesty(task_root: Path, report) -> None:
         for name in answer_names:
             if name in text:
                 hits.append(f"{rel}: uses the tests' answer file `{name}`")
+    test_modules = {p.stem for p in _own_files(tests) if p.suffix == ".py"} | {
+        p.name for p in tests.iterdir() if p.is_dir() and not p.name.startswith(".")
+    } if tests.is_dir() else set()
+    visible_modules = {p.stem for p in _own_files(task_root / "environment") if p.suffix == ".py"} | {
+        p.name for p in (task_root / "environment").iterdir() if p.is_dir()
+    } if (task_root / "environment").is_dir() else set()
+    for path, text in _text_files(solution):
+        if path.suffix != ".py":
+            continue
+        for m in re.finditer(r"^\s*(?:from|import)\s+([A-Za-z_]\w*)", text, re.M):
+            mod = m.group(1)
+            if mod in test_modules and mod not in visible_modules and mod not in ("conftest", "test_outputs", "tests"):
+                hits.append(f"{path.relative_to(task_root)}: imports `{mod}`, which exists only under tests/")
     if hits:
         report.add(
             "oracle_reads_tests",
