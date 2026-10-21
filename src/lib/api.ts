@@ -268,8 +268,11 @@ export interface EdgeCases {
     covered: boolean;
     test: string | null;
     reason: string;
+    // false: the reference solution itself does not handle this case.
+    reference_handles?: boolean | null;
     probe?: EdgeCaseProbe;
   }[];
+  spec_files?: string[];
   error?: string;
   probed?: boolean;
   in_progress?: boolean;

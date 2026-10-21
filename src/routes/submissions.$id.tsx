@@ -1502,6 +1502,12 @@ function EdgeCasesView({ logs }: { logs?: string }) {
           {parsed.error}
         </div>
       )}
+      {parsed.spec_files && parsed.spec_files.length > 0 && (
+        <div className="text-xs text-muted-foreground">
+          Cases also listed from spec files:{" "}
+          <span className="font-mono">{parsed.spec_files.join(", ")}</span>
+        </div>
+      )}
       {parsed.cases.map((c, i) => (
         <div key={i} className="rounded-md border border-border p-3">
           <div className="flex items-center justify-between gap-2">
@@ -1516,6 +1522,11 @@ function EdgeCasesView({ logs }: { logs?: string }) {
             Expected: {c.expected}
             {c.test && <> · test: <span className="font-mono">{c.test}</span></>} — {c.reason}
           </div>
+          {c.reference_handles === false && (
+            <div className="mt-1 text-xs text-amber-700 dark:text-amber-400">
+              The reference solution does not handle this case, so nobody has shown it can be solved.
+            </div>
+          )}
           {c.probe && (
             <div
               className={`mt-1 text-xs ${
