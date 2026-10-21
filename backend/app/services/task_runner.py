@@ -1105,6 +1105,12 @@ async def run_sufficiency_check(submission_id: str, runs: int = 1) -> None:
         logs_text = verdict.get("verdict", "")
         if gaps:
             logs_text += "\n\nGaps found:\n" + "\n".join(f"- {g}" for g in gaps)
+        if verdict.get("test_phrases"):
+            logs_text += (
+                "\n\nLines in tests/ that say something is not stated (found by a plain text search, shown "
+                "to the judge; read each against instruction.md):\n"
+                + "\n".join(f"- {x}" for x in verdict["test_phrases"])
+            )
 
         run.status = "passed" if reward == 1 else "failed"
         run.reward = reward

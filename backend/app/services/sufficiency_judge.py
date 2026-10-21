@@ -73,6 +73,23 @@ Only "neither" is a gap; a step an expert can derive is difficulty. If the autho
 unstated on purpose and explain how to derive it, weigh that explanation, but check the derivation really \
 works from the agent-visible material.
 
+- [fields] Make a table of every output field, key, column or value a test checks. For each: what the \
+instruction says about it (its meaning, type, unit, allowed values), and what the test actually computes \
+or compares. Report a field the instruction never defines, defines differently from the test, or leaves \
+open between two meanings (for example which of two quantities a plan or score field holds).
+- [docstring] Comments, docstrings and README text inside agent-visible files (starter code, templates, \
+data files) are part of the instruction. Report one that contradicts what the tests require or what the \
+instruction says (for example "a simpler estimator is sufficient" when the tests need the exact one).
+- [numbers] List every number the tests enforce (tolerance, threshold, count, bound, rounding) and say \
+whether the instruction or the visible files state it or let an expert derive it. A number a test enforces \
+that is stated nowhere visible is a gap; so is one stated with a different value.
+- [identifier] For every external identifier, version, accession, standard or coordinate system the task \
+names, say whether the agent-visible data agree with it, and recompute simple derived values (a length, a \
+count, an offset) to check them. Report data that are modified or mixed (two coordinate systems under one \
+real identifier) without being said.
+- [admitted] A section of TEST PHRASES may follow: lines in the tests where the author says something is \
+not stated, specified or documented. Check each against the instruction; one that is really unstated is a gap.
+
 Respond with ONLY a JSON object, no other text, in exactly this shape:
 {
   "passed": true or false,
@@ -159,6 +176,37 @@ def _merge(verdicts: list[dict], grouping: list[list[int]] | None = None) -> dic
     return {"passed": passed, "verdict": verdict, "gaps": gaps}
 
 
+_ADMISSION_RE = re.compile(
+    r"(?:instruction|task|spec(?:ification)?|prompt|readme)\s+(?:does\s+not|doesn['’]t|never|fails\s+to)\s+"
+    r"(?:explicitly\s+|clearly\s+)?(?:state|specify|say|mention|document|define|describe)"
+    r"|not\s+(?:explicitly\s+)?(?:specified|stated|documented|mentioned|defined)\s+in\s+the\s+(?:instruction|task|spec)"
+    r"|(?:left\s+)?implicit(?:ly)?\b|undocumented|unspecified|not\s+specified\b|assum(?:e|es|ed|ing)\s+(?:that\s+)?the\s+agent",
+    re.I,
+)
+
+
+def test_phrase_hits(task_root: Path) -> list[str]:
+    """Lines under tests/ where the author admits something is unstated (a free
+    signal nobody reads): "file:line: text". Plain regex, no LLM; capped."""
+    tests = task_root / "tests"
+    hits: list[str] = []
+    if not tests.is_dir():
+        return hits
+    for path in sorted(p for p in tests.rglob("*") if p.is_file() and p.stat().st_size < 400_000):
+        if any(part in ("node_modules", "__pycache__", ".git", "vendor") for part in path.parts):
+            continue
+        try:
+            text = path.read_text(errors="strict")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for i, line in enumerate(text.splitlines(), 1):
+            if _ADMISSION_RE.search(line):
+                hits.append(f"{path.relative_to(task_root).as_posix()}:{i}: {line.strip()[:200]}")
+                if len(hits) >= 25:
+                    return hits
+    return hits
+
+
 async def run_sufficiency_judge(task_root: Path, runs: int = 1, image_section: str = "") -> dict:
     """`runs` independent judge calls (the later ones see the sections in a
     different order); the majority decides and disagreement is reported.
@@ -190,6 +238,9 @@ async def run_sufficiency_judge(task_root: Path, runs: int = 1, image_section: s
         "=== HIDDEN: solution/ (the reference solution the Oracle runs) ===\n"
         f"{solution_text}\n"
     )
+    phrases = test_phrase_hits(task_root)
+    if phrases:
+        hidden += "\n=== TEST PHRASES (lines in tests/ that say something is not stated) ===\n" + "\n".join(phrases) + "\n"
     if readme_text:
         hidden += f"\n=== HIDDEN: README.md (author notes; the agent never sees them) ===\n{readme_text}\n"
 
@@ -206,4 +257,6 @@ async def run_sufficiency_judge(task_root: Path, runs: int = 1, image_section: s
         )
         verdicts.append(_parse_verdict(response.text))
     flat = [g for v in verdicts for g in dict.fromkeys(v["gaps"])]
-    return _merge(verdicts, await _group_gaps(flat) if len(verdicts) > 1 else None)
+    result = _merge(verdicts, await _group_gaps(flat) if len(verdicts) > 1 else None)
+    result["test_phrases"] = phrases
+    return result
