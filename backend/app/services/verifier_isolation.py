@@ -231,7 +231,11 @@ def _shell_lines(text: str):
 
 
 # Running a file: an interpreter followed by the file it runs.
-_INTERPRETERS = {"python", "python3", "sys.executable", "bash", "sh", "zsh", "node", "ruby", "perl", "source", "."}
+_INTERPRETERS = {
+    "python", "python3", "sys.executable", "bash", "sh", "zsh", "node", "ruby", "perl", "source", ".",
+    # Launchers whose first path argument is the program to run (java -jar x.jar, dotnet x.dll).
+    "java", "dotnet", "php", "Rscript", "julia", "deno", "bun", "lua",
+}
 # Building or installing what is in a directory: the directory's own files decide what runs.
 _BUILD_TOOLS = {"make", "cmake", "npm", "yarn", "pnpm", "cargo", "go", "lake", "mvn", "gradle", "uv"}
 
