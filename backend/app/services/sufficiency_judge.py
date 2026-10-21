@@ -64,6 +64,11 @@ without a test tying the two together?
 would pass?
 - [oracle] Does the reference solution compute its output from the inputs, or does it read from \
 tests/, embed the expected output, or copy a ground-truth file? Only the latter is a gap.
+- [ground-truth] Where do the expected values in the tests come from: an independent source (the spec, real \
+data, a trusted tool) or the reference solution's own output? If they come from the reference, say where it \
+deviates from the spec or the instruction, and report a test that grades an answer by its agreement with the \
+reference's outputs (for example a required percentage of matches) when the reference itself matches the \
+independent truth only partly.
 - [invisible] Does any rule or value the tests enforce appear only in a file the agent cannot see: \
 README.md, solution/, tests/, or an environment/ file the AGENT IMAGE section says is not in the agent's \
 container? Name the file. A rule stated only there is a gap even when the task's own files contain it.

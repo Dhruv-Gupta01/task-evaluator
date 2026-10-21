@@ -407,6 +407,25 @@ def check_oracle_honesty(task_root: Path, report) -> None:
         for name in answer_names:
             if name in text:
                 hits.append(f"{rel}: uses the tests' answer file `{name}`")
+    # Identical files, or a test data file whose whole content sits inside a solution file: the
+    # reference then carries the expected output instead of computing it.
+    min_len = 40
+    tests_data = []
+    for tp in _own_files(tests):
+        if tp.suffix.lower() in (".py", ".sh", ".toml", ".md", "") and tp.name != "expected_output":
+            continue
+        try:
+            body = tp.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if len(body.strip()) >= min_len and len(body) <= 200_000:
+            tests_data.append((tp, body.strip()))
+    for sp, stext in _text_files(solution):
+        for tp, body in tests_data:
+            if stext.strip() == body:
+                hits.append(f"{sp.relative_to(task_root)}: identical to tests/{tp.relative_to(tests)}")
+            elif body in stext:
+                hits.append(f"{sp.relative_to(task_root)}: embeds the content of tests/{tp.relative_to(tests)}")
     test_modules = {p.stem for p in _own_files(tests) if p.suffix == ".py"} | {
         p.name for p in tests.iterdir() if p.is_dir() and not p.name.startswith(".")
     } if tests.is_dir() else set()
