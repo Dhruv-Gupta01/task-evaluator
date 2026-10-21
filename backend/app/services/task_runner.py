@@ -21,6 +21,7 @@ from app.services import (
     image_inventory,
     infra_marker_scan,
     leakage_scan,
+    platform_checks,
     review_report,
     static_checks,
     sufficiency_judge,
@@ -371,6 +372,11 @@ async def _record_image_inventory(db, submission: Submission) -> None:
     db.commit()
     try:
         data = await asyncio.to_thread(image_inventory.collect, submission.image_tag, submission.id)
+        if submission.extracted_path and not data.get("error"):
+            # 5.0 E: which architectures each base image has (registry lookup; best effort).
+            data["base_images"] = await asyncio.to_thread(
+                platform_checks.inspect_bases, Path(submission.extracted_path)
+            )
     except Exception:
         data = {"error": traceback.format_exc()}
     run.logs = json.dumps(data)

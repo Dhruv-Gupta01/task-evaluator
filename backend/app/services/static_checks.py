@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app.services.hygiene_checks import _own_files, run_hygiene_checks
 from app.services.agent_user_checks import check_agent_user
+from app.services.platform_checks import check_bundled_binaries, check_resources
 from app.services.reproducibility_checks import run_reproducibility_checks
 from app.services.verifier_isolation import run_isolation_checks
 
@@ -301,4 +302,6 @@ def run_static_checks(task_root: Path) -> StaticCheckReport:
     run_isolation_checks(task_root, report)
     run_reproducibility_checks(task_root, report)
     check_agent_user(task_root, report)
+    check_bundled_binaries(task_root, report)
+    check_resources(task_root, report)
     return report

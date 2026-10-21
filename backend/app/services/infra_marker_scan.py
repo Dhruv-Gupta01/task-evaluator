@@ -41,3 +41,31 @@ def scan_trial_logs(logs: str | None) -> list[str]:
         if pattern.search(logs):
             found.append(description)
     return found
+
+
+# 5.0 E: failures caused by the machine or the image, not by the agent or the task's difficulty.
+# Kept apart from _INFRA_MARKERS on purpose: those are retried once automatically, and
+# re-running a trial cannot fix a wrong architecture or an old glibc.
+_ENVIRONMENT_MARKERS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"no matching manifest for linux/\w+", re.I), "the base image has no build for this CPU architecture"),
+    (re.compile(r"exec format error", re.I), "a binary built for another CPU architecture (exec format error)"),
+    (re.compile(r"PackagesNotFoundError[\s\S]{0,400}(aarch64|arm64)|no matching distribution found[\s\S]{0,200}(aarch64|arm64)", re.I),
+     "a package has no build for this CPU architecture (aarch64)"),
+    (re.compile(r"GLIBC_[0-9.]+['\" ]* not found|GLIBC_ABI_\w+ not found", re.I),
+     "the image's glibc is older than the agent harness needs"),
+    (re.compile(r"API rate limit exceeded|rate limit exceeded for (?:url|ip)|secondary rate limit", re.I),
+     "a download hit a rate limit (for example GitHub's 60 requests per hour)"),
+    (re.compile(r"(?:403|429)[^\n]{0,80}(?:github|githubusercontent)|(?:github|githubusercontent)[^\n]{0,80}(?:403|429)", re.I),
+     "GitHub refused a download (HTTP 403 or 429)"),
+    (re.compile(r"connection refused[^\n]{0,120}(?:port|localhost|127\.0\.0\.1)|port \d+ (?:is )?not (?:ready|open)", re.I),
+     "a service the task starts was not ready when it was used"),
+]
+
+
+def scan_environment_causes(logs: str | None) -> list[str]:
+    """Environment-caused failure signatures (architecture, glibc, rate limits,
+    service start-up). Same contract as scan_trial_logs: empty means none of
+    these known patterns, not proof the failure is the agent's."""
+    if not logs:
+        return []
+    return [d for pattern, d in _ENVIRONMENT_MARKERS if pattern.search(logs)]

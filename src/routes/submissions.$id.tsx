@@ -1409,6 +1409,29 @@ function ImageInventoryView({ logs }: { logs?: string }) {
         {(parsed.pip ?? []).length} pip, {(parsed.dpkg ?? []).length + (parsed.apk ?? []).length}{" "}
         system packages
       </div>
+      {parsed.system && (parsed.system.arch || parsed.system.os) && (
+        <div className="text-xs text-muted-foreground">
+          Image: <span className="font-mono">{parsed.system.arch ?? "?"}</span>
+          {parsed.system.os && <> · {parsed.system.os}</>}
+          {parsed.system.glibc && <> · {parsed.system.glibc}</>}
+        </div>
+      )}
+      {(parsed.base_images ?? []).map((b) => (
+        <div
+          key={b.ref}
+          className={
+            b.warnings?.length || b.error
+              ? "rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400"
+              : "text-xs text-muted-foreground"
+          }
+        >
+          Base image <span className="font-mono">{b.ref}</span>:{" "}
+          {b.error ? `could not be checked (${b.error})` : b.index ? (b.platforms ?? []).join(", ") : "single platform"}
+          {(b.warnings ?? []).map((w) => (
+            <div key={w}>⚠ {w}</div>
+          ))}
+        </div>
+      ))}
       <LogPanel
         logs={(parsed.files ?? []).map((f) => `${f.size}\t${f.path}`).join("\n")}
         title="Files in the image"

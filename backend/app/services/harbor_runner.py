@@ -708,6 +708,16 @@ def _parse_trial(
             outcome.report["flags"].append(
                 "infrastructure, not the task: " + "; ".join(infra) + " (re-run before trusting this result)"
             )
+        trial_text = (
+            f"{exc.get('exception_type', '')} {exc.get('exception_message', '')}\n"
+            + _read_text(trial_dir / "trial.log") + _read_text(trial_dir / "verifier" / "test-stdout.txt")
+        )
+        env_causes = infra_marker_scan.scan_environment_causes(trial_text)
+        if env_causes and reward != 1.0:
+            outcome.report["flags"].append(
+                "environment, not the agent: " + "; ".join(env_causes)
+                + " (a re-run will not change it; the task or the machine needs to)"
+            )
     except Exception:  # advisory evidence must never break reading a trial
         outcome.report = None
 

@@ -10,7 +10,7 @@ review before anything goes to a candidate, not an auto-issued verdict."""
 import json
 from pathlib import Path
 
-from app.services.infra_marker_scan import scan_trial_logs
+from app.services.infra_marker_scan import scan_environment_causes, scan_trial_logs
 from app.services.llm.base import Message
 from app.services.llm.factory import get_llm_client
 from app.services.static_checks import run_static_checks
@@ -64,7 +64,7 @@ Direct, second-person, concrete. What's already good, then what to change and wh
 def _trial_section(trials: list, kind_label: str) -> str:
     parts = []
     for t in trials:
-        markers = scan_trial_logs(t.logs)
+        markers = scan_trial_logs(t.logs) + [f"environment: {c}" for c in scan_environment_causes(t.logs)]
         marker_note = f" [infra markers: {', '.join(markers)}]" if markers else " [no infra markers detected]"
         if t.reward == 1:
             excerpt = (t.logs or "")[-MAX_PASSING_TRIAL_SUMMARY_CHARS:]

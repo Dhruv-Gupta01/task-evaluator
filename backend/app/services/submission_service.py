@@ -5,7 +5,7 @@ from collections import Counter
 
 from app.config import get_settings
 from app.models import LlmSpend, Run, Submission
-from app.services import verifier_report
+from app.services import image_inventory, verifier_report
 from app.services.harbor_runner import CODEX_BAKE_NOTE_MARKER
 from app.services.task_config import TaskConfig
 from app.schemas import (
@@ -616,6 +616,24 @@ def _json_field(logs: str | None, key: str):
 POLICY_AGENT_TIMEOUT_SEC = 28800
 
 
+def image_system_facts(submission: Submission) -> dict | None:
+    """5.0 E: the built image's own architecture, OS and glibc (read by Build's image
+    inventory) and what the registry says about each base image. None before a build."""
+    run = next((r for r in submission.runs if r.kind == "image_inventory"), None)
+    data = image_inventory.parse_logs(run.logs) if run else None
+    if not data:
+        return None
+    system = data.get("system") or {}
+    m = re.search(r"(\d+)\.(\d+)\s*$", system.get("glibc", ""))
+    return {
+        "arch": system.get("arch"),
+        "os": system.get("os"),
+        "glibc": system.get("glibc"),
+        "glibc_version": (int(m.group(1)), int(m.group(2))) if m else None,
+        "base_images": data.get("base_images") or [],
+    }
+
+
 def run_limits(submission: Submission, schema: SubmissionSchema) -> dict:
     """4.0 E.1: the limits trials ran with, as applied (AGENT_TIMEOUT_SEC
     overrides the task's own timeout), and how the latest recorded trial
@@ -637,7 +655,27 @@ def run_limits(submission: Submission, schema: SubmissionSchema) -> dict:
             f"agent timeout {applied:g}s is below Terminal-Bench 4.0's flat {POLICY_AGENT_TIMEOUT_SEC}s (8 h)"
             + ("" if settings.agent_timeout_sec else "; AGENT_TIMEOUT_SEC is not set, so the task's own value is used")
         )
+    image = image_system_facts(submission)
+    if image:
+        glibc = image.get("glibc_version")
+        if glibc is not None and glibc < (2, 36):
+            warnings.append(
+                f"the image's glibc is {glibc[0]}.{glibc[1]}; the agent harness needs 2.36 or newer (Debian 12 / "
+                "Ubuntu 24.04) and crashes at start-up on older ones"
+            )
+        arch = image.get("arch")
+        wanted = {"linux/arm64": "aarch64", "linux/amd64": "x86_64"}.get(settings.docker_platform)
+        if arch and wanted and arch != wanted and not (wanted == "aarch64" and arch == "arm64"):
+            warnings.append(f"the image reports {arch} but DOCKER_PLATFORM is {settings.docker_platform}")
+        for b in image.get("base_images") or []:
+            warnings += [f"base image {b['ref']}: {w}" for w in b.get("warnings") or []]
+    if settings.agent_timeout_sec and settings.agent_timeout_sec != config.agent.timeout_sec:
+        warnings.append(
+            f"AGENT_TIMEOUT_SEC={settings.agent_timeout_sec:g}s overrides the task's own "
+            f"timeout_sec={config.agent.timeout_sec:g}s"
+        )
     return {
+        "image": image,
         "agent_timeout_sec": applied,
         "agent_timeout_source": "AGENT_TIMEOUT_SEC" if settings.agent_timeout_sec else "task.toml",
         "verifier_timeout_sec": config.verifier.timeout_sec,

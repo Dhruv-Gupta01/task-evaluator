@@ -307,6 +307,15 @@ export interface ImageInventory {
   dpkg?: string[];
   apk?: string[];
   npm?: string[];
+  // 5.0 E: the image's own CPU architecture, OS and glibc, and what the registry says about each base image.
+  system?: { arch?: string; os?: string; glibc?: string };
+  base_images?: {
+    ref: string;
+    index?: boolean;
+    platforms?: string[];
+    warnings?: string[];
+    error?: string;
+  }[];
   error?: string;
 }
 

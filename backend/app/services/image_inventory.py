@@ -22,7 +22,7 @@ from app.services.hygiene_checks import _own_files
 
 MAX_FILES = 5000
 _TIMEOUT_SEC = 300
-_SECTIONS = ("FILES", "PIP", "DPKG", "APK", "NPM")
+_SECTIONS = ("FILES", "PIP", "DPKG", "APK", "NPM", "SYS")
 # Not task files: the base image's own folders, caches and installed packages.
 _PRUNE = (
     "node_modules .git __pycache__ site-packages dist-packages .cache .venv venv .npm .cargo .rustup "
@@ -44,11 +44,16 @@ _SCRIPT = (
     "apk info -v 2>/dev/null | head -n 3000\n"
     'echo "---NPM"\n'
     "npm ls -g --depth=0 2>/dev/null | head -n 500\n"
+    'echo "---SYS"\n'
+    'echo "arch=$(uname -m)"\n'
+    'echo "os=$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME")"\n'
+    'echo "glibc=$( (ldd --version 2>&1 | head -n 1) )"\n'
 )
 
 
 def _parse(output: str) -> dict:
-    data: dict = {"workdir": None, "files": [], "truncated": False, **{s.lower(): [] for s in _SECTIONS[1:]}}
+    data: dict = {"workdir": None, "files": [], "truncated": False, "system": {},
+                  **{s.lower(): [] for s in _SECTIONS[1:] if s != "SYS"}}
     section = None
     for line in output.splitlines():
         if line.startswith("WORKDIR="):
@@ -59,6 +64,9 @@ def _parse(output: str) -> dict:
             size, _, path = line.partition(" ")
             if path and size.isdigit():
                 data["files"].append({"path": path, "size": int(size)})
+        elif section == "SYS" and "=" in line:
+            key, _, value = line.partition("=")
+            data["system"][key.strip()] = value.strip()
         elif section and line.strip():
             data[section.lower()].append(line.strip())
     if len(data["files"]) > MAX_FILES:
