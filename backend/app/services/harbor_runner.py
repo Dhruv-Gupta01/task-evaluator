@@ -548,6 +548,16 @@ def _live_cost_from_container(trial_dir: Path, model: str | None) -> float | Non
     return None
 
 
+def _requested_agent_user(trial_dir: Path) -> str | None:
+    """[agent] user from the task copy this trial runs, or None for the image's own user."""
+    try:
+        task_path = json.loads((trial_dir / "config.json").read_text())["task"]["path"]
+        user = (tomllib.loads((Path(task_path) / "task.toml").read_text()).get("agent") or {}).get("user")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return str(user) if user else None
+
+
 def _probe_container(trial_dir: Path) -> dict | None:
     """Blocking (docker CLI); run it in a thread. Reads the trial container's
     cgroup memory counters and Docker's OOMKilled flag while it is still alive:
@@ -555,6 +565,7 @@ def _probe_container(trial_dir: Path) -> dict | None:
     is no container or the counters are not available."""
     try:
         probe: dict = {}
+        agent_user = _requested_agent_user(trial_dir)
         for cid in _trial_container_ids(trial_dir, include_stopped=True):
             state = subprocess.run(
                 ["docker", "inspect", "-f", "{{.State.OOMKilled}}", cid],
@@ -575,6 +586,14 @@ def _probe_container(trial_dir: Path) -> dict | None:
                 )
             if events.strip().startswith("oom_kill"):
                 probe["oom_kills"] = max(probe.get("oom_kills", 0), int(events.split()[1]))
+            if "agent_uid" not in probe:
+                # The user Harbor runs the agent as: its own [agent] user, else the image's USER.
+                uid = subprocess.run(
+                    ["docker", "exec", *(["-u", agent_user] if agent_user else []), cid, "id", "-u"],
+                    capture_output=True, text=True, timeout=20,
+                ).stdout.strip()
+                if uid.isdigit():
+                    probe["agent_uid"] = int(uid)
         return probe or None
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
@@ -585,7 +604,7 @@ def _merge_probe(old: dict | None, new: dict | None) -> dict | None:
         return old
     merged = dict(old or {})
     for key, value in new.items():
-        merged[key] = value if key == "oom_killed" else max(value, merged.get(key, 0))
+        merged[key] = value if key in ("oom_killed", "agent_uid") else max(value, merged.get(key, 0))
     return merged
 
 
@@ -594,6 +613,16 @@ def _apply_probe(outcome: "TrialOutcome", probe: dict | None) -> None:
         return
     facts = outcome.report["facts"]
     facts["peak_memory_mb"] = probe.get("peak_memory_mb")
+    facts["agent_uid"] = probe.get("agent_uid")
+    if probe.get("agent_uid") == 0:
+        outcome.report["flags"].append(
+            "the agent ran as root (uid 0): it can read the verifier's files and any protected data. "
+            + (
+                f"[agent] user was set to '{facts['agent_user']}' but the process is still uid 0."
+                if facts.get("agent_user") not in (None, "root", "0")
+                else "Set [agent] user to a non-root user (Terminal-Bench 5.0, issue #1505)."
+            )
+        )
     limit = facts.get("memory_mb")
     if probe.get("oom_killed") or probe.get("oom_kills"):
         outcome.report["flags"].append(

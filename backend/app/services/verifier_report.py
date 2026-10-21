@@ -254,6 +254,7 @@ def read_run_facts(result: dict, task_toml: Path | None, docker_platform: str) -
         "host_arch": platform.machine(),
         # None means Harbor used the image's own USER (root unless the Dockerfile sets one).
         "agent_user": (task.get("agent") or {}).get("user") or cfg.get("user_agent"),
+        "agent_uid": None,  # filled from the live container by harbor_runner._apply_probe
         "verifier_user": (task.get("verifier") or {}).get("user"),
         "verifier_mode": result.get("verifier_environment_mode"),
     }
@@ -321,8 +322,9 @@ def summary_lines(report: dict) -> str:
             f"resources: cpus {facts['cpus']}, memory {facts['memory_mb']} MB, platform "
             f"{facts['platform']}, host {facts['host_arch']}"
         )
+        uid_note = "" if facts.get("agent_uid") is None else f" (uid {facts['agent_uid']})"
         lines.append(
-            f"users: agent {facts['agent_user'] or 'image default'}, verifier "
+            f"users: agent {facts['agent_user'] or 'image default'}{uid_note}, verifier "
             f"{facts['verifier_user'] or 'image default'}, verifier mode {facts['verifier_mode']}"
         )
     if report["details"]:

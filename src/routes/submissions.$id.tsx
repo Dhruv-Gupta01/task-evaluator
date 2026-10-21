@@ -2025,7 +2025,13 @@ function VerifierLine({
           agent {facts.agent_seconds ?? "?"}s of {facts.agent_limit_sec}s · verifier{" "}
           {facts.verifier_seconds ?? "?"}s of {facts.verifier_limit_sec}s · {facts.platform ?? facts.host_arch}
           {facts.peak_memory_mb != null && ` · peak memory ${facts.peak_memory_mb}${facts.memory_mb ? ` of ${facts.memory_mb}` : ""} MB`}
-          {" · "}agent user {facts.agent_user ?? "image default"}, verifier user{" "}
+          {" · "}agent user {facts.agent_user ?? "image default"}
+          {facts.agent_uid != null && (
+            <span className={facts.agent_uid === 0 ? "font-medium text-amber-600" : undefined}>
+              {" "}(uid {facts.agent_uid}{facts.agent_uid === 0 ? ", root" : ""})
+            </span>
+          )}
+          , verifier user{" "}
           {facts.verifier_user ?? "image default"}
         </div>
       )}

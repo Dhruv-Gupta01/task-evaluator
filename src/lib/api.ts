@@ -34,6 +34,8 @@ export interface VerifierReport {
     platform: string | null;
     host_arch: string;
     agent_user: string | null;
+    // Real uid of the agent process, read from the live container (0 = root).
+    agent_uid?: number | null;
     verifier_user: string | null;
     verifier_mode: string | null;
   } | null;
