@@ -30,6 +30,7 @@ class VerifierReport(BaseModel):
     details: VerifierDetails | None = None
     flags: list[str] = []
     facts: dict | None = None  # how the trial ran: limits, time used, resources, users
+    refusal: dict | None = None  # {kind, evidence} when the agent refused the task (5.0 J)
 
 
 class StageResult(BaseModel):
@@ -90,6 +91,10 @@ class AgentTrialsResult(BaseModel):
     # terminal; null while any trial is still running/pending.
     pass_at_k: dict[str, float] | None = None
     test_summary: TestSummary | None = None
+    # 5.0 J: trials the agent refused (they score 0 like a failure) and the pass
+    # rate with those trials left out. pass_rate and pass_at_k are unchanged.
+    refusals: int = 0
+    pass_rate_excluding_refusals: float | None = None
 
 
 class OracleRunsResult(BaseModel):

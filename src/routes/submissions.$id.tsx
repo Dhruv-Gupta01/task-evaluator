@@ -146,7 +146,9 @@ function SubmissionDetail() {
   // One clean cheat trial proves little (real cheats upstream needed several tries).
   const [cheatN, setCheatN] = useState("3");
   const [cheatCostCap, setCheatCostCap] = useState("");
-  const [analysisRubric, setAnalysisRubric] = useState<RubricChoice>("default");
+  // The TB rubric adds the refusals, near_miss, difficulty_crux and low_timeout criteria that
+  // Harbor's own two-criterion rubric lacks, so it is pre-selected (Default is still in the dropdown).
+  const [analysisRubric, setAnalysisRubric] = useState<RubricChoice>("tb");
   // The richer Terminal-Bench rubric runs the anti-cheat and verification criteria
   // the default one lacks, so it is pre-selected (the dropdown still offers Default).
   const [checkRubric, setCheckRubric] = useState<RubricChoice>("tb");
@@ -1189,6 +1191,18 @@ function SubmissionDetail() {
                         pass@{k}: <span className="font-mono">{(v * 100).toFixed(1)}%</span>
                       </span>
                     ))}
+                </div>
+              )}
+              {data.agent_trials.refusals > 0 && (
+                <div className="border-b border-border bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+                  {data.agent_trials.refusals} of {data.agent_trials.n} trial(s) were refused by the
+                  model, not failed on the task. Pass rate without them:{" "}
+                  <span className="font-mono">
+                    {data.agent_trials.pass_rate_excluding_refusals != null
+                      ? `${Math.round(data.agent_trials.pass_rate_excluding_refusals * 100)}%`
+                      : "n/a"}
+                  </span>
+                  . The pass rate and pass@k above are unchanged.
                 </div>
               )}
               {data.agent_trials.test_summary && (

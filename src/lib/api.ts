@@ -22,6 +22,8 @@ export interface VerifierReport {
   ctrf: CtrfSummary | null;
   details: { file: string; content: string } | null;
   flags: string[];
+  // Set when the agent refused the task instead of attempting it (5.0 J).
+  refusal?: { kind: "provider_block" | "phrase"; evidence: string } | null;
   // How the trial ran (E.1/E.3/E.4/E.8): limits, time used, resources, users.
   facts?: {
     agent_seconds: number | null;
@@ -92,6 +94,9 @@ export interface AgentTrialsResult {
   // by k as a string. Harbor's own job-level reporting only ever fills
   // powers-of-2/multiples-of-5 -- pass@1 is never computed by Harbor itself.
   pass_at_k: Record<string, number> | null;
+  // A refusal scores 0 like a failure. These count them; pass_rate stays as is.
+  refusals: number;
+  pass_rate_excluding_refusals: number | null;
   // Across the failing trials: which tests they failed and how close the best
   // one came. A single test failed by every failing trial is the typical
   // shape of an over-strict grader or an unstated rule (`notes`).

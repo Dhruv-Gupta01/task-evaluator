@@ -20,7 +20,7 @@ from pathlib import Path
 import yaml
 
 from app.config import docker_add_host_pairs, get_settings, host_env_for_subprocess
-from app.services import infra_marker_scan, verifier_report
+from app.services import infra_marker_scan, refusal_detector, verifier_report
 from app.services.llm import pricing
 from app.services.llm.base import Usage
 
@@ -684,6 +684,19 @@ def _parse_trial(
         outcome.report["flags"] += facts_flags
         outcome.report["flags"] += verifier_report.reward_file_flags(trial_dir / "verifier", reward)
         outcome.report["flags"] += verifier_report.harness_error_flags(trial_dir, reward)
+        # J: a refusal scores 0 like a real failure; label it so the pass rate can be read both ways.
+        refusal = refusal_detector.detect(
+            trial_dir, reward, tool_calls, str(result.get("exception_info") or "")
+        )
+        outcome.report["refusal"] = refusal
+        if refusal:
+            outcome.report["flags"].append(
+                "the agent refused the task ("
+                + ("the model provider blocked the request" if refusal["kind"] == "provider_block"
+                   else "it said it would not help and did almost no work")
+                + f"): \"{refusal['evidence']}\". A refusal scores 0 like a failure but says nothing about the "
+                "task's difficulty."
+            )
         # E.6: a trial that ended on a model-request timeout, a full disk or a
         # Docker error was not decided by the task.
         exc = result.get("exception_info") or {}

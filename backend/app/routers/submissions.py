@@ -311,7 +311,7 @@ def get_budget(db: Session = Depends(get_db)) -> dict[str, float]:
 
 @router.post("/submissions/{submission_id}/failure-analysis", status_code=202)
 async def trigger_failure_analysis(
-    submission_id: str, rubric: str = "default", db: Session = Depends(get_db)
+    submission_id: str, rubric: str = "tb", db: Session = Depends(get_db)
 ) -> dict[str, str]:
     """`harbor analyze` on the finished agent trials. Advisory, like the other
     LLM stages; it costs a little (a cheap model) and counts toward the

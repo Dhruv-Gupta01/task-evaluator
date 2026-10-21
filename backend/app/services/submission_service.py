@@ -258,9 +258,13 @@ def _agent_trials_result(submission: Submission) -> AgentTrialsResult:
         test_summary = verifier_report.cluster_failures(
             [(r.run_index, r.raw_reward, _verifier(r)) for r in agent_runs]
         )
+    refused = sum(1 for r in agent_runs if (_verifier(r) or {}).get("refusal"))
+    rate_without = None
+    if all_terminal and n - refused > 0:
+        rate_without = sum(1 for r in agent_runs if r.reward == 1) / (n - refused)
     return AgentTrialsResult(
         status=status, n=n, trials=trials, pass_rate=pass_rate, pass_at_k=pass_at_k,
-        test_summary=test_summary,
+        test_summary=test_summary, refusals=refused, pass_rate_excluding_refusals=rate_without,
     )
 
 
@@ -708,6 +712,14 @@ def build_summary_markdown(
         "## Agent Trials",
         f"- N: {schema.agent_trials.n}",
         f"- Pass rate: {_fmt_pct(schema.agent_trials.pass_rate)}",
+        *(
+            [
+                f"- Refused: {schema.agent_trials.refusals} of {schema.agent_trials.n} trials "
+                f"(pass rate without them: {_fmt_pct(schema.agent_trials.pass_rate_excluding_refusals)})"
+            ]
+            if schema.agent_trials.refusals
+            else []
+        ),
     ]
     if schema.agent_trials.pass_at_k:
         pass_k_line = ", ".join(
