@@ -205,6 +205,20 @@ def _link_task(target: Path, link: Path) -> None:
         shutil.copytree(target, link, symlinks=True)
 
 
+def vendor_info() -> dict:
+    """The upstream commit the vendored checks come from (read from PROVENANCE.md) and
+    how many check scripts are vendored, so every result says which rule set it ran."""
+    info: dict = {"commit": None, "date": None, "scripts": len(list(_CHECKS_DIR.glob("check-*.sh"))) + len(list(_CHECKS_DIR.glob("check-*.py")))}
+    try:
+        text = (_CHECKS_DIR.parent / "PROVENANCE.md").read_text()
+    except OSError:
+        return info
+    m = re.search(r"Commit:\s*`([0-9a-f]{7,40})`(?:\s*\(([\d-]+)\))?", text)
+    if m:
+        info["commit"], info["date"] = m.group(1), m.group(2)
+    return info
+
+
 def run_tb_static_checks(task_root: Path) -> TbStaticCheckReport:
     """Runs every vendored check-*.sh against task_root, one process each,
     same as Terminal-Bench's own CI does (.github/workflows/static-checks.yml).

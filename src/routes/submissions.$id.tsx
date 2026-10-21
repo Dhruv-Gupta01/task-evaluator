@@ -695,6 +695,12 @@ function SubmissionDetail() {
                   >
                     {report.pass_count} pass, {report.fail_count} fail
                     {report.skip_count ? `, ${report.skip_count} not run (a tool is missing)` : ""}
+                    {report.vendor?.commit && (
+                      <span className="block text-muted-foreground">
+                        Rule set: upstream <span className="font-mono">{report.vendor.commit.slice(0, 7)}</span>
+                        {report.vendor.date ? ` (${report.vendor.date})` : ""}, {report.vendor.scripts} checks
+                      </span>
+                    )}
                   </div>
                   <LogPanel logs={report.text} title="TB check findings" />
                 </>

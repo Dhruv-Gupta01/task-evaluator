@@ -443,6 +443,8 @@ export interface TbStaticCheckReport {
   pass_count: number;
   fail_count: number;
   skip_count?: number;
+  // Which upstream commit the vendored rule set comes from (5.0 F).
+  vendor?: { commit: string | null; date: string | null; scripts: number };
   results: TbCheckFinding[];
   text: string;
 }

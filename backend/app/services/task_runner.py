@@ -1287,6 +1287,7 @@ async def run_tb_static_checks_stage(submission_id: str) -> None:
                 "pass_count": report.pass_count,
                 "fail_count": report.fail_count,
                 "skip_count": report.skip_count,
+                "vendor": tb_static_checks.vendor_info(),
                 "results": [
                     {"name": r.name, "passed": r.passed, "output": r.output, "skipped": r.skipped}
                     for r in report.results
