@@ -41,8 +41,9 @@ def _build_text(task_root: Path) -> list[tuple[str, str]]:
 def check_toolchain_pinning(task_root: Path, report) -> None:
     names = _names(task_root)
     problems: list[str] = []
+    transitive: list[str] = []
     for rel, text in _build_text(task_root):
-        commands = [c.strip() for c in _SPLIT.split(text.replace("\\\n", " "))]
+        commands = [c.strip() for part in _SPLIT.split(text.replace("\\\n", " ")) for c in part.split("\n")]
         for cmd in commands:
             low = cmd.lower()
             if re.match(r"(?:sudo\s+)?opam\s+(?:install|init)\b", low) and not any(
@@ -61,10 +62,13 @@ def check_toolchain_pinning(task_root: Path, report) -> None:
                 problems.append(f"{rel}: Perl cpan/cpanm without cpanfile.snapshot")
             m = re.match(r"(?:sudo\s+)?(?:conda|mamba|micromamba)\s+(?:install|create)\b(.*)", low)
             if m:
-                pkgs = [t for t in m.group(1).split() if not t.startswith("-") and t not in ("python",)]
+                args = re.sub(r"(?:^|\s)(?:-n|-c|-p|-f|--name|--channel|--prefix|--file)(?:=|\s+)\S+", " ", m.group(1))
+                pkgs = [t for t in args.split() if not t.startswith("-") and t not in ("python",)]
                 loose = [t for t in pkgs if "=" not in t and not t.startswith((".", "/")) and "." not in t.split("/")[-1]]
                 if loose:
                     problems.append(f"{rel}: conda packages without a version ({_listed(loose)})")
+                elif pkgs and not any(n in ("pixi.lock", "conda-lock.yml", "conda-lock.yaml") or n.endswith(".explicit") for n in names):
+                    transitive.append(rel)
         # tool bootstraps downloaded and run without a version
         for m in re.finditer(r"(sh\.rustup\.rs|astral\.sh/uv/install\.sh|get\.pnpm\.io/install\.sh|nvm-sh/nvm/[^/\s]+/install\.sh)", text):
             tool = m.group(1)
@@ -86,6 +90,14 @@ def check_toolchain_pinning(task_root: Path, report) -> None:
             "release can change what the build installs and break the Oracle later. Add the lock file the "
             "ecosystem has (opam export, lean-toolchain + lake-manifest.json, an sbt lock, cpanfile.snapshot, "
             "conda `pkg=version`) or pin the version.",
+        )
+    elif transitive:
+        report.add(
+            "toolchain_pinning",
+            "info",
+            f"conda packages are versioned ({_listed(sorted(set(transitive)))}) but there is no lock file (pixi.lock, "
+            "conda-lock). The listed packages are fixed; their dependencies still resolve to whatever is newest, so the "
+            "environment can drift (upstream's reproducibility PRs, e.g. #1901, add a lock).",
         )
     else:
         report.add("toolchain_pinning", "info", "No unlocked opam, elan/lake, sbt, Perl, conda or tool-bootstrap installs found.")

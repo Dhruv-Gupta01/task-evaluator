@@ -52,6 +52,14 @@ def check_agent_user(task_root: Path, report) -> None:
             "and confirm the Oracle still passes. A task that must stay root should say why in README.md.",
         )
         return
+    if not configured:
+        report.add(
+            "agent_user_only_in_dockerfile",
+            "warn",
+            f"The agent's user ('{user}') comes only from the Dockerfile's USER line. Some runners (Modal, "
+            "upstream #2152) ignore a Dockerfile USER and start the agent as root. Set [agent] user = "
+            f"\"{user}\" in task.toml (and [verifier] user if the verifier needs root).",
+        )
 
     runs = " ".join(_run_lines(text))
     created = bool(re.search(rf"\b(?:useradd|adduser)\b[^\n;&|]*\b{re.escape(user)}\b", runs)) or user in _BUILT_IN_USERS

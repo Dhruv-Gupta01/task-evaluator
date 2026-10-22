@@ -59,6 +59,8 @@ _ENVIRONMENT_MARKERS: list[tuple[re.Pattern, str]] = [
      "GitHub refused a download (HTTP 403 or 429)"),
     (re.compile(r"connection refused[^\n]{0,120}(?:port|localhost|127\.0\.0\.1)|port \d+ (?:is )?not (?:ready|open)", re.I),
      "a service the task starts was not ready when it was used"),
+    (re.compile(r"Worker could not install required protections|Worker can access private path", re.I),
+     "the verifier's sandbox (rewardkit Worker) could not isolate itself; this Docker host lacks a kernel feature it needs"),
 ]
 
 
