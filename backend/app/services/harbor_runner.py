@@ -455,6 +455,21 @@ def _write_build_hosts_overlay(path: Path) -> Path | None:
     return path
 
 
+def _main_shares_another_network(env_dir: Path) -> bool:
+    """True when a compose file in environment/ gives `main` a `network_mode` (e.g. `service:api`).
+    Docker refuses `extra_hosts` on such a container ("conflicting options: custom host-to-IP
+    mapping and the network mode"), so the runtime overlay must not be added for it."""
+    for compose in sorted(env_dir.glob("docker-compose*.y*ml")) + sorted(env_dir.glob("compose*.y*ml")):
+        try:
+            data = yaml.safe_load(compose.read_text()) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        main = (data.get("services") or {}).get("main") if isinstance(data, dict) else None
+        if isinstance(main, dict) and main.get("network_mode"):
+            return True
+    return False
+
+
 def _write_runtime_hosts_overlay(path: Path) -> Path | None:
     """DOCKER_ADD_HOSTS's runtime counterpart: the build-time overlay above
     only pins addresses while Harbor builds the image, not for the running
@@ -878,8 +893,10 @@ async def run_job(
     )
     job_dir = jobs_dir / job_name
     hosts_overlay = _write_build_hosts_overlay(jobs_dir.parent / f"{jobs_dir.name}-build-hosts.yaml")
-    runtime_hosts_overlay = _write_runtime_hosts_overlay(
-        jobs_dir.parent / f"{jobs_dir.name}-runtime-hosts.yaml"
+    runtime_hosts_overlay = (
+        None
+        if _main_shares_another_network(task_path / "environment")
+        else _write_runtime_hosts_overlay(jobs_dir.parent / f"{jobs_dir.name}-runtime-hosts.yaml")
     )
     cli_output_path = jobs_dir / f"{job_name}.out"
     cmd = [
