@@ -4,6 +4,7 @@ count, a regex match) — never a judgment call. review_report.py feeds these
 results to the LLM as already-established ground truth rather than asking
 the model to recompute them, since asking an LLM to count words or
 paragraphs is a reliable way to get a confidently wrong number."""
+import ast
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -182,6 +183,75 @@ def _check_reward_values(text: str, report: StaticCheckReport) -> None:
         )
 
 
+def _is_binary_expr(node: ast.AST) -> bool:
+    """True when the expression can only be 0 or 1: a 0/1 literal, `1.0 if ... else 0.0`,
+    or a comparison/boolean wrapped in int()/float()."""
+    if isinstance(node, ast.Constant):
+        return node.value in (0, 1, True, False)
+    if isinstance(node, ast.IfExp):
+        return _is_binary_expr(node.body) and _is_binary_expr(node.orelse)
+    if isinstance(node, (ast.Compare, ast.BoolOp)):
+        return True
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return True
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("int", "float", "bool"):
+        return all(_is_binary_expr(a) or isinstance(a, (ast.Compare, ast.BoolOp, ast.Call)) for a in node.args)
+    return False
+
+
+def _is_graded_expr(node: ast.AST) -> bool:
+    """A value built by arithmetic or a min/max clamp, with no strings in it (so not a file path)."""
+    if any(isinstance(n, ast.Constant) and isinstance(n.value, str) for n in ast.walk(node)):
+        return False
+    if _is_binary_expr(node):
+        return False
+    return any(
+        isinstance(n, ast.BinOp)
+        or (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("min", "max"))
+        for n in ast.walk(node)
+    )
+
+
+def check_python_reward(task_root: Path, report: StaticCheckReport) -> None:
+    """Terminal-Bench needs exactly 0 or 1, but the reward is often computed in a Python test
+    (tests/*.py writes /logs/verifier/reward.txt), where test.sh never shows it. Reads those files
+    and warns on a `reward` variable assigned a graded value (arithmetic, a min/max clamp, a
+    `-=` penalty) or a reward helper called with a fraction. Advisory: a clamp can still be
+    binary in practice, so a person decides."""
+    tests = task_root / "tests"
+    if not tests.is_dir():
+        return
+    hits: list[str] = []
+    for path in sorted(tests.rglob("*.py")):
+        try:
+            text = path.read_text(errors="replace")
+            if "reward" not in text:
+                continue
+            tree = ast.parse(text)
+        except (OSError, SyntaxError, ValueError):
+            continue
+        rel = path.relative_to(task_root)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+                if any(n in ("reward", "final_reward") for n in names) and _is_graded_expr(node.value):
+                    hits.append(f"{rel}:{node.lineno} assigns `{ast.get_source_segment(text, node)}`")
+            elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+                if node.target.id in ("reward", "final_reward"):
+                    hits.append(f"{rel}:{node.lineno} adjusts the reward with `{ast.get_source_segment(text, node)}`")
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id.lower() in ("write_reward", "set_reward", "save_reward"):
+                for arg in node.args:
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, (int, float)) and arg.value not in (0, 1):
+                        hits.append(f"{rel}:{node.lineno} writes a reward of {arg.value}")
+    if hits:
+        report.add(
+            "tests_py_reward_binary",
+            "warn",
+            "A Python test appears to compute a graded reward, but Terminal-Bench needs exactly 0 or 1: "
+            + "; ".join(h[:150] for h in hits[:4]),
+        )
+
+
 _DIGEST_PIN_RE = re.compile(r"^FROM\s+\S+@sha256:[0-9a-f]{64}", re.M | re.I)
 _BLANKET_COPY_RE = re.compile(r"^\s*COPY\s+\.\s+\.", re.M)
 _HEREDOC_RE = re.compile(r"<<['\"]?\w+['\"]?")
@@ -295,6 +365,7 @@ def run_static_checks(task_root: Path) -> StaticCheckReport:
     report = StaticCheckReport()
     check_instruction(task_root / "instruction.md", report)
     check_test_sh(task_root / "tests" / "test.sh", report)
+    check_python_reward(task_root, report)
     check_dockerfile(task_root / "environment" / "Dockerfile", report)
     check_hardware_flags(task_root, report)
     check_zip_layout(task_root, report)

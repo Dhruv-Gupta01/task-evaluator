@@ -297,7 +297,7 @@ def _record_checksum(
         submission.task_checksum = task_checksum
 
 
-async def run_validate(submission_id: str) -> None:
+async def run_validate(submission_id: str, build: bool = True) -> None:
     db = SessionLocal()
     try:
         submission = db.get(Submission, submission_id)
@@ -322,6 +322,11 @@ async def run_validate(submission_id: str) -> None:
         submission.task_config_json = json.dumps(result.config.model_dump()) if result.config else None
         if result.task_name:
             submission.task_name = result.task_name
+        if not build:
+            submission.build_status = "not-run"
+            submission.build_logs = "Files extracted and checked; no image built (validate?build=false)."
+            db.commit()
+            return
         db.commit()
 
         environment_dir = result.task_root / "environment"

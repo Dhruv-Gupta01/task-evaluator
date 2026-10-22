@@ -69,7 +69,11 @@ async def upload_submission(file: UploadFile, db: Session = Depends(get_db)) -> 
 
 
 @router.post("/submissions/{submission_id}/validate", status_code=202)
-async def trigger_validate(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+async def trigger_validate(
+    submission_id: str, build: bool = True, db: Session = Depends(get_db)
+) -> dict[str, str]:
+    """build=false only extracts and checks the files: enough for the Docker-free stages
+    (Static Checks, Sufficiency, Edge Cases) without building an image."""
     submission = db.get(Submission, submission_id)
     if submission is None:
         raise HTTPException(status_code=404, detail="submission not found")
@@ -77,7 +81,7 @@ async def trigger_validate(submission_id: str, db: Session = Depends(get_db)) ->
     submission.build_status = "pending"
     db.commit()
 
-    await task_queue.submit(f"{submission_id}:validate", task_runner.run_validate(submission_id))
+    await task_queue.submit(f"{submission_id}:validate", task_runner.run_validate(submission_id, build=build))
     return {"status": "started"}
 
 
