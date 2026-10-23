@@ -27,6 +27,9 @@ DETAIL_FILES = (
     "score_breakdown.json",
     "breakdown.json",
     "metrics.json",
+    # #1390 lists these too (freight-dispatch-shift, heat-pump-warranty, legacy-utility-triage, vba-userform-port).
+    "trace_results.json",
+    "trace_summary.json",
 )
 
 

@@ -525,7 +525,8 @@ def check_verdict_channels(t: _Task, report) -> None:
         p.name for p in _own_files(t.root / "tests") if re.search(r"seed[_-]?\d+", p.name, re.I)
     } | {
         Path(m.group(0)).name
-        for _, text in t.tests_py for m in re.finditer(r"[\w./-]*seed[_-]?\d+[\w.-]*\.\w+", text, re.I)
+        # The seed as digits, or as an f-string field: f"/app/test_ciphertext_seed{seed}.txt" (4.1-70).
+        for _, text in t.tests_py for m in re.finditer(r"[\w./-]*seed[_-]?(?:\d+|\{\w+\})[\w.-]*\.\w+", text, re.I)
     })
     if seeded:
         report.add(
@@ -539,7 +540,9 @@ def check_verdict_channels(t: _Task, report) -> None:
 # ---- Lean --------------------------------------------------------------------
 
 _LEAN_KEYWORDS = re.compile(r"(?m)^\s*(?:@\[[^\]]*\]\s*)?(macro_rules|macro|notation|syntax|elab|set_option|axiom)\b|\bsorry\b")
-_LEAN_GUARD = re.compile(r"#print\s+axioms|\b(macro|notation|axiom|sorry)\b")
+# Commands that change what the stated theorem means without adding an axiom, so `#print axioms` and a
+# sorry/axiom ban do not catch them (4.1-43: a macro turning the statement into `True`).
+_LEAN_STATEMENT_COMMANDS = ("macro", "notation", "syntax", "elab")
 
 
 # Toolchains reported to have a soundness problem. Hand-kept; each entry needs a source.
@@ -570,14 +573,16 @@ def check_lean(t: _Task, report) -> None:
         for p in lean if p.relative_to(t.root).parts[0] in ("solution", "environment")
         for m in _LEAN_KEYWORDS.finditer(p.read_text(errors="replace"))
     })
-    guarded = _LEAN_GUARD.search(t.test_sh) or any(_LEAN_GUARD.search(x) for _, x in t.tests_py)
-    if not guarded:
+    verifier_text = "\n".join([t.test_sh] + [x for _, x in t.tests_py])
+    unchecked = [w for w in _LEAN_STATEMENT_COMMANDS if not re.search(rf"\b{w}\b", verifier_text)]
+    if unchecked:
         report.add(
             "lean_submission_checks",
             "warn",
-            "Lean task, but the verifier does not seem to check submitted files for macro, notation, syntax, "
-            "elab, set_option, axiom or sorry. These can change what the stated theorem means (4.1-43); check "
-            "`#print axioms` on the final theorem and reject new notation or macros (needs a human).",
+            f"Lean task, but the verifier does not seem to check submitted files for {', '.join(unchecked)}. "
+            "These can change what the stated theorem means without adding an axiom, so `#print axioms` and a "
+            "sorry/axiom ban do not catch them (4.1-43: a macro turning the statement into `True`); reject new "
+            "macro, notation, syntax and elab commands in submitted files (needs a human).",
         )
     report.add(
         "lean_cheat_trial_hint",

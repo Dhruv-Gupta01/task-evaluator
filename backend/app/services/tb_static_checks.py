@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 from functools import lru_cache
@@ -244,7 +245,7 @@ def run_tb_static_checks(task_root: Path) -> TbStaticCheckReport:
         clean_path = Path(tmp) / _expected_slug(task_root)
         _link_task(task_root.resolve(), clean_path)
         try:
-            _run_scripts(task_root, clean_path, report)
+            _run_scripts(task_root, clean_path, report, _script_env(Path(tmp)))
         finally:
             # Remove the link itself first, so cleaning up the temp dir can
             # never reach through it into the task.
@@ -255,12 +256,27 @@ def run_tb_static_checks(task_root: Path) -> TbStaticCheckReport:
     return report
 
 
-def _run_scripts(task_root: Path, clean_path: Path, report: TbStaticCheckReport) -> None:
+def _script_env(tmp: Path) -> dict[str, str]:
+    """PATH with `python3` resolving to this backend's own interpreter. The
+    scripts run `python3 -I` (check-compose-volumes parses compose files with
+    PyYAML), and isolated mode skips the user site, so a machine whose python3
+    has PyYAML only as a user install (or not at all) failed that check on
+    every compose file with "No module named 'yaml'". The backend's
+    interpreter has PyYAML (a declared dependency)."""
+    shim = tmp / "python-shim"
+    shim.mkdir()
+    python3 = shim / "python3"
+    python3.write_text(f'#!/bin/sh\nexec "{Path(sys.executable).as_posix()}" "$@"\n')
+    python3.chmod(0o755)
+    return {**os.environ, "PATH": f"{shim}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+
+def _run_scripts(task_root: Path, clean_path: Path, report: TbStaticCheckReport, env: dict[str, str]) -> None:
     for script in sorted(_CHECKS_DIR.glob("check-*.sh")):
         try:
             proc = subprocess.run(
                 [_bash(), str(script), str(clean_path)],
-                capture_output=True, text=True, timeout=_TIMEOUT_SEC,
+                capture_output=True, text=True, timeout=_TIMEOUT_SEC, env=env,
             )
             passed = proc.returncode == 0
             output = (proc.stdout or "") + (proc.stderr or "")
