@@ -11,6 +11,7 @@ from pathlib import Path
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models import Run, Submission
+from app.utils.ziputil import load_zip_entries
 from app.services import (
     ai_detection,
     answer_exposure,
@@ -423,7 +424,7 @@ async def run_answer_exposure_stage(submission_id: str) -> None:
         db.commit()
         inventory = _inventory(db, submission_id)
         image_files = [f["path"] for f in inventory["files"]] if inventory else None
-        result = await asyncio.to_thread(answer_exposure.scan, Path(submission.extracted_path), image_files)
+        result = await asyncio.to_thread(answer_exposure.scan, Path(submission.extracted_path), image_files, load_zip_entries(Path(submission.extracted_path)))
         run.logs = json.dumps(result)
         run.status = "failed" if result["warn_count"] else "passed"
         run.reward = 0 if result["warn_count"] else 1

@@ -6,14 +6,22 @@ Plain file comparison, no LLM, no Docker. It looks at what the agent can read
 the built image) for:
 - names that suggest answers (expected*, golden*, *.orig, *.bak, .git);
 - exact copies of files from solution/ or tests/;
-- distinctive values the tests assert (long numbers, hashes, long strings).
+- distinctive values the tests assert (long numbers, hashes, long strings);
+- symlinks in environment/ (a link into tests/ or solution/ hands the agent the answer;
+  the extractor keeps a note of them in zip_entries.json, see utils/ziputil);
+- version and commit banners that point to the public source of the task or its answer;
+- file timestamps that stand out (dated in the future, or years older than the rest of
+  environment/, as a file copied in from somewhere else would be).
 
 Advisory and noisy by design: a test input is supposed to be visible, so an
 exact copy of a tests/ input or a value that is really an input will show up.
 Every finding names the files so a human can tell."""
 
 import hashlib
+import posixpath
 import re
+import statistics
+import time
 from pathlib import Path
 
 from app.services.hygiene_checks import _own_files
@@ -32,6 +40,56 @@ _HARMLESS_HIDDEN = {".dockerignore", ".gitignore", ".gitkeep", ".gitattributes",
 _LONG_NUMBER_RE = re.compile(r"(?<![\w.])-?(?:\d+\.\d{5,}|\d{7,})(?![\w.])")
 _HASH_RE = re.compile(r"\b[0-9a-f]{20,}\b")
 _COMPARED_STRING_RE = re.compile(r"(?:==|!=|\bin)\s*[rbu]?([\"'])([^\"'\n]{14,200})\1|\b[A-Z][A-Z0-9_]*\s*=\s*[rbu]?([\"'])([^\"'\n]{14,200})\3")
+_BANNER_RE = re.compile(
+    r"(?i)\b(?:git[_ -]?(?:commit|sha|hash|rev(?:ision)?)|commit(?:[_ -]?(?:sha|hash|id))?|revision|build[_ -]?id)\b[\"']?\s*[:=]\s*[\"']?[0-9a-f]{7,40}\b"
+    r"|\bbuilt\s+from\s+(?:commit|tag|branch)\b"
+    r"|github\.com/[\w.-]+/[\w.-]+/(?:tree|blob|commit)/[0-9a-f]{7,40}"
+)
+_TEXT_BANNER_SUFFIXES = {".md", ".txt", ".json", ".toml", ".yaml", ".yml", ".cfg", ".ini", ".py", ".sh", ".js", ".ts", ".rs", ".go", ".c", ".h", ".html", ""}
+_ZIP_UNSET_BEFORE = 347155200  # 1981-01-01: a zip without real dates stores 1980-01-01
+_OLD_AGAINST_MEDIAN_DAYS = 365
+_MIN_FILES_FOR_TIMESTAMP_OUTLIER = 5
+
+
+def _zip_rel(name: str) -> str | None:
+    """A zip entry name from environment/ on (the task may sit under one top folder)."""
+    for folder in ("environment", "tests", "solution"):
+        if name.startswith(folder + "/") or ("/" + folder + "/") in name:
+            return folder + "/" + name.split(folder + "/", 1)[1]
+    return None
+
+
+def _symlink_findings(entries: list[dict]) -> list[tuple[str, str, str, list[str]]]:
+    out: list[tuple[str, str, str, list[str]]] = []
+    into_answer: list[str] = []
+    other: list[str] = []
+    for e in entries:
+        target = e.get("symlink")
+        rel = _zip_rel(e["name"]) if target else None
+        if not rel or not rel.startswith("environment/"):
+            continue
+        resolved = target if target.startswith("/") else posixpath.normpath(posixpath.join(posixpath.dirname(rel), target))
+        parts = resolved.strip("/").split("/")
+        label = f"{rel} -> {target}"
+        if "tests" in parts or "solution" in parts:
+            into_answer.append(label)
+        else:
+            other.append(label)
+    if into_answer:
+        out.append((
+            "warn", "symlink_to_answer",
+            "A symlink in environment/ points into tests/ or solution/. The agent's container may follow it to the "
+            "answer; the link target text is all this scan can see, so check what it resolves to in the image.",
+            into_answer,
+        ))
+    if other:
+        out.append((
+            "info", "symlink_in_environment",
+            "Symlinks in environment/. Fine when they link inside the task; check none reaches a path the agent "
+            "should not read.",
+            other,
+        ))
+    return out
 
 
 def _digest(path: Path) -> str:
@@ -73,7 +131,7 @@ def _asserted_values(tests: Path) -> dict[str, str]:
     return values
 
 
-def scan(task_root: Path, image_files: list[str] | None = None) -> dict:
+def scan(task_root: Path, image_files: list[str] | None = None, zip_entries: list[dict] | None = None) -> dict:
     env = task_root / "environment"
     visible = [p for p in _own_files(env)] if env.is_dir() else []
     findings: list[dict] = []
@@ -103,6 +161,40 @@ def scan(task_root: Path, image_files: list[str] | None = None) -> dict:
     ]
     if hidden:
         add("info", "hidden_files", "Hidden files in environment/; make sure none carries answers or keys.", hidden)
+
+    # Symlinks and timestamps: the extractor loses both, so they come from the zip's own entry list
+    # (None for an upload from before it was recorded, in which case nothing is reported).
+    if zip_entries:
+        for severity, kind, message, files in _symlink_findings(zip_entries):
+            add(severity, kind, message, files)
+        env_times = [
+            (rel, e["mtime"]) for e in zip_entries
+            if "mtime" in e and not e.get("symlink") and (rel := _zip_rel(e["name"])) and rel.startswith("environment/")
+            and e["mtime"] >= _ZIP_UNSET_BEFORE
+        ]
+        future = [rel for rel, t in env_times if t > time.time() + 86400]
+        if future:
+            add("info", "future_timestamp", "Files in environment/ are dated in the future; the clock of the machine that built the task was off, or the dates were set by hand.", future)
+        if len(env_times) >= _MIN_FILES_FOR_TIMESTAMP_OUTLIER:
+            median = statistics.median(t for _, t in env_times)
+            old = [rel for rel, t in env_times if median - t > _OLD_AGAINST_MEDIAN_DAYS * 86400]
+            if old:
+                add(
+                    "info", "old_timestamp",
+                    f"These environment/ files are more than {_OLD_AGAINST_MEDIAN_DAYS} days older than the rest. They may have "
+                    "been copied in from somewhere else (an upstream repository, a published solution); check where they came from.",
+                    old,
+                )
+
+    # Version and commit banners that point to a public source.
+    banners = []
+    for p in visible:
+        if p.suffix.lower() in _TEXT_BANNER_SUFFIXES and p.name != "Dockerfile":
+            text = _read(p)
+            if text and (m := _BANNER_RE.search(text)):
+                banners.append(f"{p.relative_to(task_root).as_posix()}: {m.group(0)[:80]}")
+    if banners:
+        add("info", "version_banner", "Files in environment/ carry a commit, revision or source URL. Someone could use it to find the task's public origin or the answer in its history.", banners)
 
     # Exact copies of solution/ and tests/ files.
     by_digest: dict[str, list[str]] = {}
