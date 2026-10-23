@@ -57,6 +57,7 @@ def check_timing_assertions(task_root: Path, report) -> None:
 
 _SCAN_RE = re.compile(r"os\.walk\(|\.rglob\(|\.glob\(|os\.scandir\(|\.iterdir\(|os\.listdir\(")
 _READ_RE = re.compile(r"\.read_bytes\(|\.read_text\(|\bopen\(")
+_HANDLED_RE = re.compile(r"except\s*\(?[^)\n:]*\b(?:OSError|Exception|BaseException)\b|except\s*:")
 
 
 def check_live_scans(task_root: Path, report) -> None:
@@ -65,12 +66,27 @@ def check_live_scans(task_root: Path, report) -> None:
     alt = "|".join(re.escape(d) for d in _AGENT_DIRS)
     hits: list[str] = []
     for rel, text in _tests_code(task_root):
-        if not rel.endswith(".py") or re.search(r"FileNotFoundError|except\s+OSError|except\s+Exception", text):
+        if not rel.endswith(".py") or "FileNotFoundError" in text:
             continue
+
+        def live_re(names: set[str]) -> re.Pattern:
+            return re.compile(rf"[\"'](?:{alt})(?:/|[\"'])" + "".join(rf"|\b{re.escape(n)}\b" for n in names))
+
         names = _agent_names(text, _AGENT_DIRS)
-        live = re.compile(rf"[\"'](?:{alt})(?:/|[\"'])" + "".join(rf"|\b{re.escape(n)}\b" for n in names))
-        for i, line in enumerate(text.splitlines(), 1):
-            if _SCAN_RE.search(line) and live.search(line) and _READ_RE.search(text):
+        # A loop over a list that holds an agent directory: `for root in [APP, Path("/tmp")]: root.rglob(...)`.
+        names |= {
+            m.group(1)
+            for m in re.finditer(r"^\s*for\s+(\w+)\s+in\s+(\[[^\]\n]*\]|\([^)\n]*\))", text, re.M)
+            if live_re(names).search(m.group(2))
+        }
+        live = live_re(names)
+        lines = text.splitlines()
+        for i, line in enumerate(lines, 1):
+            if not (_SCAN_RE.search(line) and live.search(line)):
+                continue
+            # A broad handler protects the scan only inside its own loop: an `except OSError` elsewhere
+            # in the file says nothing about this one (4.1-35's file had one and still raced).
+            if _READ_RE.search(text) and not _HANDLED_RE.search("\n".join(lines[i : i + 25])):
                 hits.append(f"{rel}:{i}")
     if hits:
         report.add(
@@ -193,7 +209,8 @@ def check_all_images_pinned(task_root: Path, report) -> None:
     for path in _dockerfiles(task_root):
         stages: set[str] = set()
         rel = path.relative_to(task_root).as_posix()
-        for m in re.finditer(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?", path.read_text(errors="replace"), re.I | re.M):
+        # `from x import y` in a heredoc is Python, not a build stage.
+        for m in re.finditer(r"^\s*FROM\s+(?!\S+\s+import\b)(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?", path.read_text(errors="replace"), re.I | re.M):
             image, alias = m.group(1), m.group(2)
             if image.lower() not in stages and image != "scratch" and "@sha256:" not in image:
                 unpinned.append(f"{image} ({rel})")
@@ -264,6 +281,19 @@ def _copy_dests(dockerfile: Path) -> list[str]:
     return [d.rstrip("/") or "/" for d in _COPY_DEST_RE.findall(dockerfile.read_text(errors="replace"))]
 
 
+def _installs_named(text: str, artifact: str) -> bool:
+    """A tests/ code file that runs `install ... -r` and names the collected file and its folder, with the
+    path held in a variable or split across an argv list, e.g. `requirements = Path("/app/requirements.txt")`
+    then `[..., "install", "-r", str(requirements)]`. tests/Dockerfile is not read here: its own
+    requirements.txt is a different file."""
+    path = Path(artifact)
+    return bool(
+        re.search(r"\binstall\b[\s\S]{0,400}?[\"'\s](?:-r|--requirement)[\"'\s]", text)
+        and path.name in text
+        and re.search(rf"[\"']{re.escape(path.parent.as_posix())}[/\"']", text)
+    )
+
+
 def check_verifier_inputs(task_root: Path, report) -> None:
     toml = _toml(task_root)
     verifier = toml.get("verifier") or {}
@@ -286,7 +316,7 @@ def check_verifier_inputs(task_root: Path, report) -> None:
             if not re.search(
                 rf"install[^\n]*{re.escape(artifact)}|cd\s+{parent}\b[^\n]*(?:install|npm\s+ci|cargo\s)",
                 tests_text,
-            ):
+            ) and not any(_installs_named(text, artifact) for _, text in _tests_code(task_root)):
                 problems.append(f"task.toml collects {artifact} for the verifier, but nothing in tests/ installs from it")
     env_dests = _copy_dests(task_root / "environment" / "Dockerfile")
     verifier_dests = _copy_dests(tests_df) + [a.rstrip("/") for a in artifacts]
