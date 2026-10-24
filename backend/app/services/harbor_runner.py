@@ -6,6 +6,7 @@ container, so every stage matches the real pipeline's verdicts."""
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import signal
@@ -829,17 +830,28 @@ def _parse_trial(
     return outcome
 
 
+def _new_group() -> dict:
+    """Spawn kwargs that put Harbor in its own process group on Windows, the only
+    way to send it Ctrl+Break there without signalling this server too. POSIX needs nothing."""
+    return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {}
+
+
 async def _stop(proc: asyncio.subprocess.Process) -> None:
-    """SIGINT first so Harbor can remove its containers, then kill."""
+    """Ask Harbor to stop so it can remove its containers, then kill it. SIGINT on
+    POSIX; Windows cannot send SIGINT to another process, so it gets Ctrl+Break and,
+    failing that, `taskkill /T /F` on the whole tree."""
     if proc.returncode is not None:
         return
     try:
-        proc.send_signal(signal.SIGINT)
+        proc.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT)
         await asyncio.wait_for(proc.wait(), timeout=_SHUTDOWN_GRACE_SEC)
-    except (TimeoutError, ProcessLookupError):
+    except (TimeoutError, ProcessLookupError, OSError, ValueError):
         try:
-            proc.kill()
-        except ProcessLookupError:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=30)
+            else:
+                proc.kill()
+        except (ProcessLookupError, OSError, subprocess.SubprocessError):
             pass
         await proc.wait()
 
@@ -1056,6 +1068,7 @@ async def run_job(
                 env=env,
                 stdout=cli_output,
                 stderr=asyncio.subprocess.STDOUT,
+                **_new_group(),
             )
         except FileNotFoundError:
             return HarborJobResult(
@@ -1170,7 +1183,7 @@ async def run_analyze(
     with open(cli_output_path, "wb") as cli_output:
         try:
             proc = await asyncio.create_subprocess_exec(
-                *cmd, cwd=out_dir, env=env, stdout=cli_output, stderr=asyncio.subprocess.STDOUT
+                *cmd, cwd=out_dir, env=env, stdout=cli_output, stderr=asyncio.subprocess.STDOUT, **_new_group()
             )
         except FileNotFoundError:
             return AnalyzeJobResult(None, None, f"harbor CLI not found ({settings.harbor_bin!r}).")
@@ -1257,7 +1270,7 @@ async def run_check(
     with open(cli_output_path, "wb") as cli_output:
         try:
             proc = await asyncio.create_subprocess_exec(
-                *cmd, cwd=out_dir, env=env, stdout=cli_output, stderr=asyncio.subprocess.STDOUT
+                *cmd, cwd=out_dir, env=env, stdout=cli_output, stderr=asyncio.subprocess.STDOUT, **_new_group()
             )
         except FileNotFoundError:
             return CheckJobResult(None, None, f"harbor CLI not found ({settings.harbor_bin!r}).")

@@ -1,0 +1,12 @@
+# Shell scripts, Dockerfiles and compose files run in Linux containers and under bash: they must keep
+# LF endings even when a Windows checkout would convert them to CRLF ("bash\r: No such file").
+* text=auto
+*.sh text eol=lf
+*.bash text eol=lf
+Dockerfile* text eol=lf
+*.dockerfile text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
