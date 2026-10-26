@@ -30,7 +30,7 @@ discussed upstream (#2200/#2210) is not merged as of this commit, so
 `check_ai_detection.py` (Layer 3 of Terminal-Bench's own three-layer AI-usage
 detection -- see `docs/prompts/task-implementation.toml`'s `instruction_concision`
 criterion for Layer 2, already run via the platform's Rubric Check "TB" option)
-is genuinely NOT one of the `check-*.sh` scripts (29 since the refresh) and is NOT wired into any
+is genuinely NOT one of the `check-*.sh` scripts (28 since the refresh; a 29th file, `check-cpu-threads.py`, is a helper the shell script calls) and is NOT wired into any
 of TB's own automatic CI workflows -- confirmed directly against their
 `.github/workflows/`: it's optional, off by default, enabled only by adding a
 step with a `GPTZERO_API_KEY` secret. It calls a real third-party service

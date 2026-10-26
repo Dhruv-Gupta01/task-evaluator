@@ -209,7 +209,7 @@ def _link_task(target: Path, link: Path) -> None:
 def vendor_info() -> dict:
     """The upstream commit the vendored checks come from (read from PROVENANCE.md) and
     how many check scripts are vendored, so every result says which rule set it ran."""
-    info: dict = {"commit": None, "date": None, "scripts": len(list(_CHECKS_DIR.glob("check-*.sh"))) + len(list(_CHECKS_DIR.glob("check-*.py")))}
+    info: dict = {"commit": None, "date": None, "scripts": len(list(_CHECKS_DIR.glob("check-*.sh")))}  # the scripts that run; check-cpu-threads.py is a helper
     try:
         text = (_CHECKS_DIR.parent / "PROVENANCE.md").read_text()
     except OSError:
