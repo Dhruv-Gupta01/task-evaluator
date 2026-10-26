@@ -110,6 +110,7 @@ function SubmissionDetail() {
   // Every trigger appends n more runs to whatever's already there (Gate 1
   // needs 3 consecutive reward=1 runs), so default to 3.
   const [oracleN, setOracleN] = useState(3);
+  const [probeCovered, setProbeCovered] = useState(false);
   const mOracle = useMutation({
     mutationFn: () => api.oracle(id, oracleN),
     onSuccess: () => {
@@ -207,8 +208,9 @@ function SubmissionDetail() {
     onError: (e: Error) => toast.error(e.message),
   });
   const mEdgeCases = useMutation({
-    mutationFn: (probe: boolean) => api.edgeCases(id, probe),
-    onSuccess: (_, probe) => {
+    mutationFn: ({ probe, probeCovered }: { probe: boolean; probeCovered: boolean }) =>
+      api.edgeCases(id, probe, probeCovered),
+    onSuccess: (_, { probe }) => {
       toast.success(
         probe ? "Edge-case check with grader probe started" : "Edge-case check started",
       );
@@ -882,7 +884,7 @@ function SubmissionDetail() {
             <RunButton
               label="Run Edge-Case Check"
               runningLabel="Checking…"
-              onClick={() => mEdgeCases.mutate(false)}
+              onClick={() => mEdgeCases.mutate({ probe: false, probeCovered: false })}
               running={isActive(data.edge_cases.status)}
               pending={mEdgeCases.isPending}
               disabled={!validated}
@@ -891,7 +893,7 @@ function SubmissionDetail() {
             <RunButton
               label="Check + run through the grader"
               runningLabel="Checking…"
-              onClick={() => mEdgeCases.mutate(true)}
+              onClick={() => mEdgeCases.mutate({ probe: true, probeCovered })}
               running={isActive(data.edge_cases.status)}
               pending={mEdgeCases.isPending}
               disabled={!buildReady || !data.oracle.runs.some((r) => r.reward === 1)}
@@ -899,9 +901,19 @@ function SubmissionDetail() {
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            The second button also breaks the Oracle&apos;s answer on each uncovered case (up to 4)
-            and runs it through the real verifier: scoring 1 confirms the case is untested.
+            The second button also breaks the Oracle&apos;s answer on every uncovered case and runs
+            it through the real verifier: scoring 1 confirms the case is untested. Each case is a
+            full Oracle run, so a long list takes a while.
           </p>
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={probeCovered}
+              onChange={(e) => setProbeCovered(e.target.checked)}
+            />
+            Also probe the cases marked covered (checks the judge&apos;s &quot;covered&quot;
+            verdicts; about doubles the run time)
+          </label>
           <EdgeCasesView logs={data.edge_cases.logs} />
         </StageCard>
 
@@ -1508,6 +1520,11 @@ function EdgeCasesView({ logs }: { logs?: string }) {
           <span className="font-mono">{parsed.spec_files.join(", ")}</span>
         </div>
       )}
+      {parsed.in_progress && parsed.probe_total !== undefined && (
+        <div className="text-xs text-muted-foreground">
+          Probing through the grader: {parsed.probe_done ?? 0} of {parsed.probe_total} done
+        </div>
+      )}
       {parsed.cases.map((c, i) => (
         <div key={i} className="rounded-md border border-border p-3">
           <div className="flex items-center justify-between gap-2">
@@ -1538,11 +1555,13 @@ function EdgeCasesView({ logs }: { logs?: string }) {
               }`}
             >
               {c.probe.status === "slipped_through"
-                ? "Through the grader: an answer that mishandles this case still scored 1, so no test checks it."
+                ? c.covered
+                  ? "Through the grader: the judge marked this covered, but an answer that mishandles it still scored 1, so no test really checks it."
+                  : "Through the grader: an answer that mishandles this case still scored 1, so no test checks it."
                 : c.probe.status === "caught"
                   ? `Through the grader: an answer that mishandles this case scored 0${
                       c.probe.failed_tests?.length ? ` (${c.probe.failed_tests.join(", ")})` : ""
-                    }, so it is tested after all.`
+                    }, so it is ${c.covered ? "tested, as the judge said" : "tested after all"}.`
                   : `Not run through the grader: ${c.probe.note || "no result"}`}
               {c.probe.description && (
                 <span className="text-muted-foreground"> ({c.probe.description})</span>

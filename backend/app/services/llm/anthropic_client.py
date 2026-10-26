@@ -44,7 +44,7 @@ class AnthropicClient(LLMClient):
         async def _call():
             return await self._client.messages.create(
                 model=self.model,
-                max_tokens=self._max_output_tokens or 4096,
+                max_tokens=self._max_output_tokens or 16000,  # the API requires a cap; 0 in settings means this
                 system=system,
                 messages=anth_messages,
                 **extra_kwargs,

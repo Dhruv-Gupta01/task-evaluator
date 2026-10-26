@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     # Judge calls on the real OpenAI API only (ignored for other providers).
     # max output tokens includes reasoning tokens; 0 = no cap.
     llm_reasoning_effort: str = "low"  # low | medium | high | ...; empty = model default
-    llm_max_output_tokens: int = 16000
+    llm_max_output_tokens: int = 0
 
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None

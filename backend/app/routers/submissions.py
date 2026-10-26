@@ -484,19 +484,23 @@ async def trigger_weak_probe(submission_id: str, db: Session = Depends(get_db)) 
 
 @router.post("/submissions/{submission_id}/edge-cases", status_code=202)
 async def trigger_edge_cases(
-    submission_id: str, probe: bool = False, db: Session = Depends(get_db)
+    submission_id: str, probe: bool = False, probe_covered: bool = False, db: Session = Depends(get_db)
 ) -> dict[str, str]:
     """Advisory. One judge call lists the edge cases an expert would handle
     (from the instruction alone), a second checks each against the tests.
     Uncovered cases are findings for a human. No Docker needed, unless
-    probe=true: then up to 4 uncovered cases also run through the real
-    verifier as deliberately wrong Oracle copies (needs an Oracle pass)."""
+    probe=true: then every uncovered case also runs through the real
+    verifier as a deliberately wrong Oracle copy (needs an Oracle pass).
+    probe_covered=true (with probe) probes the covered cases too, to check
+    the judge's "covered" verdicts against the real grader."""
     _raise_if_over_budget(db, budget.judge_exceeded_message(db))
     submission = db.get(Submission, submission_id)
     if submission is None:
         raise HTTPException(status_code=404, detail="submission not found")
     if submission.extracted_path is None:
         raise HTTPException(status_code=400, detail="validate the submission first (files must be extracted)")
+    if probe_covered and not probe:
+        raise HTTPException(status_code=400, detail="probe_covered needs probe=true")
     if probe:
         _require_built_submission(submission_id, db)
         if db.query(Run).filter_by(submission_id=submission_id, kind="oracle", reward=1).first() is None:
@@ -507,7 +511,7 @@ async def trigger_edge_cases(
         db.add(run)
     run.status = "pending"
     db.commit()
-    await task_queue.submit(f"{submission_id}:edge_cases", task_runner.run_edge_case_check(submission_id, probe))
+    await task_queue.submit(f"{submission_id}:edge_cases", task_runner.run_edge_case_check(submission_id, probe, probe_covered))
     return {"status": "started"}
 
 

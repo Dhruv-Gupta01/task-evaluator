@@ -644,7 +644,7 @@ async def run_weak_probe(submission_id: str) -> None:
     await _run_probe(submission_id, "weak_probe", "broken")
 
 
-async def run_edge_case_check(submission_id: str, probe: bool = False) -> None:
+async def run_edge_case_check(submission_id: str, probe: bool = False, probe_covered: bool = False) -> None:
     """Advisory. Edge cases an expert would handle (from the instruction only),
     each checked against the tests. "failed" means at least one is uncovered.
 
@@ -652,7 +652,12 @@ async def run_edge_case_check(submission_id: str, probe: bool = False) -> None:
     breaks the reference solution on exactly that case, and the copy runs as
     an Oracle trial. Scoring 1 confirms the gap (`probe.status`
     "slipped_through"); scoring 0 means a test does catch it after all
-    ("caught"), and the case no longer counts as uncovered."""
+    ("caught"), and the case no longer counts as uncovered. Every uncovered
+    case is probed, however many there are.
+
+    probe_covered=True also probes the cases the judge marked covered. A broken
+    answer that still scores 1 means the "covered" verdict was wrong, so the
+    case counts as uncovered (`covered_claim_wrong`); scoring 0 confirms it."""
     db = SessionLocal()
     try:
         submission = db.get(Submission, submission_id)
@@ -667,7 +672,7 @@ async def run_edge_case_check(submission_id: str, probe: bool = False) -> None:
         task_root = Path(submission.extracted_path)
         with _track_llm_spend(db, submission_id, "edge_cases"):
             result = await edge_cases.run_edge_case_check(task_root)
-            to_probe = [c for c in result["cases"] if not c["covered"]][: variant_probe.MAX_EDGE_PROBES]
+            to_probe = [c for c in result["cases"] if probe_covered or not c["covered"]]
             proposals = (
                 await variant_probe.propose_edge_breaks(task_root, [c["case"] for c in to_probe])
                 if probe and to_probe and not result.get("error")
@@ -675,6 +680,8 @@ async def run_edge_case_check(submission_id: str, probe: bool = False) -> None:
             )
         if probe:
             result["probed"] = True
+            result["probe_total"] = len(to_probe)
+            result["probe_done"] = 0
             by_case = {p["case"]: p for p in proposals}
             timeout_sec = _oracle_timeout_sec(_get_task_config(submission))
             base = settings.storage_dir / "submissions" / submission_id / "runs" / "edge_cases"
@@ -687,11 +694,15 @@ async def run_edge_case_check(submission_id: str, probe: bool = False) -> None:
                     case["probe"] = {
                         k: entry[k] for k in ("status", "reward", "failed_tests", "flags", "note", "description")
                     }
+                if case["covered"] and case["probe"].get("status") == "slipped_through":
+                    case["covered_claim_wrong"] = True
+                result["probe_done"] = i + 1
                 db.refresh(run)
                 run.logs = json.dumps({**result, "in_progress": True})
                 db.commit()
         uncovered = [
-            c for c in result["cases"] if not c["covered"] and (c.get("probe") or {}).get("status") != "caught"
+            c for c in result["cases"]
+            if (not c["covered"] and (c.get("probe") or {}).get("status") != "caught") or c.get("covered_claim_wrong")
         ]
         run.logs = json.dumps(result)
         run.status = "failed" if uncovered or result.get("error") else "passed"

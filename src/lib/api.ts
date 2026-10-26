@@ -271,10 +271,14 @@ export interface EdgeCases {
     // false: the reference solution itself does not handle this case.
     reference_handles?: boolean | null;
     probe?: EdgeCaseProbe;
+    // The judge said "covered", but a wrong answer still scored 1 through the grader.
+    covered_claim_wrong?: boolean;
   }[];
   spec_files?: string[];
   error?: string;
   probed?: boolean;
+  probe_total?: number;
+  probe_done?: number;
   in_progress?: boolean;
 }
 
@@ -638,11 +642,15 @@ export const api = {
     ),
   weakProbe: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/weak-probe`, { method: "POST" }).then(handle<unknown>),
-  // probe also runs the uncovered cases through the real verifier (needs an Oracle pass).
-  edgeCases: (id: string, probe = false) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/edge-cases${probe ? "?probe=true" : ""}`, {
-      method: "POST",
-    }).then(handle<unknown>),
+  // probe also runs every uncovered case through the real verifier (needs an Oracle pass);
+  // probeCovered adds the cases the judge marked covered, to check that verdict too.
+  edgeCases: (id: string, probe = false, probeCovered = false) =>
+    fetch(
+      `${API_BASE_URL}/submissions/${id}/edge-cases${
+        probe ? `?probe=true${probeCovered ? "&probe_covered=true" : ""}` : ""
+      }`,
+      { method: "POST" },
+    ).then(handle<unknown>),
   answerExposure: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/answer-exposure`, { method: "POST" }).then(
       handle<unknown>,

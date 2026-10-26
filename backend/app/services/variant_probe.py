@@ -70,8 +70,6 @@ Respond with ONLY JSON:
  "reason": "if none, why"}}"""
 
 
-MAX_EDGE_PROBES = 4
-
 EDGE_PROMPT = """You help check whether a grader tests the edge cases an expert would handle. You are \
 shown a task's instruction.md, its reference solution (solution/), and edge cases the tests may not cover.
 
@@ -80,8 +78,9 @@ wrongly and every other input as before, so a grader that tests the case must re
 edit, as exact find/replace pairs on files under solution/; "find" must appear exactly once in that file. If \
 the reference solution has no code path you can change for a case, leave that case out.
 
-Respond with ONLY JSON:
-{"variants": [{"case": "<the edge case text, copied exactly>", "description": "how it now mishandles the case", \
+Each edge case has a number. Respond with ONLY JSON:
+{"variants": [{"index": <the edge case number>, "case": "<the edge case text, copied exactly>", \
+"description": "how it now mishandles the case", \
 "edits": [{"file": "solution/solve.sh", "find": "exact text", "replace": "new text"}]}]}"""
 
 
@@ -89,10 +88,8 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().lower()
 
 
-async def propose_edge_breaks(task_root: Path, cases: list[str]) -> list[dict]:
-    """E.3: one deliberately wrong solution per edge case, keyed by the case text."""
-    instruction = (task_root / "instruction.md").read_text(errors="replace")
-    solution = read_text_files(task_root / "solution") if (task_root / "solution").is_dir() else ""
+async def _edge_break_call(instruction: str, solution: str, cases: list[str]) -> dict:
+    numbered = [{"index": i, "case": c} for i, c in enumerate(cases)]
     response = await get_llm_client().complete(
         [
             Message(role="system", content=EDGE_PROMPT),
@@ -100,7 +97,7 @@ async def propose_edge_breaks(task_root: Path, cases: list[str]) -> list[dict]:
                 role="user",
                 content=(
                     f"=== instruction.md ===\n{instruction}\n\n=== solution/ ===\n{solution}\n\n"
-                    f"=== EDGE CASES ===\n{json.dumps(cases[:MAX_EDGE_PROBES], indent=1)}\n"
+                    f"=== EDGE CASES ===\n{json.dumps(numbered, indent=1)}\n"
                 ),
             ),
         ],
@@ -111,20 +108,45 @@ async def propose_edge_breaks(task_root: Path, cases: list[str]) -> list[dict]:
         data = json.loads(match.group(0)) if match else {}
     except ValueError:
         data = {}
+    return data if isinstance(data, dict) else {}
+
+
+def _match_edge_breaks(data: dict, cases: list[str]) -> list[dict]:
+    """Pair each proposed edit with its case by number, falling back to the case text. A model
+    that rewords the case text must not lose the edit (it did, and every case showed "no edit")."""
     wanted = {_norm(c): c for c in cases}
     out: list[dict] = []
-    for raw in (data.get("variants") if isinstance(data, dict) else None) or []:
-        if not isinstance(raw, dict) or _norm(str(raw.get("case", ""))) not in wanted or not isinstance(raw.get("edits"), list):
+    seen: set[str] = set()
+    for raw in data.get("variants") or []:
+        if not isinstance(raw, dict) or not isinstance(raw.get("edits"), list):
             continue
+        index = raw.get("index")
+        case = cases[index] if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < len(cases) else None
+        case = case or wanted.get(_norm(str(raw.get("case", ""))))
+        if case is None or case in seen:
+            continue
+        seen.add(case)
         out.append(
             {
-                "case": wanted[_norm(str(raw["case"]))],
+                "case": case,
                 "description": str(raw.get("description", ""))[:300],
                 "instruction_quote": "",
                 "edits": [{k: str(e.get(k, "")) for k in ("file", "find", "replace")} for e in raw["edits"] if isinstance(e, dict)],
             }
         )
     return out
+
+
+async def propose_edge_breaks(task_root: Path, cases: list[str]) -> list[dict]:
+    """E.3: one deliberately wrong solution per edge case, keyed by the case text. Retried once
+    when nothing usable comes back, because the answer is occasionally unusable (reworded or cut off)."""
+    instruction = (task_root / "instruction.md").read_text(errors="replace")
+    solution = read_text_files(task_root / "solution") if (task_root / "solution").is_dir() else ""
+    for _ in range(2):
+        out = _match_edge_breaks(await _edge_break_call(instruction, solution, cases), cases)
+        if out or not cases:
+            return out
+    return []
 
 
 async def propose_variants(task_root: Path, mode: str = "valid") -> dict:
