@@ -15,6 +15,7 @@ from app.services.pinning_checks import check_hf_revisions, check_licences_and_s
 from app.services.platform_checks import check_bundled_binaries, check_resources
 from app.services.reproducibility_checks import run_reproducibility_checks
 from app.services.verifier_isolation import run_isolation_checks
+from app.utils.ziputil import load_zip_entries
 
 Severity = str  # "fail" | "warn" | "info"
 
@@ -353,6 +354,56 @@ def check_zip_layout(task_root: Path, report: StaticCheckReport) -> None:
         report.add("zip_layout_no_forbidden_entries", "info", "No forbidden top-level entries.")
 
 
+_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_TB_ORG = "terminal-bench"
+
+
+def _zip_folder_name(entries: list[dict]) -> str | None:
+    """The folder task.toml sits in inside the zip: "" when it is at the zip root (a flat zip),
+    None when the entry list does not show it."""
+    for e in entries:
+        parts = [p for p in e["name"].split("/") if p]
+        if parts and parts[-1] == "task.toml" and parts[0] != "__MACOSX" and len(parts) <= 2:
+            return parts[0] if len(parts) == 2 else ""
+    return None
+
+
+def check_task_folder_name(task_root: Path, report: StaticCheckReport) -> None:
+    """The official check-task-package-name / check-task-slug read the real folder name, which the
+    TB Static Checks stage cannot (it names its symlink after [task] name, so they always agree).
+    Here the folder comes from the zip itself."""
+    try:
+        import tomllib
+        name = (tomllib.loads((task_root / "task.toml").read_text()).get("task") or {}).get("name")
+    except Exception:
+        return  # a missing or invalid task.toml is reported elsewhere
+    if not isinstance(name, str):
+        return
+    entries = load_zip_entries(task_root)
+    folder = _zip_folder_name(entries) if entries else None
+    if folder is None:
+        report.add("task_folder_name", "info", "The zip's folder name is not recorded for this upload, so it was not compared with [task] name.")
+        return
+    problems = []
+    if folder:
+        if name != f"{_TB_ORG}/{folder}":
+            problems.append(f'[task] name is "{name}", expected "{_TB_ORG}/{folder}" (the zip folder is "{folder}")')
+        slug = folder
+    else:
+        slug = name.split("/", 1)[-1]
+        if not name.startswith(_TB_ORG + "/"):
+            problems.append(f'[task] name is "{name}", expected "{_TB_ORG}/<folder>"')
+    if not _SLUG_RE.match(slug):
+        problems.append(f'"{slug}" is not lowercase kebab-case')
+    elif slug.count("-") + 1 > 3:
+        problems.append(f'"{slug}" has {slug.count("-") + 1} words, at most 3 allowed')
+    if problems:
+        where = f'zip folder "{folder}"' if folder else "a flat zip (no folder, so the name inside task.toml was used)"
+        report.add("task_folder_name", "warn", "; ".join(problems) + f". Checked against {where}. Official checks: check-task-package-name, check-task-slug.")
+    else:
+        report.add("task_folder_name", "info", f'[task] name "{name}" and the folder name agree' + ("." if folder else " (flat zip: folder not checked)."))
+
+
 def check_rubric(task_root: Path, report: StaticCheckReport) -> None:
     has_rubric = (task_root / "rubric.txt").is_file() or (task_root / "rubric.md").is_file()
     if has_rubric:
@@ -369,6 +420,7 @@ def run_static_checks(task_root: Path) -> StaticCheckReport:
     check_dockerfile(task_root / "environment" / "Dockerfile", report)
     check_hardware_flags(task_root, report)
     check_zip_layout(task_root, report)
+    check_task_folder_name(task_root, report)
     check_rubric(task_root, report)
     run_hygiene_checks(task_root, report)
     run_isolation_checks(task_root, report)
