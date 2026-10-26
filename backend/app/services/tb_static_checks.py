@@ -272,10 +272,13 @@ def _script_env(tmp: Path) -> dict[str, str]:
 
 
 def _run_scripts(task_root: Path, clean_path: Path, report: TbStaticCheckReport, env: dict[str, str]) -> None:
+    # The trailing slash matters: clean_path is a symlink, and `find <symlink>` without it does not
+    # descend, so check-canary, check-compose-volumes and check-test-file-references found no files
+    # and passed vacuously (found by comparing the guide with the platform's own output).
     for script in sorted(_CHECKS_DIR.glob("check-*.sh")):
         try:
             proc = subprocess.run(
-                [_bash(), str(script), str(clean_path)],
+                [_bash(), str(script), str(clean_path) + "/"],
                 capture_output=True, text=True, timeout=_TIMEOUT_SEC, env=env,
             )
             passed = proc.returncode == 0
