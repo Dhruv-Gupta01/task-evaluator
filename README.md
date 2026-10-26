@@ -2,7 +2,8 @@
 
 A local platform for grading Terminal-Bench-style task submissions. A candidate/task-author
 uploads a task zip (environment + solution + tests), and the platform runs it through five
-gates against real Docker containers:
+gates against real Docker containers, plus a set of advisory checks (see
+[Stages in detail](#stages-in-detail-40-and-41)):
 
 1. **Build** — builds the task's `environment/Dockerfile`.
 2. **Oracle** — runs `harbor run -a oracle`, confirms the reference solution scores reward `1`.
@@ -45,8 +46,13 @@ cd backend
 cp .env.example .env
 ```
 
-Edit `.env` and fill in **one** provider's API key matching `LLM_PROVIDER` (defaults to
-`fireworks`). Everything else in `.env.example` works as-is for a local setup.
+Edit `.env` and fill in **one** provider's API key matching `LLM_PROVIDER`. `.env.example` sets
+`LLM_PROVIDER=openai` and `LLM_MODEL=gpt-6-sol` for the LLM-judge stages (Sufficiency, Edge-Case
+Coverage, Review Report), so it needs `OPENAI_API_KEY`; the code's own fallback, used only when
+`LLM_PROVIDER` is not set at all, is `fireworks`. `gpt-6-luna` is a much cheaper judge model that also
+works (set `LLM_MODEL=gpt-6-luna`); it missed one issue in our five-task comparison, so use it for
+quick runs. Failure Analysis and Rubric Check default to `gpt-6-luna` through `ANALYZE_MODEL` and
+`CHECK_MODEL`. Everything else in `.env.example` works as-is for a local setup.
 
 ```sh
 uv sync
@@ -75,6 +81,59 @@ Open the frontend, upload a task zip, and run it through the gates in order (Val
 Oracle → Nop → Sufficiency → Agent Trials) from the UI. Submission files and per-run logs land
 under `backend/storage/submissions/{id}/` (Harbor's full job output is in
 `runs/{oracle,nop,agent}/harbor/`).
+
+## Stages in detail (4.0 and 4.1)
+
+The submission page runs top to bottom in three sections: **Before the agent trials**, **Agent
+trials**, **After the agent trials**. A button that depends on an earlier stage is greyed out and
+says what it is waiting for. Only Build, Oracle, Nop, Sufficiency and Agent Trials are gates;
+everything else is **advisory** and never changes a gate. All of it comes from the task files
+and Harbor's own results, so a finding is a question for a reviewer, not a verdict.
+
+Items marked **(4.1)** are new in the 4.1 branch; the rest came with 4.0.
+
+### Before the agent trials
+
+| Stage | What it checks | Needs |
+|---|---|---|
+| Validate & Build | Task contract, then builds `environment/Dockerfile`. | Docker |
+| Oracle | Runs the reference solution N times (default 3, every run kept); gate needs all to score 1. Each run shows time used against its limit, peak memory, platform, agent and verifier user, and tests passed. **(4.1)** Flags runs whose test count differs from the passing runs, marks a mix of 1 and 0 as flaky, and has a "Run under CPU load" button that adds stress runs kept outside the gate. | Docker |
+| Nop | A do-nothing agent must score 0. | Docker |
+| Image Contents **(4.1)** | After every build, lists the files and package versions the agent's container really has. Sufficiency uses it to tell files that never reach the container from visible ones. | Docker |
+| Fresh Build **(4.1)** | Rebuilds with no cache and freshly pulled base images, then runs one Oracle with every `RUN` step redone. Catches a dependency that no longer installs. | Docker, slow |
+| Static Checks | Mechanical checks of `instruction.md`, `test.sh`, Dockerfile and zip layout, plus hygiene: named volumes, unpinned installs, `curl \| sh`, key-like strings, x86-only downloads, dangling paths, files that differ between `environment/` and `tests/`, tools the tests need, instruction length, whether the solution reads `tests/`. **(4.1)** Also grader isolation (the verifier importing or running agent code, `eval`/pickle in the grader, results in `/tmp`, reward-file reset), reproducibility (wall-clock assertions, unpinned images and dependencies, run-time downloads) and scoring-file checks. | none |
+| TB Static Checks | Terminal-Bench's own `check-*.sh` scripts, vendored verbatim. **(4.1)** Refreshed to upstream `2e29ca9` (28 scripts). | none |
+| Leakage Scan | Unedited LLM chat artifacts. | none |
+| Answer Exposure **(4.1)** | Can the agent find the answer in its own files: answer-like names, a `.git` folder, copies of `solution/` or `tests/` files, values the tests compare against. | none |
+| AI Detection | Terminal-Bench's three AI-usage layers side by side: written policy, Rubric Check opinion, and a GPTZero measurement. | GPTZero key |
+| Sufficiency | LLM judge: is `instruction.md` plus `environment/` enough to pass the hidden tests? Runs 1 to 3 times (majority decides, disagreement shown); tagged checks for hidden rules, stale numbers, coverage, loose tests and more. **(4.1)** Knows which files are in the image. | LLM |
+| Edge-Case Coverage | Lists edge cases from the instruction alone, then checks which the tests cover. **(4.1)** "Check + run through the grader" breaks the Oracle on each uncovered case and confirms with the real verifier. | LLM |
+| Rubric Check | `harbor check`: an agent scores the task against a rubric (Harbor's own, or the vendored 35-criterion TB rubric, now 36 criteria **(4.1)**; the TB one is pre-selected). | `ANTHROPIC_API_KEY` |
+| Valid-Variant Probe | Runs other correct forms of the Oracle's answer through the verifier; a rejection means the grader may be too strict. | LLM, Docker |
+| Weak-Answer Probe | Breaks one stated rule at a time in the Oracle's answer; a broken answer that still scores 1 means a rule is not enforced. | LLM, Docker |
+| Cheat Trial | One trial told to cheat. Reward 1 triggers an automatic reward-hacking check. **(4.1)** Runs 1 to 3 trials with a combined summary. An agent that never really tried is "inconclusive". | Agent key |
+
+### Agent trials
+
+Run N independent trials with the chosen agent (Codex, Claude Code or Terminus-2), reasoning
+level and a cost cap (for the whole run or per trial, with a warning under $3 per trial). Shows
+pass rate and pass@k, each trial's tests passed, raw reward, time, memory, platform, user,
+tokens and cost, and flags where the reward and the tests disagree.
+
+### After the agent trials
+
+| Stage | What it checks |
+|---|---|
+| Failure Analysis | `harbor analyze` over every trial: reward hacking, task specification, which tests the failing trials failed, a classification of each failure (real bug / instruction gap / infrastructure), and an audit of passing trials. **(4.1)** Reward-file and harness-error flags are added per trial. |
+| Review Report | A draft report built from everything above, for human review. |
+
+### Other things on the page
+
+- **Changes banner**: compares an upload with the latest earlier upload of the same task name
+  (amber when tests were removed). **Reviewer decision** records a ruling on a contested cluster.
+- **Download Evidence**: one JSON with the build log, Static Checks, Rubric Check, per-stage
+  results, cost per stage and a summary. **(4.1)** Adds run limits, Oracle notes, Cheat Trial,
+  Answer Exposure, Fresh Build, Image Contents and the verifier reports.
 
 ## Notes
 
@@ -173,12 +232,14 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
   used internally, but persists the result as its own stage so it's independently visible and part of
   the evidence bundle below. No Docker, no LLM cost. Advisory.
 - **TB Static Checks**: a second, separate stage running Terminal-Bench's own official static checks
-  (`backend/vendor/tb_checks/`, 26 `check-*.sh` scripts vendored verbatim from
+  (`backend/vendor/tb_checks/`, 28 `check-*.sh` scripts vendored verbatim from
   `harbor-framework/terminal-bench` at a pinned commit -- see `PROVENANCE.md` there). This is not a
   replacement for the platform's own Static Checks above -- the two rule sets barely overlap (TB's
   checks framework compliance: canary, dockerfile platform/sanity, separate verifier, task fields,
   absolute paths; ours checks platform-specific hygiene: instruction word count, Dockerfile digest
-  pinning) -- so both run. No Docker, no LLM cost. Advisory.
+  pinning) -- so both run. The task folder name is checked by the platform's own Static Checks
+  (`task_folder_name`), because here the scripts run against a link named after `[task] name`. No Docker,
+  no LLM cost. Advisory.
 - **AI Detection**: Terminal-Bench's own Layer 3 AI-usage detection (`backend/vendor/tb_checks/`,
   `check_ai_detection.py`, same pinned commit) -- calls the real GPTZero API against
   `instruction.md` and `solution/solve.sh`, flagging anything at or above 70% AI-generated
