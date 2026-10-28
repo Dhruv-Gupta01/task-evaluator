@@ -139,10 +139,11 @@ function SubmissionDetail() {
   const [n, setN] = useState(1);
   // "default" = whatever AGENT_REASONING_EFFORT the server is configured with.
   const [effort, setEffort] = useState<ReasoningEffort | "default">("default");
-  // Defaults to max, not "default" -- a cheat trial run at whatever
-  // AGENT_REASONING_EFFORT happens to be (e.g. low) is a weaker test of
-  // whether the agent will cheat than one run at max effort.
-  const [cheatEffort, setCheatEffort] = useState<ReasoningEffort | "default">("max");
+  // "same" = whatever the Agent Trials card has selected (agent, model and
+  // reasoning); the Cheat Trial dropdowns only override it when changed.
+  const [cheatEffort, setCheatEffort] = useState<ReasoningEffort | "default" | "same">("same");
+  // "same", or "<agent>|<model>" for one pick of the model dropdown.
+  const [cheatModel, setCheatModel] = useState("same");
   const [cheatPrompt, setCheatPrompt] = useState<CheatPromptChoice>("default");
   // One clean cheat trial proves little (real cheats upstream needed several tries).
   const [cheatN, setCheatN] = useState("3");
@@ -160,6 +161,11 @@ function SubmissionDetail() {
   const { data: agentModels } = useQuery({
     queryKey: ["agent-models"],
     queryFn: api.getAgentModels,
+    staleTime: 60_000,
+  });
+  const { data: modelChoices } = useQuery({
+    queryKey: ["agent-model-choices"],
+    queryFn: api.getAgentModelChoices,
     staleTime: 60_000,
   });
   const mAgent = useMutation({
@@ -298,18 +304,24 @@ function SubmissionDetail() {
     onError: (e: Error) => toast.error(e.message),
   });
   const mCheatTrial = useMutation({
-    mutationFn: () =>
-      api.cheatTrial(
+    mutationFn: () => {
+      const [pickedAgent, pickedModel] =
+        cheatModel === "same" ? [agentChoice, undefined] : cheatModel.split("|");
+      const reasoning = cheatEffort === "same" ? effort : cheatEffort;
+      return api.cheatTrial(
         id,
-        agentChoice,
-        cheatEffort === "default" ? undefined : cheatEffort,
+        pickedAgent as AgentChoice,
+        reasoning === "default" ? undefined : reasoning,
         cheatPrompt,
         Number(cheatN),
         Number(cheatCostCap) > 0 ? Number(cheatCostCap) : undefined,
-      ),
+        pickedModel,
+      );
+    },
     onSuccess: () => {
+      const reasoning = cheatEffort === "same" ? effort : cheatEffort;
       toast.success(
-        `${cheatN} cheat trial(s) (reasoning ${cheatEffort === "default" ? "server default" : cheatEffort}, ${cheatPrompt} prompt) started`,
+        `${cheatN} cheat trial(s) (${cheatModel === "same" ? "same model as Agent Trials" : cheatModel.replace("|", " · ")}, reasoning ${reasoning === "default" ? "server default" : reasoning}, ${cheatPrompt} prompt) started`,
       );
       invalidate();
     },
@@ -997,16 +1009,40 @@ function SubmissionDetail() {
           status={data.cheat_trial.status}
         >
           <div className="flex flex-wrap items-center gap-2">
-            <label className="text-sm text-muted-foreground">Reasoning</label>
-            <Select
-              value={cheatEffort}
-              onValueChange={(v) => setCheatEffort(v as ReasoningEffort | "default")}
-            >
-              <SelectTrigger className="w-32">
+            <label className="text-sm text-muted-foreground">Model</label>
+            <Select value={cheatModel} onValueChange={setCheatModel}>
+              <SelectTrigger className="w-72">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="default">Default</SelectItem>
+                <SelectItem value="same">
+                  Same as Agent Trials (
+                  {agentLabel(
+                    AGENT_CHOICES.find((a) => a.value === agentChoice) ?? AGENT_CHOICES[0],
+                    agentModels,
+                  )}
+                  )
+                </SelectItem>
+                {AGENT_CHOICES.flatMap((a) =>
+                  (modelChoices?.[a.value] ?? []).map((m) => (
+                    <SelectItem key={`${a.value}|${m}`} value={`${a.value}|${m}`}>
+                      {a.label} · {m.split("/").pop()}
+                    </SelectItem>
+                  )),
+                )}
+              </SelectContent>
+            </Select>
+            <label className="text-sm text-muted-foreground">Reasoning</label>
+            <Select
+              value={cheatEffort}
+              onValueChange={(v) => setCheatEffort(v as ReasoningEffort | "default" | "same")}
+            >
+              <SelectTrigger className="w-44">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="same">Same as Agent Trials</SelectItem>
+                <SelectItem value="default">Server default</SelectItem>
                 {REASONING_EFFORTS.map((e) => (
                   <SelectItem key={e} value={e}>
                     {e}

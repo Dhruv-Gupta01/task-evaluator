@@ -304,6 +304,12 @@ def get_agent_models() -> dict[str, str]:
     return {a: task_runner._agent_model(a) for a in ("codex", "claude-code")}
 
 
+@router.get("/agent-models")
+def get_agent_model_choices() -> dict[str, list[str]]:
+    """Per agent, the models the UI offers for one run: the .env model first."""
+    return task_runner.model_choices()
+
+
 @router.get("/budget")
 def get_budget(db: Session = Depends(get_db)) -> dict[str, float]:
     """This calendar month's tracked LLM spend against LLM_BUDGET_USD (0 = no cap)."""
@@ -356,6 +362,7 @@ async def trigger_cheat_trial(
     cheat_prompt: str = "default",
     n: int = 1,
     max_cost_usd: float | None = None,
+    model: str | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
     """n (1 to 3) trials, one after another, with an explicit directive to
@@ -370,11 +377,17 @@ async def trigger_cheat_trial(
     noticing (confirmed live: a real cheat trial once ran at low effort
     purely because of that, not a deliberate choice). cheat_prompt="tb"
     splices in the vendored, more aggressive Terminal-Bench red-team-style
-    directive instead of the platform's own hand-written one."""
+    directive instead of the platform's own hand-written one. model overrides
+    the agent's .env model (AGENT_MODEL / CLAUDE_AGENT_MODEL) for this run only;
+    leave it out to run the same model Agent Trials use."""
     if agent is not None and agent not in task_runner.AGENTS:
         raise HTTPException(
             status_code=400, detail=f"agent must be one of {', '.join(task_runner.AGENTS)}"
         )
+    if model:
+        model_error = task_runner.valid_model_override(agent or settings.harbor_agent, model)
+        if model_error:
+            raise HTTPException(status_code=400, detail=model_error)
     if reasoning_effort is not None and reasoning_effort not in task_runner.REASONING_EFFORTS:
         raise HTTPException(
             status_code=400,
@@ -399,7 +412,9 @@ async def trigger_cheat_trial(
 
     await task_queue.submit(
         f"{submission_id}:cheat_trial",
-        task_runner.run_cheat_trial(submission_id, agent, reasoning_effort, cheat_prompt, max_cost_usd),
+        task_runner.run_cheat_trial(
+            submission_id, agent, reasoning_effort, cheat_prompt, max_cost_usd, model
+        ),
     )
     return {"status": "started"}
 

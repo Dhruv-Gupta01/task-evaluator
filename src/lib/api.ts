@@ -561,6 +561,9 @@ async function handle<T>(res: Response): Promise<T> {
 export const api = {
   getAgentModels: () =>
     fetch(`${API_BASE_URL}/agents`).then(handle<Record<string, string>>),
+  // Per agent, the models a single run can pick (the .env model first).
+  getAgentModelChoices: () =>
+    fetch(`${API_BASE_URL}/agent-models`).then(handle<Record<string, string[]>>),
   listSubmissions: () =>
     fetch(`${API_BASE_URL}/submissions`).then(handle<SubmissionListItem[]>),
   getSubmission: (id: string) =>
@@ -614,7 +617,8 @@ export const api = {
       { method: "POST" },
     ).then(handle<unknown>),
   // agent undefined = the server's default (HARBOR_AGENT). n = 1 to 3 trials,
-  // run one after another; maxCost undefined = AGENT_RUN_BUDGET_USD.
+  // run one after another; maxCost undefined = AGENT_RUN_BUDGET_USD; model
+  // undefined = the agent's .env model, the one Agent Trials use.
   cheatTrial: (
     id: string,
     agent?: AgentChoice,
@@ -622,6 +626,7 @@ export const api = {
     cheatPrompt?: CheatPromptChoice,
     n = 1,
     maxCost?: number,
+    model?: string,
   ) =>
     fetch(
       `${API_BASE_URL}/submissions/${id}/cheat-trial?` +
@@ -631,6 +636,7 @@ export const api = {
           cheatPrompt && cheatPrompt !== "default" ? `cheat_prompt=${cheatPrompt}` : "",
           `n=${n}`,
           maxCost ? `max_cost_usd=${maxCost}` : "",
+          model ? `model=${encodeURIComponent(model)}` : "",
         ]
           .filter(Boolean)
           .join("&"),

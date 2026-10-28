@@ -76,6 +76,40 @@ _LITELLM_PREFIX = {
 REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # Agents a run of trials can pick (default: HARBOR_AGENT).
 AGENTS = ("codex", "claude-code", "terminus-2")
+# Models the UI offers per agent besides the one configured in .env. Not a
+# whitelist: any model with the right provider prefix is accepted (see
+# valid_model_override), so a newer model needs no code change.
+MODEL_CHOICES: dict[str, tuple[str, ...]] = {
+    "codex": ("openai/gpt-6-luna", "openai/gpt-6-sol", "openai/gpt-6-astra"),
+    "claude-code": (
+        "anthropic/claude-fable-5-1",
+        "anthropic/claude-opus-5-5",
+        "anthropic/claude-sonnet-5-5",
+        "anthropic/claude-haiku-5-5",
+    ),
+}
+_MODEL_PREFIX = {"codex": "openai/", "claude-code": "anthropic/"}
+_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,100}$")
+
+
+def valid_model_override(agent: str, model: str) -> str | None:
+    """A reason `model` can't be used with `agent`, or None. Codex only runs
+    OpenAI models and Claude Code only Anthropic ones; Terminus-2 takes any
+    LiteLLM string, so only its shape is checked."""
+    if not _MODEL_RE.match(model):
+        return "model must look like provider/name (letters, digits, . _ : - /)"
+    prefix = _MODEL_PREFIX.get(agent)
+    if prefix and not model.startswith(prefix):
+        return f"{agent} only runs {prefix}* models"
+    return None
+
+
+def model_choices() -> dict[str, list[str]]:
+    """Per agent, the model its .env setting uses first, then the other known ones."""
+    out: dict[str, list[str]] = {}
+    for agent, models in MODEL_CHOICES.items():
+        out[agent] = list(dict.fromkeys([_agent_model(agent), *models]))
+    return out
 
 # Vendored Terminal-Bench prompts/rubrics (backend/vendor/tb_prompts/, see
 # PROVENANCE.md there) -- an alternate, richer rubric a run can opt into,
@@ -182,13 +216,14 @@ def _run_cost_cap(db, requested_usd: float | None = None) -> tuple[float | None,
     return min(caps, key=lambda cap: cap[0])
 
 
-def _agent_config_error(agent: str) -> str | None:
-    """A reason the chosen agent can't run, or None."""
+def _agent_config_error(agent: str, model: str | None = None) -> str | None:
+    """A reason the chosen agent can't run, or None. model is a per-run override
+    of the agent's .env model (see _agent_model)."""
     if agent == "claude-code":
-        if not _agent_model(agent).startswith("anthropic/"):
+        if not _agent_model(agent, model).startswith("anthropic/"):
             return (
-                f"Claude Code only works with Anthropic models, but CLAUDE_AGENT_MODEL is "
-                f"'{_agent_model(agent)}'. Set CLAUDE_AGENT_MODEL=anthropic/<model> in backend/.env."
+                f"Claude Code only works with Anthropic models, but the agent model is "
+                f"'{_agent_model(agent, model)}'. Set CLAUDE_AGENT_MODEL=anthropic/<model> in backend/.env."
             )
         if not settings.anthropic_api_key:
             return "Claude Code needs ANTHROPIC_API_KEY in backend/.env."
@@ -198,10 +233,10 @@ def _agent_config_error(agent: str) -> str | None:
                 "task container, so it needs HARBOR_NETWORK_MODE=public."
             )
     if agent == "codex":
-        if not _agent_model(agent).startswith("openai/"):
+        if not _agent_model(agent, model).startswith("openai/"):
             return (
                 f"Codex only works with OpenAI models, but the agent model is "
-                f"'{_agent_model(agent)}'. Set AGENT_MODEL=openai/<model> in backend/.env."
+                f"'{_agent_model(agent, model)}'. Set AGENT_MODEL=openai/<model> in backend/.env."
             )
         if not settings.openai_api_key:
             return "Codex needs OPENAI_API_KEY in backend/.env."
@@ -213,7 +248,12 @@ def _agent_config_error(agent: str) -> str | None:
     return None
 
 
-def _agent_model(agent: str) -> str:
+def _agent_model(agent: str, model: str | None = None) -> str:
+    """The LiteLLM model an agent runs. `model` overrides the .env setting for
+    one run (the Cheat Trial's model dropdown); empty means the .env model, the
+    same one Agent Trials use."""
+    if model:
+        return model
     if agent == "claude-code":
         return settings.claude_agent_model
     if settings.agent_model:
@@ -1835,6 +1875,7 @@ async def run_cheat_trial(
     reasoning_effort: str | None = None,
     cheat_prompt: str = "default",
     max_cost_usd: float | None = None,
+    model: str | None = None,
 ) -> None:
     """Cheat Trials: trials run with an explicit cheat directive spliced into
     instruction.md (harbor_runner._prepare_task, cheat_instruction=True), to
@@ -1868,7 +1909,7 @@ async def run_cheat_trial(
         if not runs:
             return
         agent = agent or settings.harbor_agent
-        config_error = _agent_config_error(agent)
+        config_error = _agent_config_error(agent, model)
         if config_error:
             for r in runs:
                 r.status = "failed"
@@ -1899,7 +1940,7 @@ async def run_cheat_trial(
             + _HARBOR_TIMEOUT_BUFFER_SEC
         )
         agent_kwargs = _agent_kwargs(agent, reasoning_effort)
-        model = _agent_model(agent)
+        model = _agent_model(agent, model)
         jobs_dir = settings.storage_dir / "submissions" / submission_id / "runs" / "cheat_trial" / "harbor"
         if jobs_dir.exists():
             shutil.rmtree(jobs_dir)
