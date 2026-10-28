@@ -1173,7 +1173,7 @@ function SubmissionDetail() {
               <SelectContent>
                 {AGENT_CHOICES.map((a) => (
                   <SelectItem key={a.value} value={a.value}>
-                    {agentLabel(a, agentModels)}
+                    {a.label}
                   </SelectItem>
                 ))}
               </SelectContent>
