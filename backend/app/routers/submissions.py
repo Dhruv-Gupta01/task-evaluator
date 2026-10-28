@@ -140,6 +140,7 @@ async def trigger_agent_trials(
     agent: str | None = None,
     max_cost_usd: float | None = None,
     cost_mode: str = "total",
+    model: str | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
     """Runs n agent trials. By default they replace any earlier trials;
@@ -151,11 +152,17 @@ async def trigger_agent_trials(
     AGENT_RUN_BUDGET_USD: cost_mode "total" is the whole run, "per_trial" means
     max_cost_usd x n for the run (the job stops when that total is reached; a
     single trial is not cut off on its own, except Claude Code, which enforces
-    its share itself). The monthly budget still applies on top."""
+    its share itself). The monthly budget still applies on top. model
+    overrides the agent's .env model for these trials only (leave it out for
+    AGENT_MODEL / CLAUDE_AGENT_MODEL)."""
     if agent is not None and agent not in task_runner.AGENTS:
         raise HTTPException(
             status_code=400, detail=f"agent must be one of {', '.join(task_runner.AGENTS)}"
         )
+    if model:
+        model_error = task_runner.valid_model_override(agent or settings.harbor_agent, model)
+        if model_error:
+            raise HTTPException(status_code=400, detail=model_error)
     if reasoning_effort is not None and reasoning_effort not in task_runner.REASONING_EFFORTS:
         raise HTTPException(
             status_code=400,
@@ -189,7 +196,9 @@ async def trigger_agent_trials(
     run_cap = max_cost_usd * n if max_cost_usd and cost_mode == "per_trial" else max_cost_usd
     await task_queue.submit(
         f"{submission_id}:agent",
-        task_runner.run_agent_trials(submission_id, n, append, reasoning_effort, agent, run_cap),
+        task_runner.run_agent_trials(
+            submission_id, n, append, reasoning_effort, agent, run_cap, model
+        ),
     )
     return {"status": "started"}
 

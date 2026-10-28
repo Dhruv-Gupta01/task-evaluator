@@ -185,6 +185,10 @@ tokens and cost, and flags where the reward and the tests disagree.
   default `anthropic/claude-fable-5-1`, needs `ANTHROPIC_API_KEY`). API: `agent-trials?agent=claude-code`.
   Both install themselves inside the task container, so their key enters it. Claude Code's cost can't
   be read while it runs, so each trial is also capped by Claude Code itself at its share of the run budget.
+  A Model dropdown next to it overrides that agent's `.env` model for the run (Codex: `gpt-6-luna`, `gpt-6-sol`,
+  `gpt-6-astra`; Claude Code: Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5; "Default" keeps the `.env` model).
+  API: `agent-trials?agent=codex&model=openai/gpt-6-sol`. The provider prefix is checked (Codex `openai/*`,
+  Claude Code `anthropic/*`).
 - **Reasoning level per run**: the Agent Trials card has a Reasoning dropdown (Default, low, medium,
   high, xhigh, max). Default uses `AGENT_REASONING_EFFORT` from `backend/.env`; anything else applies
   to that run only (API: `agent-trials?reasoning_effort=high`). The trial logs start with the agent,

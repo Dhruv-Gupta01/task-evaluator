@@ -600,11 +600,13 @@ export const api = {
     agent?: AgentChoice,
     maxCost?: number,
     costMode?: "total" | "per_trial",
+    model?: string,
   ) =>
     fetch(
       `${API_BASE_URL}/submissions/${id}/agent-trials?n=${n}` +
         (reasoningEffort ? `&reasoning_effort=${reasoningEffort}` : "") +
         (agent ? `&agent=${agent}` : "") +
+        (model ? `&model=${encodeURIComponent(model)}` : "") +
         (maxCost ? `&max_cost_usd=${maxCost}&cost_mode=${costMode ?? "total"}` : ""),
       { method: "POST" },
     ).then(handle<unknown>),

@@ -995,6 +995,7 @@ async def run_agent_trials(
     reasoning_effort: str | None = None,
     agent: str | None = None,
     max_cost_usd: float | None = None,
+    model: str | None = None,
 ) -> None:
     """n trials of an LLM agent via one `harbor run` job. Harbor runs the
     agent inside the task container and only copies tests/ in afterwards to
@@ -1013,7 +1014,7 @@ async def run_agent_trials(
             .all()
         )  # the router pre-creates the n new rows as pending; earlier trials are left alone
         agent = agent or settings.harbor_agent
-        config_error = _agent_config_error(agent)
+        config_error = _agent_config_error(agent, model)
         if config_error:
             for r in runs:
                 r.status = "failed"
@@ -1048,7 +1049,7 @@ async def run_agent_trials(
             shutil.rmtree(jobs_dir)  # keep only the latest attempt's output
 
         pending = list(runs)
-        model = _agent_model(agent)
+        model = _agent_model(agent, model)
 
         async def on_trial(outcome: harbor_runner.TrialOutcome) -> str | None:
             if outcome.cost_usd is not None:

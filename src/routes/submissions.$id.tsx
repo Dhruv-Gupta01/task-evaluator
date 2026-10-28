@@ -155,6 +155,8 @@ function SubmissionDetail() {
   // the default one lacks, so it is pre-selected (the dropdown still offers Default).
   const [checkRubric, setCheckRubric] = useState<RubricChoice>("tb");
   const [agentChoice, setAgentChoice] = useState<AgentChoice>("codex");
+  // "" = the agent's .env model (AGENT_MODEL / CLAUDE_AGENT_MODEL); otherwise one pick of the Model dropdown.
+  const [agentModel, setAgentModel] = useState("");
   // Empty = the server's AGENT_RUN_BUDGET_USD.
   const [costCap, setCostCap] = useState("");
   const [costMode, setCostMode] = useState<"total" | "per_trial">("total");
@@ -177,10 +179,13 @@ function SubmissionDetail() {
         agentChoice,
         Number(costCap) > 0 ? Number(costCap) : undefined,
         costMode,
+        agentModel || undefined,
       ),
     onSuccess: () => {
       const choice = AGENT_CHOICES.find((a) => a.value === agentChoice);
-      const label = choice ? agentLabel(choice, agentModels) : agentChoice;
+      const label = choice
+        ? agentLabel(choice, agentModel ? { [agentChoice]: agentModel } : agentModels)
+        : agentChoice;
       toast.success(
         `Agent trials (${label}, n=${n}, reasoning ${effort === "default" ? "server default" : effort}) started`,
       );
@@ -306,7 +311,7 @@ function SubmissionDetail() {
   const mCheatTrial = useMutation({
     mutationFn: () => {
       const [pickedAgent, pickedModel] =
-        cheatModel === "same" ? [agentChoice, undefined] : cheatModel.split("|");
+        cheatModel === "same" ? [agentChoice, agentModel || undefined] : cheatModel.split("|");
       const reasoning = cheatEffort === "same" ? effort : cheatEffort;
       return api.cheatTrial(
         id,
@@ -1019,7 +1024,7 @@ function SubmissionDetail() {
                   Same as Agent Trials (
                   {agentLabel(
                     AGENT_CHOICES.find((a) => a.value === agentChoice) ?? AGENT_CHOICES[0],
-                    agentModels,
+                    agentModel ? { [agentChoice]: agentModel } : agentModels,
                   )}
                   )
                 </SelectItem>
@@ -1155,7 +1160,13 @@ function SubmissionDetail() {
               className="w-20"
             />
             <label className="text-sm text-muted-foreground">Agent</label>
-            <Select value={agentChoice} onValueChange={(v) => setAgentChoice(v as AgentChoice)}>
+            <Select
+              value={agentChoice}
+              onValueChange={(v) => {
+                setAgentChoice(v as AgentChoice);
+                setAgentModel("");
+              }}
+            >
               <SelectTrigger className="w-52">
                 <SelectValue />
               </SelectTrigger>
@@ -1163,6 +1174,25 @@ function SubmissionDetail() {
                 {AGENT_CHOICES.map((a) => (
                   <SelectItem key={a.value} value={a.value}>
                     {agentLabel(a, agentModels)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <label className="text-sm text-muted-foreground">Model</label>
+            <Select
+              value={agentModel || "env"}
+              onValueChange={(v) => setAgentModel(v === "env" ? "" : v)}
+            >
+              <SelectTrigger className="w-56">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="env">
+                  Default ({agentModels?.[agentChoice]?.split("/").pop() ?? ".env model"})
+                </SelectItem>
+                {(modelChoices?.[agentChoice] ?? []).map((m) => (
+                  <SelectItem key={m} value={m}>
+                    {m.split("/").pop()}
                   </SelectItem>
                 ))}
               </SelectContent>
