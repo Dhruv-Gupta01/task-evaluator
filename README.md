@@ -2,7 +2,7 @@
 
 A local platform for grading Terminal-Bench-style task submissions. A candidate/task-author
 uploads a task zip (environment + solution + tests), and the platform runs it through five
-gates against real Docker containers, plus a set of advisory checks (see
+gates against real Docker containers, plus about twenty advisory checks (see
 [Stages in detail](#stages-in-detail-40-and-41)):
 
 1. **Build** — builds the task's `environment/Dockerfile`.
@@ -10,22 +10,32 @@ gates against real Docker containers, plus a set of advisory checks (see
 3. **Nop** — runs `harbor run -a nop`, confirms a do-nothing agent scores reward `0`.
 4. **Sufficiency** — an LLM judge checks whether the hidden test requirements are inferable
    from the visible instructions and files.
-5. **Agent Trials** — runs `harbor run` with the Terminus-2 agent N times, reporting the pass
-   rate and each trial's token usage and cost.
+5. **Agent Trials** — runs `harbor run` with Codex, Claude Code or Terminus-2 N times, reporting
+   the pass rate and each trial's token usage and cost.
 
 Everything runs locally: FastAPI backend, React/Vite frontend, Postgres, and Docker.
+
+**Taking this over?** Read [`docs/HANDOVER.md`](docs/HANDOVER.md) for what the platform is, how it
+works, every feature, the configuration, costs and the known issues. This README is the setup guide.
 
 ## Prerequisites
 
 - **Docker Desktop** (or another local Docker daemon) — running, before you start the backend.
-- **Python 3.13+** and [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
+  Give it generous memory and disk: tasks declare their own CPU and memory, and images and trial
+  containers add up.
+- **Python 3.13** and [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
+  (`pyproject.toml` allows 3.11+, but only 3.13 has been tested)
 - **[Harbor](https://github.com/laude-institute/harbor)** CLI — runs the Oracle, Nop and Agent
   Trials stages with the same harness as the real grading pipeline: `uv tool install harbor==0.23.0` (the version this was tested with)
 - **Node.js** and [`bun`](https://bun.sh) (this repo is bun-lockfile-managed; `npm` will also
   work off `package-lock.json` if you don't have bun, but bun is what's actually been tested)
-- An API key for at least one LLM provider (Anthropic, OpenAI, Gemini, Groq, or
-  [Fireworks](https://fireworks.ai) — Fireworks is the default and is what this project has
-  been run against)
+- API keys: an OpenAI key covers the judge stages, Failure Analysis and the Codex agent, and an
+  Anthropic key covers Rubric Check and the Claude Code agent (see
+  [Which keys you need](#which-keys-you-need)). Gemini, Groq and Fireworks also work as the
+  judge provider.
+- **Machine**: tested on an Apple Silicon Mac. On an Intel Mac or Linux, set
+  `DOCKER_PLATFORM=linux/amd64` in `backend/.env`. Windows support is written but has never been
+  run.
 
 ## 1. Clone and start Postgres
 
@@ -61,6 +71,25 @@ uv run uvicorn app.main:app --reload --reload-dir app --port 8001
 
 Confirm it's up: `curl http://localhost:8001/docs` should return `200`.
 
+### Which keys you need
+
+Put keys only in `backend/.env` (it is gitignored); never commit it. A stage whose key is missing
+fails and shows the error in its logs; the stages that need no key keep working.
+
+| Key in `backend/.env` | Needed by |
+|---|---|
+| `OPENAI_API_KEY` | Sufficiency, Edge-Case Coverage, both probes, Review Report (with the default `LLM_PROVIDER=openai`); Failure Analysis; the Codex agent; Cheat Trial when it uses Codex |
+| `ANTHROPIC_API_KEY` | Rubric Check; the Claude Code agent; Cheat Trial when it uses Claude Code |
+| `GEMINI_API_KEY`, `GROQ_API_KEY`, `FIREWORKS_API_KEY` | Only if you set `LLM_PROVIDER` to that provider |
+| `GPTZERO_API_KEY` | AI Detection (optional; without it the stage reports "skipped") |
+
+Build, Oracle, Nop, Static Checks, TB Static Checks, Leakage Scan, Answer Exposure, Image
+Contents and Fresh Build need no key at all, so you can try the platform with none.
+
+**Cost safety**: `.env.example` caps one agent run at `AGENT_RUN_BUDGET_USD=5` and the month at
+`LLM_BUDGET_USD=50`. Agent trials on real tasks have cost $3 to $42 each, so check these before
+raising them. Setting either to `0` turns that cap off.
+
 ## 3. Frontend setup
 
 From the repo root, in a separate terminal:
@@ -81,6 +110,35 @@ Open the frontend, upload a task zip, and run it through the gates in order (Val
 Oracle → Nop → Sufficiency → Agent Trials) from the UI. Submission files and per-run logs land
 under `backend/storage/submissions/{id}/` (Harbor's full job output is in
 `runs/{oracle,nop,agent}/harbor/`).
+
+### First run: check your setup in about two minutes
+
+`examples/smoke-task/` is a tiny task (fix two bugs in a 10-line Python function) that needs no
+API key. Zip it so `task.toml` sits at the top of the zip, then upload it:
+
+```sh
+cd examples/smoke-task && zip -r ../smoke-task.zip . -x '.DS_Store' && cd ../..
+```
+
+In the UI, upload `examples/smoke-task.zip`, then click **Validate & Build**, **Run Oracle** and
+**Run Nop**. A working setup shows all three as **Passed**: Build takes about 15 seconds on a
+warm Docker, and Oracle plus Nop about 30 seconds more (the first run pulls base images, so allow
+a few minutes). If one fails, see [Troubleshooting](#troubleshooting). To test an LLM stage, run
+**Sufficiency** next (needs the judge key).
+
+### Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| Backend exits with `llm_tpm ... unable to parse string as an integer` | An empty `LLM_TPM=` line in an old copy of `.env`. Delete that line (or comment it out). |
+| Backend crashes at startup with `connection refused` on port 5433, or every page shows a 500 | Postgres is not running. `docker compose up -d` (or `docker start taskeval-postgres`), then restart the backend. |
+| `failed to connect to the docker API` | Docker Desktop is not running. Start it, wait until `docker info` works, then restart the backend. |
+| Docker and Postgres stop after the Mac sleeps | Known. Start Docker, start Postgres, restart the backend (`pkill -f "uvicorn app.main:app"` first, since `--reload` leaves a parent process). Stages that were running are marked failed on restart; run them again. |
+| An LLM or agent stage fails at once | Check its logs: most likely the key for that stage is not in `backend/.env` (see [Which keys you need](#which-keys-you-need)). Restart the backend after editing `.env`. |
+| Frontend loads but shows network errors | It is pointing at the wrong backend. Start it with `VITE_API_BASE_URL=http://localhost:8001 bun run dev` (the default is port 8000). |
+| Builds are very slow or `exec format error` | `DOCKER_PLATFORM` does not match your machine. Use `linux/arm64` on Apple Silicon and `linux/amd64` elsewhere. |
+| A Dockerfile that downloads from GitHub hangs at random | See "Builds that download from GitHub" under Notes (`DOCKER_ADD_HOSTS`). |
+| Disk fills up | Each submission keeps its files and an image. See "Docker image buildup" and "Resetting local state" under Notes. |
 
 ## Stages in detail (4.0 and 4.1)
 
