@@ -3,7 +3,7 @@
 A local platform for grading Terminal-Bench-style task submissions. A candidate/task-author
 uploads a task zip (environment + solution + tests), and the platform runs it through five
 gates against real Docker containers, plus about twenty advisory checks (see
-[Stages in detail](#stages-in-detail-40-and-41)):
+[Stages in detail](#stages-in-detail-40-41-and-50)):
 
 1. **Build** — builds the task's `environment/Dockerfile`.
 2. **Oracle** — runs `harbor run -a oracle`, confirms the reference solution scores reward `1`.
@@ -140,7 +140,7 @@ a few minutes). If one fails, see [Troubleshooting](#troubleshooting). To test a
 | A Dockerfile that downloads from GitHub hangs at random | See "Builds that download from GitHub" under Notes (`DOCKER_ADD_HOSTS`). |
 | Disk fills up | Each submission keeps its files and an image. See "Docker image buildup" and "Resetting local state" under Notes. |
 
-## Stages in detail (4.0 and 4.1)
+## Stages in detail (4.0, 4.1 and 5.0)
 
 The submission page runs top to bottom in three sections: **Before the agent trials**, **Agent
 trials**, **After the agent trials**. A button that depends on an earlier stage is greyed out and
@@ -148,7 +148,9 @@ says what it is waiting for. Only Build, Oracle, Nop, Sufficiency and Agent Tria
 everything else is **advisory** and never changes a gate. All of it comes from the task files
 and Harbor's own results, so a finding is a question for a reviewer, not a verdict.
 
-Items marked **(4.1)** are new in the 4.1 branch; the rest came with 4.0.
+Items marked **(4.1)** are new in the 4.1 branch; the rest came with 4.0. The 5.0 additions
+(Terminal-Bench 5.0 categories A1, A2, B, E, F, H and J) are collected in
+[5.0 additions](#50-additions) below. They extend existing stages rather than adding new buttons.
 
 ### Before the agent trials
 
@@ -192,6 +194,27 @@ tokens and cost, and flags where the reward and the tests disagree.
 - **Download Evidence**: one JSON with the build log, Static Checks, Rubric Check, per-stage
   results, cost per stage and a summary. **(4.1)** Adds run limits, Oracle notes, Cheat Trial,
   Answer Exposure, Fresh Build, Image Contents and the verifier reports.
+
+### 5.0 additions
+
+All advisory, like the rest: a finding is a question for a reviewer and never changes a gate. None
+of these adds a button; each shows up inside an existing stage.
+
+| Area (TB 5.0 category) | What it does | Where it shows |
+|---|---|---|
+| Agent user (H) | Terminal-Bench 5.0 moves agents to a non-root user (`[agent] user` in `task.toml`). A root agent is a warning, not a failure. With a user set, it warns when the Dockerfile never creates it or never `chown`s files to it, when it has `NOPASSWD`/sudo, when toolchains stay under `/root` (including Maven's `/root/.m2`), and when `solve.sh` runs `apt-get install` at run time. It warns when the non-root user comes only from a Dockerfile `USER` (some runners, such as Modal, ignore that and start the agent as root). Each running trial container is also asked `id -u`, so the trial log and facts line show the real uid (amber when 0). | Static Checks, trial logs |
+| Refusals (J) | A model's safety refusal scores 0 like a real failure and lowers the pass rate. Non-passing trials are read for provider content-policy errors, or refusal phrases from an agent that made fewer than 3 tool calls. The page shows an amber refusal line plus `pass_rate_excluding_refusals`; `pass_rate` and pass@k are unchanged. Phrase matching can be wrong, so it is evidence only. Failure Analysis now defaults to the TB rubric, which includes a `refusals` criterion. | Agent Trials, Failure Analysis, evidence |
+| Environment causes (E) | Failures that come from the machine or image, not the agent: architecture mismatches (`exec format error`, `no matching manifest`, aarch64 package misses, `GLIBC_x not found`), GitHub rate limits, "port not ready", and the verifier sandbox failure "Worker could not install required protections". A non-passing trial gets an "environment, not the agent" flag. Image Contents also records the image's architecture, OS and glibc, and base images are inspected for missing platforms or a single-platform digest. Run limits warn on glibc below 2.36, image architecture against `DOCKER_PLATFORM`, and `AGENT_TIMEOUT_SEC` overriding the task's own timeout. New Static Checks: `bundled_binaries_single_arch`, `gpu_not_available`, `agent_timeout_below_estimate`. | Trials, Image Contents, Static Checks, evidence |
+| Grader hardening (B, A1) | Static Checks also flag a grader that enforces a restriction by reading the submission's source (`ast` walks, banned-import lists, `grep import`), one that leaks file descriptors to agent code (`close_fds=False`, `pass_fds`), and `compile()`/`__import__()` of a non-literal. The Weak-Answer Probe also tries corrupting k of n outputs, blanking a field, embedding a forbidden library, and X/Z/NaN values. The Cheat Trial has a **Targeted** prompt built from the task's own restriction sentences (and axiom/macro holes for Lean tasks); it is never run by default. | Static Checks, Weak-Answer Probe, Cheat Trial |
+| Sufficiency recall (A2) | The judge also tabulates every output field a test checks (`[fields]`), treats comments and docstrings in agent-visible files as part of the instruction (`[docstring]`), lists every tolerance, threshold and count the tests enforce (`[numbers]`), checks external identifiers and versions (`[identifier]`), and reads lines where a test's author admits something is "not stated" (`[admitted]`). Prompts are longer, so each call costs a little more. | Sufficiency |
+| Grader too strict, Oracle proves nothing (A1) | Edge-Case Coverage also reads up to 3 agent-visible format or spec files and turns every option they allow into a case, and reports whether the Oracle itself handles each. Sufficiency gets `[ground-truth]`: are the expected values independent, or the reference's own output? Static Checks warn when a `solution/` file equals or embeds a `tests/` data file, or imports a module that exists only under `tests/`. | Edge-Case Coverage, Sufficiency, Static Checks |
+| Lock and licence hygiene (F) | `toolchain_pinning` (opam without a lock, elan/lake without `lean-toolchain` and a manifest, sbt, cpanm, unversioned conda packages, unpinned rustup/uv/nvm/pnpm bootstraps), `huggingface_revision` (`from_pretrained` and friends without `revision=`), and info-only notes for bundled data licences and task size. The TB Static Checks card shows which upstream commit the vendored scripts come from. | Static Checks, TB Static Checks |
+| Answer exposure extras | Symlinks in `environment/` (one pointing at an answer is a warning), future or very old file timestamps, and version banners (a commit hash or a GitHub tree/blob/commit URL). | Answer Exposure |
+
+**Not built for 5.0:** a cross-architecture Oracle run, scanning archives for binaries, an
+independent-tool comparison for ground truth (rustc, a parser), and an author-supplied folder of
+equivalent or false solutions. The Lean 4.28 "unsound toolchain" note rests on a milestone item title
+and is unverified.
 
 ## Notes
 

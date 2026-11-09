@@ -33,6 +33,13 @@ bun run build
 
 There's no test suite and no migrations. Tables come from `Base.metadata.create_all` at startup, so a schema change to an existing table means wiping the DB (`docker compose down -v`). Runtime state lives under `backend/storage/`, which is gitignored and safe to delete.
 
+## Scripts, docs and secrets
+
+- `backend/scripts/` holds standalone tools, run from `backend/` against a running backend or the DB: `run_tb_test.py` (runs stages on one real Terminal-Bench task and writes evidence under `docs/testing/<version>/`; `.claude/run_*.sh` are the batch drivers), `export_evidence.py` (rebuilds a `docs/testing/` entry from the DB), `diff_vendored_checks.py` (upstream vs vendored checks), and `log_issue.py` / `log_cost.py` (append rows to the TB Milestone Issue Log Google Sheet via `uv run --with gspread python backend/scripts/<name>.py ...`; `log_cost.py` reads the UI's evidence download).
+- `docs/HANDOVER.md` is the operator/maintainer overview (architecture, costs, known issues, day-to-day operation); read it before large changes. `docs/testing/` is the real-task test evidence. The `task-deliverable` skill builds the client evidence package.
+- The Google service-account key (`platinum-voice-*.json` in the repo root) and `.env` are gitignored credentials. Never commit, print or paste them.
+- There is no Python lint or test config in `backend/pyproject.toml`; the frontend `bun run lint` is the only linter.
+
 ## Backend architecture
 
 **Request → background task flow.** `routers/submissions.py` exposes `POST /submissions/{id}/<stage>`. Each endpoint marks the row `pending` and hands a coroutine from `services/task_runner.py` to `workers/task_queue.submit(key, coro)`. The queue is in-process asyncio only: resubmitting the same `"{id}:{stage}"` key cancels the running task and restarts it. Blocking Docker calls run through `asyncio.to_thread`. Cancelling a Harbor-backed stage sends SIGINT to the `harbor` process so it removes its containers. On startup, `reset_stuck_rows()` marks any leftover `pending`/`running` rows as failed, and `docker_orchestrator.reap_orphans()` removes containers labelled `taskeval.submission_id`.
