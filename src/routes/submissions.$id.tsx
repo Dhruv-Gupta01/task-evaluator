@@ -29,6 +29,9 @@ import {
   type EdgeCases,
   type ReviewerDecision,
   type AnswerExposure,
+  type Tier0,
+  type Tier0ProbeResult,
+  type Tier0Ruling,
   type ImageInventory,
   type FreshBuild,
 } from "@/lib/api";
@@ -89,6 +92,7 @@ function SubmissionDetail() {
         isActive(d.cheat_trial.status) ||
         isActive(d.rubric_check.status) ||
         isActive(d.answer_exposure.status) ||
+        isActive(d.tier0.status) ||
         isActive(d.image_inventory.status) ||
         isActive(d.fresh_build.status) ||
         (d.oracle.stress_runs ?? []).some((r) => r.reward == null && !r.logs) ||
@@ -147,6 +151,9 @@ function SubmissionDetail() {
   const [cheatPrompt, setCheatPrompt] = useState<CheatPromptChoice>("default");
   // One clean cheat trial proves little (real cheats upstream needed several tries).
   const [cheatN, setCheatN] = useState("3");
+  const [tier0Repeats, setTier0Repeats] = useState("1");
+  const [tier0Harbor, setTier0Harbor] = useState(true);
+  const [tier0Adjudicator, setTier0Adjudicator] = useState("");
   const [cheatCostCap, setCheatCostCap] = useState("");
   // The TB rubric adds the refusals, near_miss, difficulty_crux and low_timeout criteria that
   // Harbor's own two-criterion rubric lacks, so it is pre-selected (Default is still in the dropdown).
@@ -225,6 +232,23 @@ function SubmissionDetail() {
       toast.success(
         probe ? "Edge-case check with grader probe started" : "Edge-case check started",
       );
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const mTier0 = useMutation({
+    mutationFn: () => api.tier0(id, Number(tier0Repeats), tier0Harbor),
+    onSuccess: () => {
+      toast.success("Tier 0 probes started");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const mTier0Decision = useMutation({
+    mutationFn: (body: { probe_id: string; ruling: string; note: string }) =>
+      api.tier0Decision(id, { ...body, adjudicator: tier0Adjudicator }),
+    onSuccess: () => {
+      toast.success("Ruling recorded");
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -1007,6 +1031,54 @@ function SubmissionDetail() {
           <VariantProbeView logs={data.weak_probe.logs} />
         </StageCard>
 
+        {/* Tier 0 */}
+        <StageCard
+          title="Tier 0: Static Probes"
+          description="First tier of the cheat-trial loop. No agent and no model: each probe is a script that leaves the files an exploit would leave, the verifier is run on them, and the reward is read. A probe that scores 0 only counts as evidence when a control shows it can reach what it attacks (a mutant with one defence removed, or the planted file made to arrive). Fault checks remove each data file from tests/ and expect reward 0; a 1 means the verifier fails open. A control probe runs the task's own solution through the same pipeline and must score 1. Symlink and FIFO probes are repeated with Harbor's sanitising off to see whether the task defends itself. Stored rollouts are regraded to check the replica against Harbor, and results are compared with the previous upload of the same task. Needs Docker; the first run builds images. Advisory."
+          status={data.tier0.status}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <RunButton
+              label="Run Tier 0 Probes"
+              runningLabel="Probing…"
+              onClick={() => mTier0.mutate()}
+              running={isActive(data.tier0.status)}
+              pending={mTier0.isPending}
+              disabled={!validated}
+              disabledReason="Validate the submission first"
+            />
+            <label className="text-sm text-muted-foreground">Repeat each probe</label>
+            <Select value={tier0Repeats} onValueChange={setTier0Repeats}>
+              <SelectTrigger className="w-16">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {["1", "2", "3"].map((v) => (
+                  <SelectItem key={v} value={v}>
+                    {v}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <label className="flex items-center gap-1.5 text-sm text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={tier0Harbor}
+                onChange={(e) => setTier0Harbor(e.target.checked)}
+              />
+              Include the real Harbor probe (G1, a few minutes)
+            </label>
+          </div>
+          <Tier0View
+            logs={data.tier0.logs}
+            rulings={data.tier0_decisions ?? {}}
+            adjudicator={tier0Adjudicator}
+            setAdjudicator={setTier0Adjudicator}
+            onRule={(probe_id, ruling, note) => mTier0Decision.mutate({ probe_id, ruling, note })}
+            ruling={mTier0Decision.isPending}
+          />
+        </StageCard>
+
         {/* Cheat trial */}
         <StageCard
           title="Cheat Trial"
@@ -1428,6 +1500,356 @@ function parseJson<T>(logs?: string): T | null {
   } catch {
     return null;
   }
+}
+
+const TIER0_ATTENTION = [
+  "exploited",
+  "fail_open",
+  "false_zero",
+  "control_failed",
+  "infra_failed",
+  "relies_on_harbor",
+];
+
+function tier0VerdictLabel(v: string): string {
+  return (
+    (
+      {
+        held: "held",
+        exploited: "EXPLOITED",
+        fail_open: "FAILS OPEN",
+        false_zero: "VALID SOLUTION GRADED 0",
+        relies_on_harbor: "RELIES ON HARBOR",
+        valid_accepted: "valid solution accepted",
+        control_ok: "control ok",
+        control_failed: "CONTROL FAILED",
+        flaky: "flaky",
+        inconclusive: "inconclusive",
+        infra_failed: "could not run",
+        skipped: "skipped",
+      } as Record<string, string>
+    )[v] ?? v
+  );
+}
+
+const RULINGS = [
+  { value: "legitimate", label: "Legitimate alternative (the task should accept it)" },
+  { value: "exploit", label: "Real exploit (must be fixed)" },
+  { value: "accepted_risk", label: "Known, left alone" },
+  { value: "unsure", label: "Unsure" },
+];
+
+function Tier0Row({
+  r,
+  ruling,
+  adjudicator,
+  setAdjudicator,
+  onRule,
+  ruling_pending,
+}: {
+  r: Tier0ProbeResult;
+  ruling?: Tier0Ruling;
+  adjudicator: string;
+  setAdjudicator: (v: string) => void;
+  onRule: (probe_id: string, ruling: string, note: string) => void;
+  ruling_pending: boolean;
+}) {
+  const [choice, setChoice] = useState("legitimate");
+  const [note, setNote] = useState("");
+  const attention = TIER0_ATTENTION.includes(r.verdict);
+  const unproven = r.verdict === "held" && r.positive_control_ok === false;
+  return (
+    <div
+      className={`rounded-md border p-2.5 text-xs ${
+        attention
+          ? "border-red-500/30 bg-red-500/10"
+          : unproven || r.verdict === "flaky"
+            ? "border-amber-500/30 bg-amber-500/10"
+            : "border-border"
+      }`}
+    >
+      <div className="flex flex-wrap items-baseline gap-2">
+        <span className="font-mono font-semibold">{r.probe_id}</span>
+        <span className="font-medium">
+          {unproven ? "held, but unproven" : tier0VerdictLabel(r.verdict)}
+        </span>
+        <span className="text-muted-foreground">{r.title}</span>
+        <span className="ml-auto text-muted-foreground">
+          reward {r.reward ?? "none"}
+          {r.duration_sec != null ? ` · ${r.duration_sec}s` : ""}
+        </span>
+      </div>
+      {r.positive_control && (
+        <div className="mt-1 text-muted-foreground">
+          Control ({r.positive_control}): reward {r.positive_control_reward ?? "none"}
+          {r.positive_control_ok === true && " → shown to reach what it attacks"}
+          {r.positive_control_ok === false && " → the probe may never have reached it"}
+        </div>
+      )}
+      {(r.fault_results ?? []).length > 0 && (
+        <div className="mt-1 text-muted-foreground">
+          Fault checks:{" "}
+          {r.fault_results
+            .map(
+              (f) =>
+                `${f.mutant.replace("generic:drop-", "without ").replace("int8:", "")} → ${
+                  f.outcome === "fail_open"
+                    ? "FAILS OPEN (reward 1)"
+                    : f.outcome === "fail_closed"
+                      ? "reward 0"
+                      : "no result"
+                }`,
+            )
+            .join("; ")}
+        </div>
+      )}
+      {r.unsanitized && (
+        <div className="mt-1 text-muted-foreground">
+          With Harbor's sanitising off:{" "}
+          {r.unsanitized.timed_out
+            ? "verifier timed out (invalid reward)"
+            : `reward ${r.unsanitized.reward ?? "none"}`}
+          {r.unsanitized.verdict === "exploited"
+            ? " → the task does not defend itself"
+            : r.unsanitized.arrived
+              ? " → the task defends itself"
+              : ""}
+        </div>
+      )}
+      {(attention || unproven) && r.notes.length > 0 && (
+        <ul className="mt-1 list-disc space-y-0.5 pl-4">
+          {r.notes
+            .filter((n) => !n.includes("ctrf entries share a name"))
+            .map((n, i) => (
+              <li key={i}>{n}</li>
+            ))}
+        </ul>
+      )}
+      {ruling && (
+        <div className="mt-2 rounded border border-border bg-background/60 p-2">
+          Ruled <b>{RULINGS.find((x) => x.value === ruling.ruling)?.label ?? ruling.ruling}</b> by{" "}
+          {ruling.adjudicator} on {ruling.at.slice(0, 10)}
+          {ruling.note ? `: ${ruling.note}` : ""}
+        </div>
+      )}
+      {attention && (
+        <details className="mt-2">
+          <summary className="cursor-pointer text-muted-foreground">
+            {ruling ? "Change the ruling" : "Record a ruling"}
+          </summary>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <select
+              className="rounded-md border bg-background px-2 py-1"
+              value={choice}
+              onChange={(e) => setChoice(e.target.value)}
+            >
+              {RULINGS.map((x) => (
+                <option key={x.value} value={x.value}>
+                  {x.label}
+                </option>
+              ))}
+            </select>
+            <Input
+              className="h-8 w-44"
+              placeholder="Your name (required)"
+              value={adjudicator}
+              onChange={(e) => setAdjudicator(e.target.value)}
+            />
+            <Input
+              className="h-8 w-64"
+              placeholder="Why (optional)"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+            />
+            <Button
+              size="sm"
+              disabled={ruling_pending || !adjudicator.trim()}
+              onClick={() => onRule(r.probe_id, choice, note)}
+            >
+              Save
+            </Button>
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function Tier0View({
+  logs,
+  rulings,
+  adjudicator,
+  setAdjudicator,
+  onRule,
+  ruling,
+}: {
+  logs?: string;
+  rulings: Record<string, Tier0Ruling>;
+  adjudicator: string;
+  setAdjudicator: (v: string) => void;
+  onRule: (probe_id: string, ruling: string, note: string) => void;
+  ruling: boolean;
+}) {
+  const parsed = parseJson<Tier0>(logs);
+  if (!logs) return null;
+  if (!parsed) return <LogPanel logs={logs} title="Tier 0 output" />;
+  if (parsed.error) {
+    return (
+      <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs whitespace-pre-wrap">
+        {parsed.error}
+      </div>
+    );
+  }
+  if (parsed.skipped) {
+    return (
+      <div className="rounded-md border border-border p-2.5 text-xs text-muted-foreground">
+        Skipped: the probe harness cannot drive this task. {parsed.skipped}
+      </div>
+    );
+  }
+  const s = parsed.summary;
+  const results = parsed.results ?? [];
+  const running = !!parsed.progress && parsed.progress.done < parsed.progress.total;
+  const needs = results.filter(
+    (r) =>
+      TIER0_ATTENTION.includes(r.verdict) ||
+      r.verdict === "flaky" ||
+      (r.verdict === "held" && r.positive_control_ok === false),
+  );
+  const rest = results.filter((r) => !needs.includes(r));
+  const row = (r: Tier0ProbeResult) => (
+    <Tier0Row
+      key={r.probe_id}
+      r={r}
+      ruling={rulings[r.probe_id]}
+      adjudicator={adjudicator}
+      setAdjudicator={setAdjudicator}
+      onRule={onRule}
+      ruling_pending={ruling}
+    />
+  );
+  return (
+    <div className="space-y-2 text-sm">
+      {running && (
+        <div className="text-xs text-muted-foreground">
+          Probe {parsed.progress!.done} of {parsed.progress!.total} finished…
+        </div>
+      )}
+      {(parsed.selftest ?? []).length > 0 && (
+        <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs">
+          The probe suite failed its own check, so some results below cannot be trusted:
+          <ul className="mt-1 list-disc pl-4">
+            {parsed.selftest!.map((p, i) => (
+              <li key={i}>{p}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {s && (
+        <div className="text-xs text-muted-foreground">
+          {s.probes_run} probes: {s.held} held, {s.exploited} exploited
+          {s.fail_open > 0 && `, ${s.fail_open} fail open`}
+          {s.false_zero > 0 && `, ${s.false_zero} valid solution graded 0`}
+          {(s.relies_on_harbor ?? 0) > 0 && `, ${s.relies_on_harbor} rely on Harbor`}
+          {s.held_but_positive_control_failed.length > 0 &&
+            `, ${s.held_but_positive_control_failed.length} unproven`}
+          . Platform {parsed.platform}.
+          {s.needs_harbor_to_settle.length > 0 &&
+            ` ${s.needs_harbor_to_settle.join(", ")} could not be settled (needs a Harbor run).`}
+        </div>
+      )}
+      {s?.control_ok === true && (
+        <div className="text-xs text-emerald-600">
+          Control passed: the task's own solution scores 1 through this harness, so a 0 from an
+          attack is meaningful.
+        </div>
+      )}
+      {s?.control_ok === false && (
+        <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs">
+          Control failed: the task's own solution did not score 1 through this harness, so the
+          harness does not model this task faithfully. Treat every other result below as unreliable.
+        </div>
+      )}
+      {s?.control_ok == null && results.length > 0 && !running && (
+        <div className="text-xs text-amber-700 dark:text-amber-400">
+          No control probe ran, so a 0 from an attack cannot be checked against the task's own
+          solution.
+        </div>
+      )}
+      {needs.map(row)}
+      {rest.length > 0 && (
+        <details className="text-xs">
+          <summary className="cursor-pointer text-muted-foreground">
+            {rest.length} other probe{rest.length === 1 ? "" : "s"} (held, inconclusive, control)
+          </summary>
+          <div className="mt-2 space-y-2">{rest.map(row)}</div>
+        </details>
+      )}
+      {(parsed.replay ?? []).length > 0 && (
+        <div className="space-y-1 text-xs">
+          <div className="font-medium">Stored rollouts regraded through the replica</div>
+          {parsed.replay!.map((r, i) => (
+            <div
+              key={i}
+              className={`rounded-md border p-2 ${
+                ["harness_disagrees", "LOOSENED", "REGRESSION"].includes(r.verdict)
+                  ? "border-amber-500/30 bg-amber-500/10"
+                  : "border-border"
+              }`}
+            >
+              {r.kind} run from {r.source}: Harbor recorded {r.recorded ?? "none"}, replica gave{" "}
+              {r.replayed ?? "none"} →{" "}
+              <b>
+                {r.verdict === "reproduced"
+                  ? "reproduced"
+                  : r.verdict === "harness_disagrees"
+                    ? "replica disagrees with Harbor"
+                    : r.verdict === "LOOSENED"
+                      ? "LOOSENED: the task may have got easier"
+                      : r.verdict === "REGRESSION"
+                        ? "REGRESSION: a passing run now fails"
+                        : r.verdict}
+              </b>
+            </div>
+          ))}
+        </div>
+      )}
+      {parsed.comparison && (
+        <div className="space-y-1 text-xs">
+          <div className="font-medium">Compared with the previous upload of this task</div>
+          {!parsed.comparison.available ? (
+            <div className="text-muted-foreground">
+              The previous upload has no Tier 0 result to compare with.
+            </div>
+          ) : (
+            <>
+              <div className="text-muted-foreground">
+                {parsed.comparison.verifier_changed
+                  ? "tests/ changed since then."
+                  : "tests/ is identical, so any difference is noise or flakiness, not a fix."}{" "}
+                {parsed.comparison.unchanged_probes} probes gave the same result.
+              </div>
+              {parsed.comparison.changes.map((c) => (
+                <div
+                  key={c.probe_id}
+                  className={`rounded-md border p-2 ${
+                    c.kind === "regression"
+                      ? "border-red-500/30 bg-red-500/10"
+                      : c.kind === "fixed"
+                        ? "border-emerald-500/30 bg-emerald-500/10"
+                        : "border-border"
+                  }`}
+                >
+                  <span className="font-mono font-semibold">{c.probe_id}</span>{" "}
+                  {c.before ?? "not run"} → {c.after ?? "not run"} ({c.kind})
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function AnswerExposureView({ logs }: { logs?: string }) {

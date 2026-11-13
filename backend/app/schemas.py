@@ -255,6 +255,18 @@ class EdgeCasesResult(BaseModel):
     logs: str | None = None
 
 
+class Tier0Result(BaseModel):
+    """Tier 0 of the cheat-trial loop (services/tier0/): human-written static probes, no
+    agent and no model. Advisory. "failed" = something needs a human: an exploit, a verifier
+    that fails open, a valid solution graded 0, a failed control probe, or a probe that could
+    not run. `logs` is JSON: {task, platform, repeats, skipped, summary, results: [{probe_id,
+    title, verdict, reward, positive_control, positive_control_ok, fault_results, notes,
+    ...}], progress: {done, total}, images_removed}. `skipped` is a reason string when the
+    task is one the harness cannot drive."""
+    status: StageStatus
+    logs: str | None = None
+
+
 class AnswerExposureResult(BaseModel):
     """Answer-exposure scan (4.1 C.1, 4.0 item 61). Advisory: can the agent
     find the answer in the files it is given? "failed" = at least one warning.
@@ -336,6 +348,8 @@ class SubmissionSchema(BaseModel):
     tb_static_checks: TbStaticChecksResult
     ai_detection: AiDetectionResult
     answer_exposure: AnswerExposureResult
+    tier0: Tier0Result
+    tier0_decisions: dict[str, dict] = {}
     image_inventory: ImageInventoryResult
     fresh_build: FreshBuildResult
     checksum: ChecksumInfo

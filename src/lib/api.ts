@@ -282,6 +282,101 @@ export interface EdgeCases {
   in_progress?: boolean;
 }
 
+// Tier 0 (advisory): human-written static probes, no agent and no model. "failed" means
+// something needs a human: an exploit, a verifier that fails open, a valid solution graded 0,
+// a task that relies on Harbor, a failed control, a broken probe suite, a replay that
+// disagrees, or a probe that could not run.
+export interface Tier0Result {
+  status: StageStatus;
+  logs?: string;
+}
+export type Tier0Verdict =
+  | "held"
+  | "exploited"
+  | "fail_open"
+  | "false_zero"
+  | "relies_on_harbor"
+  | "valid_accepted"
+  | "control_ok"
+  | "control_failed"
+  | "flaky"
+  | "inconclusive"
+  | "infra_failed"
+  | "skipped"
+  | string;
+export interface Tier0ProbeResult {
+  probe_id: string;
+  flaw_class: string;
+  title: string;
+  verdict: Tier0Verdict;
+  reward: number | null;
+  positive_control: string | null;
+  positive_control_reward: number | null;
+  positive_control_ok: boolean | null;
+  fault_results: { mutant: string; reward: number | null; outcome: string }[];
+  unsanitized?: {
+    reward: number | null;
+    verdict: string;
+    timed_out: boolean;
+    arrived: boolean;
+  } | null;
+  needs_harbor: boolean;
+  notes: string[];
+  duration_sec: number | null;
+}
+export interface Tier0Replay {
+  key: string;
+  kind: string;
+  source: "this upload" | "earlier upload" | string;
+  recorded: number | null;
+  replayed: number | null;
+  verdict: string;
+  notes: string[];
+}
+export interface Tier0Comparison {
+  against: string;
+  available: boolean;
+  verifier_changed?: boolean;
+  unchanged_probes?: number;
+  changes: { probe_id: string; before: string | null; after: string | null; kind: string }[];
+}
+export interface Tier0Ruling {
+  ruling: "legitimate" | "exploit" | "accepted_risk" | "unsure" | string;
+  adjudicator: string;
+  note: string;
+  at: string;
+}
+export interface Tier0 {
+  task: string | null;
+  platform: string;
+  repeats: number;
+  skipped: string | null;
+  summary: {
+    probes_run: number;
+    held: number;
+    exploited: number;
+    fail_open: number;
+    false_zero: number;
+    relies_on_harbor?: number;
+    // null = no control probe ran; false = the task's own solution did not score 1 here
+    control_ok: boolean | null;
+    held_but_positive_control_failed: string[];
+    flaky_ids: string[];
+    needs_harbor_to_settle: string[];
+    replay_disagreements?: number;
+    loosened?: number;
+    regressed?: number;
+  } | null;
+  results: Tier0ProbeResult[];
+  progress?: { done: number; total: number };
+  images_removed?: number;
+  selftest?: string[];
+  replay?: Tier0Replay[];
+  comparison?: Tier0Comparison | null;
+  verifier_fingerprint?: string;
+  error?: string;
+}
+
 // Answer-exposure scan (advisory): can the agent find the answer in its files?
 export interface AnswerExposureResult {
   status: StageStatus;
@@ -532,6 +627,8 @@ export interface Submission {
   tb_static_checks: TbStaticChecksResult;
   ai_detection: AiDetectionResult;
   answer_exposure: AnswerExposureResult;
+  tier0: Tier0Result;
+  tier0_decisions?: Record<string, Tier0Ruling>;
   image_inventory: ImageInventoryResult;
   fresh_build: FreshBuildResult;
   checksum: ChecksumInfo;
@@ -659,6 +756,19 @@ export const api = {
       }`,
       { method: "POST" },
     ).then(handle<unknown>),
+  tier0: (id: string, repeats = 1, harbor = true) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/tier0?repeats=${repeats}&harbor=${harbor}`, {
+      method: "POST",
+    }).then(handle<unknown>),
+  tier0Decision: (
+    id: string,
+    body: { probe_id: string; ruling: string; adjudicator: string; note: string },
+  ) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/tier0-decision`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(handle<unknown>),
   answerExposure: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/answer-exposure`, { method: "POST" }).then(
       handle<unknown>,

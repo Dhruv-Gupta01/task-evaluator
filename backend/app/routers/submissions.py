@@ -565,6 +565,29 @@ async def trigger_answer_exposure(submission_id: str, db: Session = Depends(get_
     return {"status": "started"}
 
 
+@router.post("/submissions/{submission_id}/tier0", status_code=202)
+async def trigger_tier0(
+    submission_id: str, repeats: int = 1, harbor: bool = True, db: Session = Depends(get_db)
+) -> dict[str, str]:
+    """Tier 0 of the cheat-trial loop: human-written static probes, no agent and no model.
+    Needs Docker (builds the task's environment and verifier images, so the first run is
+    slow). `repeats` (1..3) runs each attack probe that many times and flags any whose result
+    changes. `harbor` (default on) also runs the probes that need a real Harbor Oracle trial
+    (G1), which takes a few minutes. Advisory; replaces an earlier Tier 0 result."""
+    if not 1 <= repeats <= 3:
+        raise HTTPException(status_code=400, detail="repeats must be between 1 and 3")
+    submission = db.get(Submission, submission_id)
+    if submission is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if submission.extracted_path is None:
+        raise HTTPException(status_code=400, detail="validate the submission first (files must be extracted)")
+    _queue_row(db, submission_id, "tier0_probes")
+    await task_queue.submit(
+        f"{submission_id}:tier0_probes", task_runner.run_tier0_stage(submission_id, repeats, harbor)
+    )
+    return {"status": "started"}
+
+
 @router.post("/submissions/{submission_id}/image-inventory", status_code=202)
 async def trigger_image_inventory(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
     """List the built image's files and package versions again (Build does it
@@ -644,6 +667,46 @@ def set_reviewer_decision(
     decisions = submission_service._reviewer_decisions(run)
     decisions[body.key] = {
         "decision": body.decision,
+        "note": body.note,
+        "at": datetime.now(UTC).isoformat(),
+    }
+    run.logs = json.dumps(decisions)
+    db.commit()
+    return decisions
+
+
+class Tier0Decision(BaseModel):
+    probe_id: str
+    ruling: str  # legitimate | exploit | accepted_risk | unsure
+    adjudicator: str
+    note: str = ""
+
+
+_TIER0_RULINGS = ("legitimate", "exploit", "accepted_risk", "unsure")
+
+
+@router.put("/submissions/{submission_id}/tier0-decision")
+def set_tier0_decision(submission_id: str, body: Tier0Decision, db: Session = Depends(get_db)) -> dict:
+    """Records a named person's ruling on a Tier 0 finding (protocol section 5: not every
+    successful probe is a cheat, and the verdict belongs in the record with who made it).
+    `legitimate` = a valid alternative the task should accept, `exploit` = a real hole,
+    `accepted_risk` = known and left alone. Kept with the submission; never changes a gate."""
+    if db.get(Submission, submission_id) is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if body.ruling not in _TIER0_RULINGS:
+        raise HTTPException(status_code=400, detail=f"ruling must be one of {', '.join(_TIER0_RULINGS)}")
+    if not body.adjudicator.strip():
+        raise HTTPException(status_code=400, detail="name the person making the ruling")
+    if not body.probe_id or len(body.probe_id) > 40 or len(body.note) > 2000 or len(body.adjudicator) > 200:
+        raise HTTPException(status_code=400, detail="probe_id, adjudicator or note is empty or too long")
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="tier0_decision", run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind="tier0_decision", run_index=0, status="passed")
+        db.add(run)
+    decisions = submission_service._reviewer_decisions(run)
+    decisions[body.probe_id] = {
+        "ruling": body.ruling,
+        "adjudicator": body.adjudicator.strip(),
         "note": body.note,
         "at": datetime.now(UTC).isoformat(),
     }
@@ -824,6 +887,12 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
             "status": schema.answer_exposure.status,
             "not_run": schema.answer_exposure.status == "not-run",
             "report": _json_or_raw(schema.answer_exposure.logs),
+        },
+        "tier0": {
+            "status": schema.tier0.status,
+            "not_run": schema.tier0.status == "not-run",
+            "report": _json_or_raw(schema.tier0.logs),
+            "rulings": schema.tier0_decisions,
         },
         "fresh_build": {
             "status": schema.fresh_build.status,
