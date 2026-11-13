@@ -11,6 +11,7 @@ from app.services.task_config import TaskConfig
 from app.schemas import (
     AgentTrialsResult,
     AnswerExposureResult,
+    Tier0Result,
     BuildResult,
     ChecksumInfo,
     CheatTrialResult,
@@ -400,6 +401,12 @@ def _edge_cases_result(run: Run | None) -> EdgeCasesResult:
     return EdgeCasesResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
 
 
+def _tier0_result(run: Run | None) -> Tier0Result:
+    if run is None:
+        return Tier0Result(status="not-run", logs=None)
+    return Tier0Result(status=run.status, logs=run.logs)  # type: ignore[arg-type]
+
+
 def _answer_exposure_result(run: Run | None) -> AnswerExposureResult:
     if run is None:
         return AnswerExposureResult(status="not-run", logs=None)
@@ -471,6 +478,8 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         tb_static_checks=_tb_static_checks_result(_get_run(submission, "tb_static_checks")),
         ai_detection=_ai_detection_result(_get_run(submission, "ai_detection")),
         answer_exposure=_answer_exposure_result(_get_run(submission, "answer_exposure")),
+        tier0=_tier0_result(_get_run(submission, "tier0_probes")),
+        tier0_decisions=_reviewer_decisions(_get_run(submission, "tier0_decision")),
         image_inventory=_image_inventory_result(_get_run(submission, "image_inventory")),
         fresh_build=_fresh_build_result(_get_run(submission, "fresh_build")),
         checksum=_checksum_info(submission),
@@ -499,6 +508,33 @@ def to_list_item(submission: Submission) -> SubmissionListItem:
 
 def _fmt_pct(x: float | None) -> str:
     return f"{x * 100:.1f}%" if x is not None else "not run yet"
+
+
+def _tier0_summary_line(t: Tier0Result) -> str:
+    line = f"- Tier 0 probes: {_fmt_status(t.status)}"
+    if not t.logs:
+        return line
+    try:
+        doc = json.loads(t.logs)
+    except ValueError:
+        return line
+    if doc.get("skipped"):
+        return line + f" (skipped: {doc['skipped']})"
+    s = doc.get("summary") or {}
+    if not s:
+        return line
+    bits = [f"{s.get('held', 0)} held", f"{s.get('exploited', 0)} exploited"]
+    if s.get("fail_open"):
+        bits.append(f"{s['fail_open']} fail open")
+    if s.get("false_zero"):
+        bits.append(f"{s['false_zero']} valid solution graded 0")
+    if s.get("held_but_positive_control_failed"):
+        bits.append(f"{len(s['held_but_positive_control_failed'])} unproven")
+    if s.get("control_ok") is False:
+        bits.append("CONTROL FAILED: harness does not model this task")
+    elif s.get("control_ok"):
+        bits.append("control ok")
+    return line + f" ({', '.join(bits)})"
 
 
 def _fmt_status(status: str) -> str:
@@ -799,6 +835,7 @@ def build_summary_markdown(
         + (f" ({schema.cheat_trial.summary})" if schema.cheat_trial.summary else ""),
         f"- Answer Exposure: {_fmt_status(schema.answer_exposure.status)}"
         + (f" ({_json_field(schema.answer_exposure.logs, 'warn_count')} warning(s))" if schema.answer_exposure.logs else ""),
+        _tier0_summary_line(schema.tier0),
         f"- Fresh build (no cache, Oracle): {_fmt_status(schema.fresh_build.status)}",
         f"- Failure Analysis: {_fmt_status(schema.failure_analysis.status)}",
         f"- Review Report: {_fmt_status(schema.review_report.status)}",

@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 import shutil
+import threading
 import traceback
 import uuid
 from contextlib import contextmanager
@@ -35,6 +36,11 @@ from app.services.llm import factory as llm_factory
 from app.services.llm import usage as llm_usage
 from app.services.llm.base import Message
 from app.services.task_config import TaskConfig
+from app.services.tier0 import docker_runner as tier0_docker
+from app.services.tier0 import probes as tier0_probes
+from app.services.tier0 import record as tier0_record
+from app.services.tier0 import runner as tier0_runner
+from app.services.tier0 import taskspec as tier0_taskspec
 
 settings = get_settings()
 
@@ -475,6 +481,275 @@ async def run_answer_exposure_stage(submission_id: str) -> None:
         run.status = "failed"
         run.reward = None
         run.logs = json.dumps({"error": traceback.format_exc(), "findings": []})
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    finally:
+        db.close()
+
+
+# Verdicts that need a human to look at the task (or at the run). `held` with a failed
+# positive control is listed too: that probe never reached its defence, so it proves nothing.
+_TIER0_ATTENTION = (
+    "exploited", "fail_open", "false_zero", "control_failed", "infra_failed", "relies_on_harbor",
+)
+_TIER0_BAD = set(_TIER0_ATTENTION) - {"infra_failed"}
+
+
+def _tier0_result_dict(res) -> dict:
+    from dataclasses import asdict
+    return asdict(res)
+
+
+def _previous_upload(db, submission: Submission) -> Submission | None:
+    """The latest earlier upload of the same task name, as the Changes banner picks it."""
+    return (
+        db.query(Submission)
+        .filter(
+            Submission.task_name == submission.task_name,
+            Submission.id != submission.id,
+            Submission.uploaded_at < submission.uploaded_at,
+            Submission.extracted_path.is_not(None),
+        )
+        .order_by(Submission.uploaded_at.desc())
+        .first()
+    )
+
+
+def _tier0_compare(db, previous: Submission | None, results: list[dict], fingerprint: str) -> dict | None:
+    """Regression gate (protocol section 5): the same probes against the previous upload's
+    result. A probe that now fails where it held is a regression; one that held where it
+    failed is fixed. `verifier_changed` says whether tests/ differs at all, because with an
+    unchanged verifier any difference is noise or flakiness, not an effect of a fix."""
+    if previous is None:
+        return None
+    run = db.query(Run).filter_by(submission_id=previous.id, kind="tier0_probes", run_index=0).one_or_none()
+    if run is None or not run.logs:
+        return {"against": previous.id, "available": False, "changes": []}
+    try:
+        old = json.loads(run.logs)
+    except ValueError:
+        return {"against": previous.id, "available": False, "changes": []}
+    before = {r["probe_id"]: r["verdict"] for r in old.get("results", [])}
+    after = {r["probe_id"]: r["verdict"] for r in results}
+    changes = []
+    for pid in sorted(set(before) | set(after)):
+        b, a = before.get(pid), after.get(pid)
+        if b == a:
+            continue
+        if b in ("inconclusive", "skipped") or a in ("inconclusive", "skipped"):
+            kind = "not_comparable"  # e.g. G1 run through Harbor one time and not the other
+        elif b is None:
+            kind = "new"
+        elif a is None:
+            kind = "gone"
+        elif a in _TIER0_BAD and b not in _TIER0_BAD:
+            kind = "regression"
+        elif b in _TIER0_BAD and a not in _TIER0_BAD:
+            kind = "fixed"
+        else:
+            kind = "changed"
+        changes.append({"probe_id": pid, "before": b, "after": a, "kind": kind})
+    return {
+        "against": previous.id,
+        "available": True,
+        "verifier_changed": old.get("verifier_fingerprint") != fingerprint,
+        "unchanged_probes": sum(1 for pid in after if before.get(pid) == after[pid]),
+        "changes": changes,
+    }
+
+
+async def _tier0_harbor_probe(submission: Submission, spec, probe, config) -> dict:
+    """Probes whose answer depends on Harbor itself (G1: pre-written reward files). The
+    task is copied, solution/ is replaced by a solve.sh that is the probe script, and a real
+    Harbor Oracle trial is run, so Harbor's own artifact handling, reward-file deletion and
+    verifier start-up decide the reward. reward 1 = exploited; reward below 1 = held."""
+    import shlex
+    from dataclasses import asdict
+
+    from app.services.tier0 import record as rec
+
+    res = rec.ProbeResult(
+        probe_id=probe.pid, task=spec.slug, flaw_class=probe.flaw, title=probe.title, tier=probe.tier,
+        verdict="inconclusive", expected_reward=probe.expect_reward, needs_harbor=False,
+    )
+    base = settings.storage_dir / "submissions" / submission.id / "runs" / "tier0_harbor"
+    started = datetime.now(UTC)
+    try:
+        if shutil.which("harbor") is None:
+            res.notes = ["the harbor CLI is not on PATH, so this probe could not run"]
+            return asdict(res)
+        copy_root = base / f"{probe.pid.lower()}-src"
+        if copy_root.exists():
+            shutil.rmtree(copy_root)
+        shutil.copytree(Path(submission.extracted_path), copy_root, symlinks=True)
+        sol = copy_root / "solution"
+        if sol.exists():
+            shutil.rmtree(sol)
+        sol.mkdir()
+        script = "#!/bin/bash\nset -- " + " ".join(shlex.quote(a) for a in spec.artifacts) + "\n" + probe.agent_script
+        (sol / "solve.sh").write_text(script, encoding="utf-8")
+        timeout = (
+            config.environment.build_timeout_sec + 600 + config.verifier.timeout_sec + _HARBOR_TIMEOUT_BUFFER_SEC
+        )
+        outcome = await harbor_runner.run_single(
+            copy_root, "oracle", base / probe.pid.lower(), f"tier0-{probe.pid.lower()}-{uuid.uuid4().hex[:8]}", timeout
+        )
+        shutil.rmtree(copy_root, ignore_errors=True)
+        res.reward = outcome.reward
+        if outcome.reward is None:
+            res.verdict = "inconclusive"
+            res.notes = ["Harbor produced no reward for this trial: " + (outcome.logs or "")[-300:]]
+        elif outcome.reward >= 1.0:
+            res.verdict = "exploited"
+            res.notes = ["a real Harbor trial scored 1 for an agent that only pre-wrote reward files"]
+        else:
+            res.verdict = "held"
+            res.notes = [
+                f"a real Harbor Oracle trial whose solve.sh only pre-wrote /logs/verifier/reward.txt and "
+                f"reward.json scored {outcome.reward}: Harbor's own reward handling is not fooled"
+            ]
+    except Exception as exc:
+        res.verdict = "infra_failed"
+        res.notes = [f"{type(exc).__name__}: {exc}"]
+    res.duration_sec = round((datetime.now(UTC) - started).total_seconds(), 1)
+    return asdict(res)
+
+
+async def run_tier0_stage(submission_id: str, repeats: int = 1, harbor: bool = True) -> None:
+    """Tier 0 of the cheat-trial loop (services/tier0/): human-written static probes. No agent
+    and no model. Each probe builds the files an exploit would leave, the verifier is run on
+    them (a replica of Harbor's separate-verifier contract, in Docker), and the reward is read.
+    Mutants say whether a reward of 0 means a defence held or the probe was broken, a control
+    probe (the task's own solution) says whether the harness models this task at all, a second
+    pass with Harbor's sanitising off says whether the task defends itself, and `harbor` adds
+    probes judged by a real Harbor run (G1). Stored rollouts are regraded (replay), and the
+    result is compared with the previous upload of the same task.
+    Advisory: "failed" = something needs a human (an exploit, a verifier that fails open, a
+    valid solution graded 0, a failed control, a task that relies on Harbor, a probe that could
+    not run, or a broken suite). A task the harness cannot drive (shared verifier, `main`
+    built by compose) is "passed" with `skipped` set, like AI Detection without a key.
+    `logs` is JSON: {task, platform, repeats, skipped, summary, results, progress,
+    images_removed, selftest, replay, comparison, verifier_fingerprint}."""
+    from app.services.tier0 import replay as tier0_replay
+    from app.services.tier0 import selftest as tier0_selftest
+
+    db = SessionLocal()
+    stop = threading.Event()
+    spec = None
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+        run = _get_or_create_run(db, submission_id, "tier0_probes", 0)
+        run.status = "running"
+        run.reward = None
+        run.logs = None
+        run.started_at = datetime.now(UTC)
+        db.commit()
+
+        base = {"platform": settings.docker_platform, "repeats": repeats, "skipped": None}
+        try:
+            spec = tier0_taskspec.load(submission.extracted_path)
+        except (ValueError, FileNotFoundError) as exc:
+            run.logs = json.dumps({**base, "task": None, "skipped": str(exc), "summary": None, "results": []})
+            run.status, run.reward = "passed", 1
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+            return
+        selected = tier0_probes.for_task(spec.slug)
+        problems = tier0_selftest.run(spec)  # mutant anchors, control wiring, script syntax
+        fingerprint = tier0_replay.verifier_fingerprint(spec)
+        harbor_probes = [p for p in selected if p.harbor_probe]
+        docker_probes = [p for p in selected if not (p.harbor_probe and harbor)]
+
+        def on_result(i: int, n: int, res: tier0_record.ProbeResult) -> None:
+            # Runs in the worker thread, so it uses its own session.
+            part = SessionLocal()
+            try:
+                row = _get_or_create_run(part, submission_id, "tier0_probes", 0)
+                doc = json.loads(row.logs) if row.logs else {"results": []}
+                doc["results"].append(_tier0_result_dict(res))
+                doc["progress"] = {"done": i, "total": n + (len(harbor_probes) if harbor else 0)}
+                row.logs = json.dumps(doc)
+                part.commit()
+            finally:
+                part.close()
+
+        run.logs = json.dumps(
+            {**base, "task": spec.slug, "results": [], "selftest": problems,
+             "progress": {"done": 0, "total": len(selected)}}
+        )
+        db.commit()
+        tier0_docker.SUBMISSION_LABEL.set(submission_id)  # copied into the worker thread
+        opts = tier0_runner.Options(platform=settings.docker_platform, sanitize=True, repeats=repeats)
+        try:
+            results = await asyncio.to_thread(
+                tier0_runner.run_suite, spec, docker_probes, opts, on_result, stop.is_set
+            )
+        except asyncio.CancelledError:
+            stop.set()  # the worker finishes its current probe, then stops
+            raise
+        rows = [_tier0_result_dict(r) for r in results]
+
+        if harbor and harbor_probes:
+            config = _get_task_config(submission)
+            for hp in harbor_probes:
+                rows.append(await _tier0_harbor_probe(submission, spec, hp, config))
+
+        # Replay: regrade stored rollouts through the replica. This upload's own are a check
+        # that the replica agrees with Harbor; an earlier upload's show what a verifier
+        # change did (LOOSENED = the task may have got easier).
+        sub_dir = settings.storage_dir / "submissions"
+        items = [(b, k, "this upload") for b, k in tier0_replay.collect(sub_dir / submission_id, spec, limit=2)]
+        previous = _previous_upload(db, submission)
+        if previous is not None:
+            items += [(b, k, "earlier upload") for b, k in tier0_replay.collect(sub_dir / previous.id, spec, limit=2)]
+        replays = (
+            await asyncio.to_thread(tier0_runner.run_replays, spec, items, opts, stop.is_set) if items else []
+        )
+
+        summary = tier0_record.summarise(results)
+        # The summary counts come from the Docker results; fold the Harbor probes in.
+        for r in rows:
+            if r["probe_id"] in {p.pid for p in harbor_probes} and r["verdict"] == "exploited":
+                summary["exploited"] += 1
+                summary["exploited_ids"].append(r["probe_id"])
+        summary["probes_run"] = len(rows)
+        summary["needs_harbor_to_settle"] = [
+            r["probe_id"] for r in rows if r["probe_id"] in {p.pid for p in harbor_probes} and r["verdict"] == "inconclusive"
+        ]
+        summary["replay_disagreements"] = sum(1 for r in replays if r["verdict"] == "harness_disagrees")
+        summary["loosened"] = sum(1 for r in replays if r["verdict"] == "LOOSENED")
+        summary["regressed"] = sum(1 for r in replays if r["verdict"] == "REGRESSION")
+        comparison = _tier0_compare(db, previous, rows, fingerprint)
+        attention = (
+            [r for r in rows if r["verdict"] in _TIER0_ATTENTION]
+            or summary["held_but_positive_control_failed"]
+            or problems
+            or summary["replay_disagreements"]
+            or summary["loosened"]
+            or summary["regressed"]
+        )
+        removed = await asyncio.to_thread(tier0_docker.cleanup_images, spec)
+        run.logs = json.dumps(
+            {
+                **base, "task": spec.slug, "summary": summary, "results": rows,
+                "progress": {"done": len(rows), "total": len(rows)},
+                "images_removed": removed, "selftest": problems, "replay": replays,
+                "comparison": comparison, "verifier_fingerprint": fingerprint,
+            }
+        )
+        run.status = "failed" if attention else "passed"
+        run.reward = 0 if attention else 1
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        run = _get_or_create_run(db, submission_id, "tier0_probes", 0)
+        run.status = "failed"
+        run.reward = None
+        run.logs = json.dumps({"error": traceback.format_exc(), "results": []})
         run.finished_at = datetime.now(UTC)
         db.commit()
     finally:
