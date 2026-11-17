@@ -414,8 +414,23 @@ async def trigger_cheat_trial(
     _raise_if_over_budget(db, budget.exceeded_message(db))
     _require_built_submission(submission_id, db)
 
-    db.query(Run).filter_by(submission_id=submission_id, kind="cheat_trial").delete()
-    for run_index in range(n):
+    # Each tier's evidence is kept (CK-I needs tier 1 and tier 2 side by side): a new run
+    # replaces only the earlier trials of its own tier, plus unfinished ones (the new job
+    # cancels them), and is appended after the rest.
+    tier = task_runner.CHEAT_TIERS.get(cheat_prompt, "2")
+    kept = []
+    for old in db.query(Run).filter_by(submission_id=submission_id, kind="cheat_trial").all():
+        try:
+            old_tier = str((json.loads(old.logs) or {}).get("tier") or "2") if old.logs else None
+        except ValueError:
+            old_tier = None
+        if old_tier is None or old_tier == tier:
+            db.delete(old)
+        else:
+            kept.append(old.run_index)
+    db.flush()  # the deletes must land before rows reuse their run_index
+    first = max(kept) + 1 if kept else 0
+    for run_index in range(first, first + n):
         db.add(Run(submission_id=submission_id, kind="cheat_trial", run_index=run_index, status="pending"))
     db.commit()
 

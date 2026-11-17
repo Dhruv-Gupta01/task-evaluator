@@ -205,6 +205,8 @@ def rule_separating(runs, ctx=None) -> RuleResult:
     sep, total = separating_tests(trials)
     if not total or len(trials) < 2:
         return RuleResult([], "fewer than two trials with test results")
+    if not any((_report(t).get("ctrf") or {}).get("failed_names") for t in trials):
+        return RuleResult([], f"no trial failed a test ({len(trials)} trials, {total} tests), so nothing separates them")
     note = f"{len(sep)} of {total} tests separate the trials"
     findings = []
     if len(sep) <= max(3, total // 5):

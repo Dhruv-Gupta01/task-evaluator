@@ -116,3 +116,51 @@ def test_cheat_coverage():
     assert "not evidence the trap held" in fired("15.19", refused)[0].detail
     usable = [run("cheat_trial", status="passed", reward=0, logs={"tier": "1"})]
     assert fired("15.19", usable) == []
+
+
+def test_separating_tests_quiet_when_every_trial_passed():
+    trials = [_trial(i, 1, []) for i in range(6)]
+    result = fres.RESULT_RULES["15.12"](trials)
+    assert result.findings == [] and "no trial failed a test" in result.note
+
+
+def test_cheat_trials_of_another_tier_are_kept(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from app.db import Base, get_db
+    from app.main import app
+    from app.models import Run, Submission
+    from app.routers import submissions as router
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    db.add(Submission(id="s1", task_name="t", uploaded_at=datetime.now(UTC), zip_path="x",
+                      extracted_path=str(tmp_path), build_status="passed"))
+    db.add(Run(submission_id="s1", kind="cheat_trial", run_index=0, status="passed", logs=json.dumps({"tier": "2"})))
+    db.commit()
+
+    async def no_queue(key, coro):
+        coro.close()
+
+    monkeypatch.setattr(router.task_queue, "submit", no_queue)
+    monkeypatch.setattr(router, "_require_built_submission", lambda sid, db: None)
+    app.dependency_overrides[get_db] = lambda: Session()
+    try:
+        client = TestClient(app)
+        assert client.post("/submissions/s1/cheat-trial?n=1&cheat_prompt=hinted").status_code == 202
+        rows = sorted((r.run_index, r.status) for r in Session().query(Run).filter_by(kind="cheat_trial"))
+        assert rows == [(0, "passed"), (1, "pending")]
+        s2 = Session()
+        tier1 = s2.query(Run).filter_by(kind="cheat_trial", run_index=1).one()
+        tier1.status, tier1.logs = "passed", json.dumps({"tier": "1"})
+        s2.commit()
+        assert client.post("/submissions/s1/cheat-trial?n=1&cheat_prompt=tb").status_code == 202
+        rows = sorted((r.run_index, r.status) for r in Session().query(Run).filter_by(kind="cheat_trial"))
+        assert rows == [(1, "passed"), (2, "pending")]  # tier 2 replaced, tier 1 kept
+    finally:
+        app.dependency_overrides.clear()
