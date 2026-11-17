@@ -173,6 +173,13 @@ image per submission. Clean up with `docker image prune -a` and by deleting old 
   compares the vendored checks with upstream. `log_issue.py` appends reviewed issues to the
   author's Google Sheet and you can ignore it.
 
+### Flags
+
+The Flags panel at the top of a submission runs the Item 15 rules that only read the task
+files (14 of 37 so far; the rest need probes, runs or saved results and come with later
+batches). A Blocker stays open until a named person accepts or disputes it with a reason.
+Rulings are kept when the checks run again, and the whole record goes into the evidence file.
+
 ## 7. Known issues and limits
 
 Read these before relying on the platform.

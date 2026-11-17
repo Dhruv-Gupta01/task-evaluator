@@ -11,9 +11,9 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
-from app.models import LlmSpend, Run, Submission
+from app.models import Flag, LlmSpend, Run, Submission
 from app.schemas import SubmissionListItem, SubmissionSchema, UploadResponse
-from app.services import budget, redaction, submission_diff, submission_service, task_runner
+from app.services import budget, flags, redaction, submission_diff, submission_service, task_runner
 from app.workers import task_queue
 
 router = APIRouter()
@@ -653,6 +653,46 @@ def set_reviewer_decision(
     return decisions
 
 
+class FlagRuling(BaseModel):
+    status: str  # open | accepted | disputed
+    by: str = ""
+    reason: str = ""
+
+
+@router.post("/submissions/{submission_id}/flags")
+def run_flag_checks(submission_id: str, db: Session = Depends(get_db)) -> dict:
+    """Runs the static Flag rules (Item 15) on the extracted task: plain code, no Docker,
+    no LLM, a second or two. Rulings on flags found again are kept."""
+    submission = db.get(Submission, submission_id)
+    if submission is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if submission.extracted_path is None:
+        raise HTTPException(status_code=400, detail="validate the submission first (files must be extracted)")
+    return flags.run_static(db, submission)
+
+
+@router.get("/submissions/{submission_id}/flags")
+def get_flags(submission_id: str, db: Session = Depends(get_db)) -> dict:
+    if db.get(Submission, submission_id) is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    return flags.record(db, submission_id)
+
+
+@router.put("/submissions/{submission_id}/flags/{flag_id}")
+def rule_on_flag(submission_id: str, flag_id: int, body: FlagRuling, db: Session = Depends(get_db)) -> dict:
+    """A person's ruling on one flag: accepted or disputed (name and reason required) or open again."""
+    flag = db.get(Flag, flag_id)
+    if flag is None or flag.submission_id != submission_id:
+        raise HTTPException(status_code=404, detail="flag not found")
+    if len(body.by) > 200 or len(body.reason) > 2000:
+        raise HTTPException(status_code=400, detail="name or reason is too long")
+    try:
+        flags.set_status(db, flag, body.status, body.by, body.reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return flags.record(db, submission_id)
+
+
 @router.post("/submissions/{submission_id}/static-checks", status_code=202)
 async def trigger_static_checks(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
     """Mechanical, LLM-free checks over instruction.md/test.sh/Dockerfile/zip
@@ -838,6 +878,8 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
             "report": _json_or_raw(schema.image_inventory.logs),
         },
         "cost": cost_report,
+        # The Flag record block: every flag, its ruling and history, and which rules ran.
+        "flags": flags.record(db, submission_id),
         "summary_markdown": submission_service.build_summary_markdown(
             schema, total_cost_usd, cost_report
         ),

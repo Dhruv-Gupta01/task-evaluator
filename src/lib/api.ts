@@ -456,6 +456,51 @@ export interface TbCheckFinding {
   skipped?: boolean;
 }
 
+// The Flag system (Item 15, N15): GET/POST /submissions/{id}/flags return this record.
+export type FlagStatus = "open" | "accepted" | "disputed";
+export interface FlagItem {
+  id: number;
+  rule: string; // "15.2"
+  check: string; // "CK-B"
+  severity: "blocker" | "advisory";
+  title: string;
+  detail: string;
+  evidence: string[];
+  // false: the latest run no longer finds it (the ruling is kept)
+  present: boolean;
+  // set when the platform can show the finding is probably wrong
+  suggested_status: FlagStatus | null;
+  status: FlagStatus;
+  status_by: string | null;
+  status_reason: string | null;
+  status_at: string | null;
+  history: { status: FlagStatus; from: FlagStatus; by: string; reason: string; at: string }[];
+  first_seen: string;
+  last_seen: string;
+}
+export interface FlagRuleInfo {
+  id: string;
+  check: string;
+  title: string;
+  severity: "blocker" | "advisory";
+  method: "static" | "probe" | "result";
+  batch: number;
+  ran: boolean;
+  note: string | null;
+}
+export interface FlagRecord {
+  last_run: string | null;
+  counts: {
+    open_blockers: number;
+    open_advisories: number;
+    accepted: number;
+    disputed: number;
+    no_longer_found: number;
+  };
+  flags: FlagItem[];
+  rules: FlagRuleInfo[];
+}
+
 // Where a vendored Terminal-Bench file set comes from, read from its PROVENANCE.md (K12).
 // `stale` is set once the upstream commit is older than VENDOR_STALE_DAYS.
 export interface VendorInfo {
@@ -697,6 +742,20 @@ export const api = {
     ),
   changes: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/changes`).then(handle<SubmissionChanges>),
+  flags: (id: string) => fetch(`${API_BASE_URL}/submissions/${id}/flags`).then(handle<FlagRecord>),
+  runFlags: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/flags`, { method: "POST" }).then(handle<FlagRecord>),
+  // accepted and disputed need a name and a reason; open needs a name
+  ruleOnFlag: (
+    id: string,
+    flagId: number,
+    body: { status: FlagStatus; by: string; reason: string },
+  ) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/flags/${flagId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(handle<FlagRecord>),
   setReviewerDecision: (id: string, body: { key: string } & ReviewerDecision) =>
     fetch(`${API_BASE_URL}/submissions/${id}/reviewer-decision`, {
       method: "PUT",

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -93,3 +93,31 @@ class LlmSpend(Base):
     # Per-unit billing (GPTZero is per word, not per token).
     unit: Mapped[str | None] = mapped_column(String, nullable=True)
     unit_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class Flag(Base):
+    """One Flag rule (Item 15) that fired on a submission. A person rules on it (status) and
+    the platform records whether the latest run still finds it (present). One row per
+    rule + key, so a re-run updates the row and keeps the ruling."""
+
+    __tablename__ = "flags"
+    __table_args__ = (UniqueConstraint("submission_id", "fingerprint"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    submission_id: Mapped[str] = mapped_column(ForeignKey("submissions.id"), index=True)
+    rule: Mapped[str] = mapped_column(String)  # "15.2"
+    check: Mapped[str] = mapped_column(String)  # "CK-B"
+    severity: Mapped[str] = mapped_column(String)  # blocker | advisory
+    title: Mapped[str] = mapped_column(String)
+    detail: Mapped[str] = mapped_column(Text)
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    fingerprint: Mapped[str] = mapped_column(String)  # rule + key
+    present: Mapped[bool] = mapped_column(Boolean, default=True)  # found by the latest run
+    suggested_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="open")  # open | accepted | disputed
+    status_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    history_json: Mapped[str] = mapped_column(Text, default="[]")
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))

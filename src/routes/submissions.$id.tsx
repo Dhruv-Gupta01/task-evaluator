@@ -35,6 +35,7 @@ import {
 } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogPanel } from "@/components/LogPanel";
+import { FlagsPanel } from "@/components/FlagsPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -430,6 +431,8 @@ function SubmissionDetail() {
           </span>
         </div>
       )}
+
+      <FlagsPanel id={id} />
 
       <div className="grid gap-4 md:grid-cols-2">
         <div className="md:col-span-2">
