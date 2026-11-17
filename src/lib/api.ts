@@ -488,8 +488,19 @@ export interface FlagRuleInfo {
   ran: boolean;
   note: string | null;
 }
+export interface VersionCompare {
+  against: string;
+  changed: string[];
+  suggested_class: "patch" | "minor" | "major" | null;
+  declared_class: "patch" | "minor" | "major" | "none" | null;
+  old_version: string | null;
+  new_version: string | null;
+  redo: string;
+  locked_changes: string[];
+}
 export interface FlagRecord {
   last_run: string | null;
+  version?: VersionCompare | null;
   counts: {
     open_blockers: number;
     open_advisories: number;

@@ -89,6 +89,15 @@ export function FlagsPanel({ id }: { id: string }) {
         </div>
       )}
 
+      {data?.version && (
+        <div className="mt-2 rounded-md border border-border bg-muted/40 p-2.5 text-xs">
+          Version against the earlier upload {data.version.against.slice(0, 8)}:{" "}
+          {data.version.old_version ?? "none"} → {data.version.new_version ?? "none"}, declared{" "}
+          {data.version.declared_class ?? "unknown"}, the {data.version.changed.length} changed
+          file(s) call for {data.version.suggested_class ?? "nothing"}. {data.version.redo}
+        </div>
+      )}
+
       <div className="mt-3 space-y-2">
         {live.map((f) => (
           <FlagRow key={f.id} id={id} flag={f} name={name} onRecord={setRecord} />

@@ -22,6 +22,7 @@ artifacts = ["/app/out.json"]
 
 [task]
 name = "terminal-bench/fixture"
+version = "{version}"
 
 [metadata]
 author_name = "A"
@@ -61,11 +62,12 @@ def make_task(
     verifier_timeout: float = 600.0,
     verifier_user: str = "",
     files: dict[str, str] | None = None,
+    version: str = "1.0.0",
 ) -> Path:
     for sub in ("environment", "tests", "solution"):
         (root / sub).mkdir(parents=True, exist_ok=True)
     (root / "task.toml").write_text(TOML.format(
-        canary=canary, github=github, verifier_timeout=verifier_timeout,
+        canary=canary, github=github, verifier_timeout=verifier_timeout, version=version,
         verifier_user=f'user = "{verifier_user}"\n' if verifier_user else "",
     ))
     (root / "instruction.md").write_text(f"<!-- harbor-canary GUID {canary} -->\n{instruction}")
@@ -86,7 +88,7 @@ def test_catalogue_has_37_rules_in_11_checks():
     assert list(fr.RULES) == [f"15.{i}" for i in range(1, 38)]
     assert len({r.check for r in fr.RULES.values()}) == 11
     for rule_id in fr.STATIC_RULES:
-        assert fr.RULES[rule_id].method == "static" and fr.RULES[rule_id].batch == 2
+        assert fr.RULES[rule_id].method == "static" and fr.RULES[rule_id].batch in (2, 3)
 
 
 PSQL = 'import subprocess\ndef q(sql):\n    return subprocess.run(["psql", "-c", sql])\n'

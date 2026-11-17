@@ -29,6 +29,21 @@ def _other_canaries(db: Session, submission: Submission) -> dict[str, list[str]]
     return out
 
 
+def previous_upload(db: Session, submission: Submission) -> Submission | None:
+    """The latest earlier upload of the same task (what versioning compares against)."""
+    return (
+        db.query(Submission)
+        .filter(
+            Submission.task_name == submission.task_name,
+            Submission.id != submission.id,
+            Submission.uploaded_at < submission.uploaded_at,
+            Submission.extracted_path.is_not(None),
+        )
+        .order_by(Submission.uploaded_at.desc())
+        .first()
+    )
+
+
 def _rubric_results(db: Session, submission_id: str) -> list[dict] | None:
     run = db.query(Run).filter_by(submission_id=submission_id, kind="rubric_check").first()
     try:
@@ -37,7 +52,9 @@ def _rubric_results(db: Session, submission_id: str) -> list[dict] | None:
         return None
 
 
-def _record_run(db: Session, submission_id: str, notes: dict, now: datetime, open_blockers: int) -> None:
+def _record_run(
+    db: Session, submission_id: str, notes: dict, now: datetime, open_blockers: int, version: dict | None = None
+) -> None:
     run = db.query(Run).filter_by(submission_id=submission_id, kind="flags", run_index=0).one_or_none()
     if run is None:
         run = Run(submission_id=submission_id, kind="flags", run_index=0)
@@ -45,16 +62,18 @@ def _record_run(db: Session, submission_id: str, notes: dict, now: datetime, ope
     run.status = "failed" if open_blockers else "passed"
     run.started_at = run.started_at or now
     run.finished_at = now
-    run.logs = json.dumps({"notes": notes, "at": now.isoformat()})
+    run.logs = json.dumps({"notes": notes, "at": now.isoformat(), "version": version})
 
 
 def run_static(db: Session, submission: Submission) -> dict:
     """Runs every static rule on the extracted task and merges the findings into the flags table."""
     now = datetime.now(UTC)
+    earlier = previous_upload(db, submission)
     ctx = flag_rules.load_context(
         Path(submission.extracted_path),
         other_canaries=_other_canaries(db, submission),
         rubric_results=_rubric_results(db, submission.id),
+        previous_root=Path(earlier.extracted_path) if earlier else None,
     )
     results = flag_rules.evaluate(ctx)
     existing = {f.fingerprint: f for f in db.query(Flag).filter_by(submission_id=submission.id)}
@@ -86,7 +105,12 @@ def run_static(db: Session, submission: Submission) -> dict:
         1 for f in db.query(Flag).filter_by(submission_id=submission.id)
         if f.present and f.severity == flag_rules.BLOCKER and f.status == "open"
     )
-    _record_run(db, submission.id, {r: res.note for r, res in results.items()}, now, open_blockers)
+    version = None
+    if earlier is not None:
+        from app.services import versioning
+
+        version = {"against": earlier.id, **versioning.compare(Path(earlier.extracted_path), Path(submission.extracted_path))}
+    _record_run(db, submission.id, {r: res.note for r, res in results.items()}, now, open_blockers, version)
     db.commit()
     return record(db, submission.id)
 
@@ -145,6 +169,8 @@ def record(db: Session, submission_id: str) -> dict:
     live = [f for f in flags if f.present]
     return {
         "last_run": logs.get("at"),
+        # S9: version class against the latest earlier upload of the same task, when there is one
+        "version": logs.get("version"),
         "counts": {
             "open_blockers": sum(1 for f in live if f.severity == flag_rules.BLOCKER and f.status == "open"),
             "open_advisories": sum(1 for f in live if f.severity != flag_rules.BLOCKER and f.status == "open"),
