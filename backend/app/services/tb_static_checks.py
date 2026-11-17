@@ -16,12 +16,14 @@ from functools import lru_cache
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.config import get_settings
 from app.services.vendor_info import checks_info
 
 _TASK_NAME_RE = re.compile(r"^([^/]+)/(.+)$")
 
 _CHECKS_DIR = Path(__file__).resolve().parent.parent.parent / "vendor" / "tb_checks" / "scripts"
-_TIMEOUT_SEC = 30
+# Tools the backend installs for itself (scripts/install_dockerfile_pin.py); on PATH for every check.
+TOOLS_BIN = Path(__file__).resolve().parent.parent.parent / ".tools" / "bin"
 
 
 @dataclass
@@ -49,15 +51,30 @@ class TbStaticCheckReport:
     def skip_count(self) -> int:
         return sum(1 for r in self.results if r.skipped)
 
+    @property
+    def ran_count(self) -> int:
+        return self.pass_count + self.fail_count
+
     def as_text(self) -> str:
         lines = []
         for r in self.results:
-            label = "SKIP" if r.skipped else "PASS" if r.passed else "FAIL"
+            label = "NOT RUN" if r.skipped else "PASS" if r.passed else "FAIL"
             lines.append(f"[{label}] {r.name}")
             # Advisory checks (check-cpu-threads) print WARN lines and still exit 0.
             if r.output and (not r.passed or _WARN_LINE_RE.search(r.output)):
                 lines.append(r.output.strip())
         return "\n".join(lines)
+
+
+def stage_outcome(report: TbStaticCheckReport) -> tuple[str, int | None]:
+    """(status, reward) for the stage. A check that could not run is never counted as a
+    pass (H5, rule 15.9): it passes only when every vendored check ran and none failed;
+    with no failures but a check not run, the reward is None, not 1."""
+    if report.fail_count:
+        return "failed", 0
+    if report.skip_count:
+        return "failed", None
+    return "passed", 1
 
 
 _WARN_LINE_RE = re.compile(r"^WARN ", re.M)
@@ -257,36 +274,48 @@ def _script_env(tmp: Path) -> dict[str, str]:
     PyYAML), and isolated mode skips the user site, so a machine whose python3
     has PyYAML only as a user install (or not at all) failed that check on
     every compose file with "No module named 'yaml'". The backend's
-    interpreter has PyYAML (a declared dependency)."""
+    interpreter has PyYAML (a declared dependency). backend/.tools/bin comes next,
+    so check-image-digests finds the dockerfile-pin the install script put there."""
     shim = tmp / "python-shim"
     shim.mkdir()
     python3 = shim / "python3"
     python3.write_text(f'#!/bin/sh\nexec "{Path(sys.executable).as_posix()}" "$@"\n')
     python3.chmod(0o755)
-    return {**os.environ, "PATH": f"{shim}{os.pathsep}{os.environ.get('PATH', '')}"}
+    path = os.pathsep.join([str(shim), str(TOOLS_BIN), os.environ.get("PATH", "")])
+    return {**os.environ, "PATH": path}
 
 
 def _run_scripts(task_root: Path, clean_path: Path, report: TbStaticCheckReport, env: dict[str, str]) -> None:
     # The trailing slash matters: clean_path is a symlink, and `find <symlink>` without it does not
     # descend, so check-canary, check-compose-volumes and check-test-file-references found no files
     # and passed vacuously (found by comparing the guide with the platform's own output).
+    timeout = get_settings().tb_check_timeout_sec
     for script in sorted(_CHECKS_DIR.glob("check-*.sh")):
         try:
             proc = subprocess.run(
                 [_bash(), str(script), str(clean_path) + "/"],
-                capture_output=True, text=True, timeout=_TIMEOUT_SEC, env=env,
+                capture_output=True, text=True, timeout=timeout, env=env,
             )
             passed = proc.returncode == 0
             output = (proc.stdout or "") + (proc.stderr or "")
         except subprocess.TimeoutExpired:
-            passed = False
-            output = f"timed out after {_TIMEOUT_SEC}s"
+            # A check that ran out of time gave no answer: not run, never a fail or a pass.
+            # check-canary forks grep per file and needs 20-30 s on Windows for a 130-file task.
+            report.results.append(
+                TbCheckResult(
+                    script.stem, False,
+                    f"not run: timed out after {timeout}s on this machine (raise TB_CHECK_TIMEOUT_SEC)",
+                    skipped=True,
+                )
+            )
+            continue
         missing = _MISSING_TOOL_RE.search(output) if not passed else None
         if missing:
             report.results.append(
                 TbCheckResult(
                     script.stem, False,
-                    f"not run: needs the `{missing.group(1)}` CLI on PATH (see vendor/tb_checks/PROVENANCE.md)",
+                    f"not run: needs the `{missing.group(1)}` CLI "
+                    "(uv run python scripts/install_dockerfile_pin.py; see vendor/tb_checks/PROVENANCE.md)",
                     skipped=True,
                 )
             )

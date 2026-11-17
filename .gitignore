@@ -50,3 +50,6 @@ backend/.env.production
 # Google service-account key for the issue-log sheet (credential: never commit)
 /platinum-voice-*.json
 /*service-account*.json
+
+# Tools the backend downloads for itself (scripts/install_dockerfile_pin.py)
+backend/.tools/

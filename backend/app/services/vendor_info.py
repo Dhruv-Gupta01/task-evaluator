@@ -42,18 +42,38 @@ def _provenance(folder: Path, today: date | None = None) -> dict:
 
 def checks_info(today: date | None = None) -> dict:
     """Commit, date, age and the number of check-*.sh scripts that run
-    (check-cpu-threads.py is a helper, not counted)."""
+    (check-cpu-threads.py and check-lockfiles.py are helpers, not counted)."""
     info = _provenance(CHECKS_DIR.parent, today)
     info["scripts"] = len(list(CHECKS_DIR.glob("check-*.sh")))
     return info
 
 
 def rubric_info(today: date | None = None) -> dict:
-    """Commit, date, age and the number of [[criteria]] in the vendored TB rubric."""
+    """Commit, date, age, the number of [[criteria]] in the vendored TB rubric and the
+    names of its warning-level criteria (`severity = "warning"`)."""
     info = _provenance(RUBRIC_FILE.parent, today)
     try:
         criteria = tomllib.loads(RUBRIC_FILE.read_text(encoding="utf-8")).get("criteria") or []
     except (OSError, tomllib.TOMLDecodeError):
         criteria = []
     info["criteria"] = len(criteria)
+    info["warning_criteria"] = sorted(c["name"] for c in criteria if c.get("severity") == "warning")
     return info
+
+
+def rubric_summary(results: list[dict], warning_criteria: list[str]) -> dict:
+    """Sorts `harbor check` outcomes by severity (G2b). Harbor 0.23.0 ignores the
+    rubric's `severity` field and reports a plain fail, so a failed warning-level
+    criterion is moved to `warnings` here: it is shown, but it does not block."""
+    summary: dict = {"blocking_fails": [], "warnings": [], "passed": 0, "not_applicable": 0}
+    warn = set(warning_criteria)
+    for result in results:
+        for name, check in (result.get("checks") or {}).items():
+            outcome = check.get("outcome") if isinstance(check, dict) else None
+            if outcome == "fail":
+                summary["warnings" if name in warn else "blocking_fails"].append(name)
+            elif outcome == "pass":
+                summary["passed"] += 1
+            elif outcome == "not_applicable":
+                summary["not_applicable"] += 1
+    return summary

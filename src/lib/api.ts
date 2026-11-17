@@ -409,8 +409,16 @@ export interface RubricCheck {
   results: RubricCheckEntry[];
   // "default" (Harbor's own 11-criterion rubric) or "tb" (the vendored TB rubric).
   rubric?: string;
-  // TB rubric only: criteria count read from the vendored file, its upstream commit and age.
-  rubric_info?: VendorInfo & { criteria: number };
+  // TB rubric only: criteria count read from the vendored file, its upstream commit and age,
+  // and the criteria marked severity = "warning".
+  rubric_info?: VendorInfo & { criteria: number; warning_criteria?: string[] };
+  // Outcomes sorted by severity: a failed warning-level criterion is a non-blocking warning.
+  summary?: {
+    blocking_fails: string[];
+    warnings: string[];
+    passed: number;
+    not_applicable: number;
+  };
 }
 
 // `logs` is JSON (see StaticCheckReport below) once the stage has run.
@@ -464,6 +472,10 @@ export interface TbStaticCheckReport {
   skip_count?: number;
   // Which upstream commit the vendored rule set comes from (5.0 F).
   vendor?: VendorInfo & { scripts: number };
+  // How many of the vendored checks ran; a check that could not run makes it incomplete.
+  ran_count?: number;
+  script_count?: number;
+  incomplete?: boolean;
   results: TbCheckFinding[];
   text: string;
 }

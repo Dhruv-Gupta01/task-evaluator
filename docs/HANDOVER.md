@@ -58,9 +58,11 @@ Files: backend/storage/submissions/{id}/ (zip, extracted task, logs, Harbor outp
 - **Harbor** (`uv tool install harbor==0.23.0`, the tested version) is Terminal-Bench's own test
   harness. The platform shells out to `harbor run` for Oracle, Nop and Agent Trials, and to
   `harbor analyze` and `harbor check` for Failure Analysis and Rubric Check.
-- **Vendored upstream code** (`backend/vendor/`): Terminal-Bench's 28 `check-*.sh` scripts, its
+- **Vendored upstream code** (`backend/vendor/`): Terminal-Bench's 29 `check-*.sh` scripts, its
   AI-detection script and five prompt/rubric files, copied verbatim at a pinned commit
-  (`2e29ca9`, 2026-10-15). `PROVENANCE.md` in each folder records the commit.
+  (`bdf6034`, 2026-11-16, for the checks and the task rubric; the trial-analysis rubric and the
+  cheat prompt are older, see `PROVENANCE.md`). `PROVENANCE.md` in each folder records the commit,
+  and the results show a reminder once it is older than `VENDOR_STALE_DAYS`.
   `backend/scripts/diff_vendored_checks.py` shows how upstream has moved on; updating is manual.
 
 ## 3. Features

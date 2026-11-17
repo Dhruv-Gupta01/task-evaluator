@@ -708,13 +708,19 @@ function SubmissionDetail() {
                 <>
                   <div
                     className={`rounded-md border p-2.5 text-xs ${
-                      report.fail_count === 0
-                        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                        : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
+                      report.fail_count > 0
+                        ? "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
+                        : report.skip_count
+                          ? "border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-300"
+                          : "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
                     }`}
                   >
+                    {report.script_count != null &&
+                      `${report.ran_count ?? report.pass_count + report.fail_count} of ${report.script_count} checks ran: `}
                     {report.pass_count} pass, {report.fail_count} fail
-                    {report.skip_count ? `, ${report.skip_count} not run (a tool is missing)` : ""}
+                    {report.skip_count
+                      ? `, ${report.skip_count} not run (a tool is missing), so this is not a complete pass`
+                      : ""}
                     {report.vendor?.commit && (
                       <span className="block text-muted-foreground">
                         Rule set: upstream <span className="font-mono">{report.vendor.commit.slice(0, 7)}</span>
@@ -2086,6 +2092,8 @@ function RubricCheckView({ logs }: { logs?: string }) {
   } catch {
     return <LogPanel logs={logs} title="Rubric check output" />;
   }
+  // Harbor ignores the rubric's severity field; these criteria fail as warnings, not blockers.
+  const warningCriteria = parsed.rubric_info?.warning_criteria;
   return (
     <div className="space-y-3">
       <div className="text-xs text-muted-foreground">
@@ -2098,6 +2106,13 @@ function RubricCheckView({ logs }: { logs?: string }) {
             ({parsed.rubric_info.criteria} criteria
             {parsed.rubric_info.commit && <>, upstream {parsed.rubric_info.commit.slice(0, 7)}</>}
             {parsed.rubric_info.date && <> of {parsed.rubric_info.date}</>})
+          </>
+        )}
+        {parsed.summary && (
+          <>
+            {" "}
+            · {parsed.summary.passed} pass, {parsed.summary.blocking_fails.length} fail,{" "}
+            {parsed.summary.warnings.length} warning (non-blocking)
           </>
         )}
       </div>
@@ -2118,22 +2133,27 @@ function RubricCheckView({ logs }: { logs?: string }) {
             <>
               {r.summary && <p className="mt-1 whitespace-pre-wrap">{r.summary}</p>}
               <ul className="mt-2 space-y-1.5">
-                {Object.entries(r.checks).map(([name, c]) => (
-                  <li key={name} className="text-xs">
-                    <span
-                      className={`mr-2 rounded px-1.5 py-0.5 font-medium ${
-                        c.outcome === "pass"
-                          ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
-                          : c.outcome === "fail"
-                          ? "bg-red-500/15 text-red-700 dark:text-red-400"
-                          : "bg-muted text-muted-foreground"
-                      }`}
-                    >
-                      {name}: {c.outcome}
-                    </span>
-                    <span className="text-muted-foreground">{c.explanation}</span>
-                  </li>
-                ))}
+                {Object.entries(r.checks).map(([name, c]) => {
+                  const warning = c.outcome === "fail" && !!warningCriteria?.includes(name);
+                  return (
+                    <li key={name} className="text-xs">
+                      <span
+                        className={`mr-2 rounded px-1.5 py-0.5 font-medium ${
+                          c.outcome === "pass"
+                            ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                            : warning
+                              ? "bg-amber-500/15 text-amber-800 dark:text-amber-300"
+                              : c.outcome === "fail"
+                                ? "bg-red-500/15 text-red-700 dark:text-red-400"
+                                : "bg-muted text-muted-foreground"
+                        }`}
+                      >
+                        {name}: {warning ? "warning (non-blocking)" : c.outcome}
+                      </span>
+                      <span className="text-muted-foreground">{c.explanation}</span>
+                    </li>
+                  );
+                })}
               </ul>
             </>
           )}

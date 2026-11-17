@@ -2,13 +2,21 @@
 
 Source: https://github.com/harbor-framework/terminal-bench
 Path: `docs/prompts/`
-Commit: `2e29ca91d5f1cb6fb60924bf867acc755565c044` (2026-10-15) for
-`task-implementation.toml`; the other four files are unchanged since
-`1dcda8716784493721921c23e4bc7f7d988b4494` (2026-09-28).
+Commit: `bdf60347ddb22be127cf3af14215c0385ea08705` (2026-11-16) for
+`task-implementation.toml` (last changed upstream in `6964e92`, 2026-10-26); the other
+four files are from `1dcda8716784493721921c23e4bc7f7d988b4494` (2026-09-28).
+Upstream `2c22157` (2026-10-28) changed two of those four, `trial-analysis.toml` (a
+`[[cheat_criteria]]` `verifier_tampering_exposure`) and `hack-trial-prompt.md` (one
+sentence on executable artifacts); they are refreshed with the Cheat Trial work (G5),
+not here.
 License: Apache License 2.0 (see upstream repo's `LICENSE`)
 
 Verified byte-identical (`diff`) against the same files as provided directly
-by the team, before vendoring. The 2026-10-15 refresh brought in upstream
+by the team, before vendoring. The 2026-11-17 refresh brought in upstream #2316:
+a 37th criterion, `score_provenance` (`severity = "warning"`, like
+`effective_instruction_length`). Harbor 0.23.0's rubric model ignores `severity`
+and returns plain pass/fail, so the platform marks a failed warning-level
+criterion as a non-blocking warning itself (`vendor_info.rubric_summary`). The 2026-10-15 refresh brought in upstream
 #1518: a 36th criterion, `effective_instruction_length` (a nonblocking
 warning), and `instruction_concision` no longer fails on length alone.
 Upstream's newer `regrade-analysis.txt` and `task-proposal.md` are not

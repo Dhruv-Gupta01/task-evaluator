@@ -209,7 +209,9 @@ class TbStaticChecksResult(BaseModel):
     """Terminal-Bench's own official static checks (vendor/tb_checks/,
     maintained upstream, not by us) -- a different, mostly non-overlapping
     rule set from StaticChecksResult. Advisory. `logs` is JSON: {pass_count,
-    fail_count, results: [{name, passed, output}], text}."""
+    fail_count, skip_count, ran_count, script_count, incomplete, vendor,
+    results: [{name, passed, output, skipped}], text}. A check that could not run
+    makes the stage failed (incomplete), never passed."""
     status: StageStatus
     logs: str | None = None
 

@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     # The vendored TB checks and rubric get a "run scripts/diff_vendored_checks.py"
     # reminder once their upstream commit is older than this. 0 turns it off.
     vendor_stale_days: int = 30
+    # Per-script limit for the vendored TB checks. A check that runs out of time is
+    # reported as not run, never as a fail or a pass.
+    tb_check_timeout_sec: int = 180
 
     # Defaults applied when a task.toml omits a section
     default_cpus: float = 1.0

@@ -348,6 +348,35 @@ def _static_checks_result(run: Run | None) -> StaticChecksResult:
     return StaticChecksResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
 
 
+def _tb_counts(logs: str | None) -> str:
+    """' (29 of 29 ran: 20 pass, 9 fail)'; a check that did not run is named as such."""
+    try:
+        r = json.loads(logs or "")
+    except ValueError:
+        return ""
+    if not isinstance(r, dict) or "pass_count" not in r:
+        return ""
+    total = r.get("script_count") or (r["pass_count"] + r["fail_count"] + r.get("skip_count", 0))
+    ran = r.get("ran_count", r["pass_count"] + r["fail_count"])
+    text = f" ({ran} of {total} ran: {r['pass_count']} pass, {r['fail_count']} fail"
+    if r.get("skip_count"):
+        text += f", {r['skip_count']} not run, so not a complete pass"
+    return text + ")"
+
+
+def _rubric_counts(logs: str | None) -> str:
+    try:
+        summary = json.loads(logs or "").get("summary")
+    except (ValueError, AttributeError):
+        return ""
+    if not summary:
+        return ""
+    return (
+        f" ({summary['passed']} pass, {len(summary['blocking_fails'])} fail, "
+        f"{len(summary['warnings'])} warning (non-blocking))"
+    )
+
+
 def _tb_static_checks_result(run: Run | None) -> TbStaticChecksResult:
     if run is None:
         return TbStaticChecksResult(status="not-run", logs=None)
@@ -765,14 +794,9 @@ def build_summary_markdown(
         ),
         (
             f"- TB Static Checks: {_fmt_status(schema.tb_static_checks.status)}"
-            + (
-                f" ({json.loads(schema.tb_static_checks.logs)['pass_count']} pass, "
-                f"{json.loads(schema.tb_static_checks.logs)['fail_count']} fail)"
-                if schema.tb_static_checks.logs
-                else ""
-            )
+            + _tb_counts(schema.tb_static_checks.logs)
         ),
-        f"- Rubric Check: {_fmt_status(schema.rubric_check.status)}",
+        f"- Rubric Check: {_fmt_status(schema.rubric_check.status)}" + _rubric_counts(schema.rubric_check.logs),
         f"- Cheat Trial: {_fmt_status(schema.cheat_trial.status)}"
         + (f" ({schema.cheat_trial.summary})" if schema.cheat_trial.summary else ""),
         f"- Answer Exposure: {_fmt_status(schema.answer_exposure.status)}"

@@ -27,6 +27,9 @@ works, every feature, the configuration, costs and the known issues. This README
   (`pyproject.toml` allows 3.11+, but only 3.13 has been tested)
 - **[Harbor](https://github.com/laude-institute/harbor)** CLI — runs the Oracle, Nop and Agent
   Trials stages with the same harness as the real grading pipeline: `uv tool install harbor==0.23.0` (the version this was tested with)
+- **dockerfile-pin** for the TB `check-image-digests` check: from `backend/`, run
+  `uv run python scripts/install_dockerfile_pin.py` once (the same v1.5.0 upstream CI uses, sha256-checked, put in
+  `backend/.tools/bin/`). Without it that check shows as not run.
 - **Node.js** and [`bun`](https://bun.sh) (this repo is bun-lockfile-managed; `npm` will also
   work off `package-lock.json` if you don't have bun, but bun is what's actually been tested)
 - API keys: an OpenAI key covers the judge stages, Failure Analysis and the Codex agent, and an
@@ -160,7 +163,7 @@ Items marked **(4.1)** are new in the 4.1 branch; the rest came with 4.0.
 | Image Contents **(4.1)** | After every build, lists the files and package versions the agent's container really has. Sufficiency uses it to tell files that never reach the container from visible ones. | Docker |
 | Fresh Build **(4.1)** | Rebuilds with no cache and freshly pulled base images, then runs one Oracle with every `RUN` step redone. Catches a dependency that no longer installs. | Docker, slow |
 | Static Checks | Mechanical checks of `instruction.md`, `test.sh`, Dockerfile and zip layout, plus hygiene: named volumes, unpinned installs, `curl \| sh`, key-like strings, x86-only downloads, dangling paths, files that differ between `environment/` and `tests/`, tools the tests need, instruction length, whether the solution reads `tests/`. **(4.1)** Also grader isolation (the verifier importing or running agent code, `eval`/pickle in the grader, results in `/tmp`, reward-file reset), reproducibility (wall-clock assertions, unpinned images and dependencies, run-time downloads) and scoring-file checks. | none |
-| TB Static Checks | Terminal-Bench's own `check-*.sh` scripts, vendored verbatim. **(4.1)** Refreshed to upstream `2e29ca9` (28 scripts). | none |
+| TB Static Checks | Terminal-Bench's own `check-*.sh` scripts, vendored verbatim, at upstream `bdf6034` (29 scripts, including `check-lockfiles`). A check that could not run is shown as not run, never as a pass. | `dockerfile-pin` (see setup) |
 | Leakage Scan | Unedited LLM chat artifacts. | none |
 | Answer Exposure **(4.1)** | Can the agent find the answer in its own files: answer-like names, a `.git` folder, copies of `solution/` or `tests/` files, values the tests compare against. | none |
 | AI Detection | Terminal-Bench's three AI-usage layers side by side: written policy, Rubric Check opinion, and a GPTZero measurement. | GPTZero key |
@@ -294,7 +297,7 @@ tokens and cost, and flags where the reward and the tests disagree.
   used internally, but persists the result as its own stage so it's independently visible and part of
   the evidence bundle below. No Docker, no LLM cost. Advisory.
 - **TB Static Checks**: a second, separate stage running Terminal-Bench's own official static checks
-  (`backend/vendor/tb_checks/`, 28 `check-*.sh` scripts vendored verbatim from
+  (`backend/vendor/tb_checks/`, 29 `check-*.sh` scripts vendored verbatim from
   `harbor-framework/terminal-bench` at a pinned commit -- see `PROVENANCE.md` there). This is not a
   replacement for the platform's own Static Checks above -- the two rule sets barely overlap (TB's
   checks framework compliance: canary, dockerfile platform/sanity, separate verifier, task fields,

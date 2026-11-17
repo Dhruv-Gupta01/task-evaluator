@@ -1339,14 +1339,17 @@ async def run_tb_static_checks_stage(submission_id: str) -> None:
             db.commit()
             return
 
-        run.status = "passed" if report.fail_count == 0 else "failed"
-        run.reward = 1 if report.fail_count == 0 else 0
+        vendor = tb_static_checks.vendor_info()
+        run.status, run.reward = tb_static_checks.stage_outcome(report)
         run.logs = json.dumps(
             {
                 "pass_count": report.pass_count,
                 "fail_count": report.fail_count,
                 "skip_count": report.skip_count,
-                "vendor": tb_static_checks.vendor_info(),
+                "ran_count": report.ran_count,
+                "script_count": vendor["scripts"],
+                "incomplete": report.skip_count > 0,
+                "vendor": vendor,
                 "results": [
                     {"name": r.name, "passed": r.passed, "output": r.output, "skipped": r.skipped}
                     for r in report.results
@@ -2039,8 +2042,9 @@ async def run_rubric_check(submission_id: str, rubric: str = "tb") -> None:
     effective_instruction_length exist only there (4.1 A.4), or Harbor's own
     11-criterion default with rubric="default". Advisory, like Failure Analysis. Result stored
     as JSON in the Run's logs: {"agent", "model", "cost_usd", "error",
-    "results": [...], "rubric", "rubric_info"}; rubric_info (TB only) is the vendored
-    commit, its age and the criteria count."""
+    "results": [...], "rubric", "rubric_info", "summary"}; rubric_info (TB only) is the
+    vendored commit, its age, the criteria count and the warning-level criteria, and
+    summary sorts the outcomes into blocking fails and non-blocking warnings."""
     db = SessionLocal()
     try:
         submission = db.get(Submission, submission_id)
@@ -2075,6 +2079,7 @@ async def run_rubric_check(submission_id: str, rubric: str = "tb") -> None:
             )
 
         results = (outcome.report or {}).get("results") or []
+        info = vendor_info.rubric_info() if rubric == "tb" else None
         run.logs = json.dumps(
             {
                 "agent": settings.check_agent,
@@ -2083,7 +2088,10 @@ async def run_rubric_check(submission_id: str, rubric: str = "tb") -> None:
                 "error": outcome.error,
                 "results": results,
                 "rubric": rubric,
-                "rubric_info": vendor_info.rubric_info() if rubric == "tb" else None,
+                "rubric_info": info,
+                "summary": vendor_info.rubric_summary(
+                    results, info["warning_criteria"] if info else []
+                ),
             }
         )
         has_checks = any(r.get("checks") for r in results)
