@@ -669,8 +669,13 @@ async def run_probes(submission_id: str, kinds: tuple[str, ...], hostile_kinds: 
                 shutil.rmtree(copy_root)
             shutil.copytree(task_root, copy_root, symlinks=True)
             probes.apply(copy_root, probe)
-            if probe["kind"] == "hostile" and control_verifier_sec:
-                probes.cap_verifier_timeout(copy_root, max(120.0, 3 * control_verifier_sec))
+            # Only the FIFO probe gets a shorter verifier limit: a hang is what it looks for. A big
+            # file can make a sound verifier slow but finite, so it keeps the task's own limit
+            # (a 120 s cap turned harrow's 4 GB probe into a false invalid reward).
+            cap = None
+            if probe.get("hostile") == "fifo" and control_verifier_sec:
+                cap = max(120.0, 3 * control_verifier_sec)
+                probes.cap_verifier_timeout(copy_root, cap)
             outcome = await harbor_runner.run_single(
                 copy_root, probe["agent"], base / f"p{i}", f"probe-{uuid.uuid4().hex[:8]}", timeout_sec
             )
@@ -684,6 +689,7 @@ async def run_probes(submission_id: str, kinds: tuple[str, ...], hostile_kinds: 
                 "tests": ctrf.get("tests"),
                 "verifier_seconds": facts.get("verifier_seconds"),
                 "failed_tests": (ctrf.get("failed_names") or [])[:10],
+                "verifier_cap_sec": cap if probe["kind"] == "hostile" else None,
                 "flags": report.get("flags") or [],
                 "note": (outcome.logs or "")[-600:] if outcome.reward is None else "",
             }

@@ -5,6 +5,7 @@ through the real verifier, so the platform sees how the grader behaves, not how 
 - data_removal (CK-A, 15.1): one data folder the tests read is deleted. Reward 1 = fail-open.
 - hostile (CK-C, 15.3): the solution runs, then an artifact is replaced by a FIFO, a symlink,
   a directory or a 4 GB sparse file. Anything but reward 0 inside the timeout is the finding.
+  Only the FIFO probe runs under a shorter verifier limit (3x the control's verifier time).
 - null_rung1 / null_rung2 (E2, 15.37): plain Nop, and empty files at every artifact path.
 """
 
