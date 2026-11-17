@@ -5,10 +5,12 @@ Path: `docs/prompts/`
 Commit: `bdf60347ddb22be127cf3af14215c0385ea08705` (2026-11-16) for
 `task-implementation.toml` (last changed upstream in `6964e92`, 2026-10-26); the other
 four files are from `1dcda8716784493721921c23e4bc7f7d988b4494` (2026-09-28).
-Upstream `2c22157` (2026-10-28) changed two of those four, `trial-analysis.toml` (a
-`[[cheat_criteria]]` `verifier_tampering_exposure`) and `hack-trial-prompt.md` (one
-sentence on executable artifacts); they are refreshed with the Cheat Trial work (G5),
-not here.
+`trial-analysis.toml` and `hack-trial-prompt.md` were refreshed to `bdf6034` on
+2026-11-17 for the Cheat Trial work (G5): upstream `2c22157` (2026-10-28) added a
+`[[cheat_criteria]]` `verifier_tampering_exposure` and one sentence on executable
+artifacts. Harbor's rubric model reads only `[[criteria]]`, so cheat trials are analysed
+with a merged copy (criteria plus cheat_criteria, `task_runner._cheat_rubric_file`).
+`task-proposal.md` (bdf6034) is the Idea Review prompt (G1).
 License: Apache License 2.0 (see upstream repo's `LICENSE`)
 
 Verified byte-identical (`diff`) against the same files as provided directly

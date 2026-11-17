@@ -11,7 +11,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.models import Flag, Run, Submission
-from app.services import flag_rules
+from app.services import flag_results, flag_rules
 
 STATUSES = ("open", "accepted", "disputed")
 
@@ -76,6 +76,9 @@ def run_static(db: Session, submission: Submission) -> dict:
         previous_root=Path(earlier.extracted_path) if earlier else None,
     )
     results = flag_rules.evaluate(ctx)
+    runs = db.query(Run).filter_by(submission_id=submission.id).all()
+    harbor = db.query(Run).filter(Run.kind.in_(flag_results.HARBOR_KINDS), Run.finished_at.is_not(None)).all()
+    results.update(flag_results.evaluate(runs, all_runs=harbor))
     existing = {f.fingerprint: f for f in db.query(Flag).filter_by(submission_id=submission.id)}
     found = set()
     for rule_id, result in results.items():

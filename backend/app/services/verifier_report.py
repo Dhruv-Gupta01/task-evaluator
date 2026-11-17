@@ -45,6 +45,7 @@ def _read_ctrf(path: Path) -> dict | None:
     except (OSError, ValueError, KeyError, TypeError):
         return None
     tests = results.get("tests") or []
+    names = [str(t.get("name")) for t in tests]
     failed_names = [_short(t.get("name")) for t in tests if t.get("status") == "failed"]
     skipped_names = [_short(t.get("name")) for t in tests if t.get("status") == "skipped"]
     return {
@@ -55,6 +56,8 @@ def _read_ctrf(path: Path) -> dict | None:
         "other": int(summary.get("other") or 0) + int(summary.get("pending") or 0),
         "failed_names": failed_names[:MAX_NAMES],
         "skipped_names": skipped_names[:MAX_NAMES],
+        # 15.6 (S7): parametrized cases that ctrf reports under one name cannot be told apart
+        "duplicate_names": sorted({n for n in names if names.count(n) > 1})[:MAX_NAMES],
     }
 
 

@@ -348,6 +348,16 @@ def _static_checks_result(run: Run | None) -> StaticChecksResult:
     return StaticChecksResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
 
 
+def _interval(schema) -> str:
+    """E11: counts with a 95% interval and the one-family caveat, next to any pass rate."""
+    from app.services.flag_results import pass_rate_text
+
+    trials = [t for t in schema.agent_trials.trials if t.reward is not None]
+    if not trials:
+        return ""
+    return f" ({pass_rate_text(sum(1 for t in trials if t.reward >= 1), len(trials))})"
+
+
 def _tb_counts(logs: str | None) -> str:
     """' (29 of 29 ran: 20 pass, 9 fail)'; a check that did not run is named as such."""
     try:
@@ -756,7 +766,7 @@ def build_summary_markdown(
         "",
         "## Agent Trials",
         f"- N: {schema.agent_trials.n}",
-        f"- Pass rate: {_fmt_pct(schema.agent_trials.pass_rate)}",
+        f"- Pass rate: {_fmt_pct(schema.agent_trials.pass_rate)}" + _interval(schema),
         *(
             [
                 f"- Refused: {schema.agent_trials.refusals} of {schema.agent_trials.n} trials "

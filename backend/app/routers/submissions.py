@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.models import Flag, LlmSpend, Run, Submission
 from app.schemas import SubmissionListItem, SubmissionSchema, UploadResponse
-from app.services import budget, flags, redaction, submission_diff, submission_service, task_runner
+from app.services import budget, flags, generators, probes, redaction, submission_diff, submission_service, task_runner
 from app.workers import task_queue
 
 router = APIRouter()
@@ -103,9 +103,9 @@ async def trigger_oracle(
     run's own result stays visible, not just the latest). stress=true runs
     them under CPU load (kind "oracle_stress"); those never count for
     the gate."""
-    if n < 1 or n > settings.max_agent_trials:
+    if n < 1 or n > settings.max_oracle_repeats:
         raise HTTPException(
-            status_code=400, detail=f"n must be between 1 and {settings.max_agent_trials}"
+            status_code=400, detail=f"n must be between 1 and {settings.max_oracle_repeats}"
         )
     _require_built_submission(submission_id, db)
     kind = "oracle_stress" if stress else "oracle"
@@ -368,7 +368,7 @@ async def trigger_cheat_trial(
     submission_id: str,
     agent: str | None = None,
     reasoning_effort: str | None = None,
-    cheat_prompt: str = "default",
+    cheat_prompt: str = "tb",
     n: int = 1,
     max_cost_usd: float | None = None,
     model: str | None = None,
@@ -651,6 +651,133 @@ def set_reviewer_decision(
     run.logs = json.dumps(decisions)
     db.commit()
     return decisions
+
+
+@router.post("/submissions/{submission_id}/evidence-set", status_code=202)
+async def trigger_evidence_set(
+    submission_id: str, which: str = "standard", max_cost_usd: float | None = None, db: Session = Depends(get_db)
+) -> dict[str, str]:
+    """Batch 6: the standard set (G4/E3: two agent/model pairs, 3 trials each, then Failure
+    Analysis) or the cheap-model set (E4: 2 trials). Trials are appended; max_cost_usd caps the
+    whole set, split evenly between the pairs."""
+    if which not in task_runner.EVIDENCE_SETS:
+        raise HTTPException(status_code=400, detail=f"which must be one of {', '.join(task_runner.EVIDENCE_SETS)}")
+    if max_cost_usd is not None and not 0 < max_cost_usd <= 10_000:
+        raise HTTPException(status_code=400, detail="max_cost_usd must be between 0 and 10000")
+    _require_built_submission(submission_id, db)
+    _raise_if_over_budget(db, budget.exceeded_message(db))
+    await task_queue.submit(f"{submission_id}:agent", task_runner.run_evidence_set(submission_id, which, max_cost_usd))
+    return {"status": "started", "pairs": json.dumps(task_runner.evidence_pairs(which))}
+
+
+@router.get("/submissions/{submission_id}/extras")
+def get_extras(submission_id: str, db: Session = Depends(get_db)) -> dict:
+    """Stored results of the post-fix stages: probes, evidence runs, agent rubric, deliverable."""
+    if db.get(Submission, submission_id) is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    out = {}
+    for kind in ("probes", "evidence_runs", "agent_rubric", "deliverable"):
+        run = db.query(Run).filter_by(submission_id=submission_id, kind=kind, run_index=0).one_or_none()
+        out[kind] = {"status": run.status if run else "not-run", "logs": run.logs if run else None}
+    return out
+
+
+class IdeaBody(BaseModel):
+    idea: str
+
+
+@router.post("/idea-review")
+async def idea_review(body: IdeaBody, db: Session = Depends(get_db)) -> dict:
+    """G1: reviews a task idea before it is built, with Terminal-Bench's proposal prompt.
+    Saved under storage/idea_reviews/; a person reads it, nothing acts on it."""
+    if not 20 <= len(body.idea.strip()) <= 20_000:
+        raise HTTPException(status_code=400, detail="describe the idea in 20 to 20000 characters")
+    _raise_if_over_budget(db, budget.exceeded_message(db))
+    with task_runner._track_llm_spend(db, "idea-review", "idea_review"):
+        result = await generators.idea_review(body.idea)
+    db.commit()
+    review_id = uuid.uuid4().hex[:12]
+    folder = settings.storage_dir / "idea_reviews"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{review_id}.json").write_text(json.dumps({"idea": body.idea, **result}, indent=1), encoding="utf-8")
+    return {"id": review_id, **result}
+
+
+def _store_generated(db: Session, submission_id: str, kind: str, result: dict) -> dict:
+    run = db.query(Run).filter_by(submission_id=submission_id, kind=kind, run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind=kind, run_index=0)
+        db.add(run)
+    run.status = "failed" if result.get("error") else "passed"
+    run.logs = json.dumps(result)
+    run.finished_at = datetime.now(UTC)
+    db.commit()
+    return result
+
+
+@router.post("/submissions/{submission_id}/agent-rubric")
+async def agent_rubric(submission_id: str, db: Session = Depends(get_db)) -> dict:
+    """N13: rubric items for scoring agent trajectories, each backed by a quote checked
+    verbatim against the trial it names. Needs agent trials. A person reviews it."""
+    submission = db.get(Submission, submission_id)
+    if submission is None or submission.extracted_path is None:
+        raise HTTPException(status_code=404, detail="submission not found or not extracted")
+    trials = db.query(Run).filter_by(submission_id=submission_id, kind="agent").all()
+    trajectories = {f"trial-{t.run_index}": t.logs for t in trials if t.logs}
+    instruction = (Path(submission.extracted_path) / "instruction.md").read_text(encoding="utf-8", errors="replace")
+    _raise_if_over_budget(db, budget.exceeded_message(db))
+    with task_runner._track_llm_spend(db, submission_id, "agent_rubric"):
+        result = await generators.agent_rubric(instruction, trajectories)
+    return _store_generated(db, submission_id, "agent_rubric", result)
+
+
+@router.post("/submissions/{submission_id}/deliverable")
+async def deliverable(submission_id: str, db: Session = Depends(get_db)) -> dict:
+    """N14: the client-facing write-up, built only from stored results (statuses, pass rates
+    with intervals, flags and rulings, probes). Always ends "Draft, needs review." """
+    submission = db.get(Submission, submission_id)
+    if submission is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    schema = submission_service.to_schema(submission)
+    probe_run = db.query(Run).filter_by(submission_id=submission_id, kind="probes", run_index=0).one_or_none()
+    facts = {
+        "task": submission.task_name,
+        "summary": submission_service.build_summary_markdown(schema, None, None),
+        "flags": flags.record(db, submission_id),
+        "probes": json.loads(probe_run.logs) if probe_run and probe_run.logs else "not run",
+    }
+    _raise_if_over_budget(db, budget.exceeded_message(db))
+    with task_runner._track_llm_spend(db, submission_id, "deliverable"):
+        result = await generators.deliverable(facts)
+    return _store_generated(db, submission_id, "deliverable", result)
+
+
+_PROBE_KINDS = ("control", "data_removal", "hostile", "null")
+
+
+@router.post("/submissions/{submission_id}/probes", status_code=202)
+async def trigger_probes(
+    submission_id: str,
+    kinds: str = "control,data_removal,hostile,null",
+    hostile_kinds: str = "fifo,symlink,directory,oversized",
+    all_artifacts: bool = False,
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    """Batch 4: the Oracle/Nop probes (data removal, hostile artifacts, null ladder) with a
+    positive control, one Harbor run each on a temporary copy. Run Flag checks afterwards."""
+    chosen = tuple(k for k in kinds.split(",") if k)
+    hostile = tuple(k for k in hostile_kinds.split(",") if k)
+    if not chosen or any(k not in _PROBE_KINDS for k in chosen) or any(k not in probes.HOSTILE_KINDS for k in hostile):
+        raise HTTPException(status_code=400, detail=f"kinds from {_PROBE_KINDS}, hostile_kinds from {probes.HOSTILE_KINDS}")
+    _require_built_submission(submission_id, db)
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="probes", run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind="probes", run_index=0)
+        db.add(run)
+    run.status, run.logs = "pending", None
+    db.commit()
+    await task_queue.submit(f"{submission_id}:probes", task_runner.run_probes(submission_id, chosen, hostile, all_artifacts))
+    return {"status": "started"}
 
 
 class FlagRuling(BaseModel):

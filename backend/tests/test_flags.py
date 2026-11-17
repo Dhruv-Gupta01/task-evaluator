@@ -246,11 +246,11 @@ def test_framework_keeps_rulings_across_reruns(tmp_path, db):
     root = make_task(tmp_path / "t", github="anonymous")
     sub = _submission(db, root)
     rec = flags.run_static(db, sub)
-    assert sorted(f["rule"] for f in rec["flags"]) == ["15.14", "15.15"]
+    assert sorted(f["rule"] for f in rec["flags"]) == ["15.14", "15.15", "15.19"]  # 15.19: no cheat trial yet
     canary = next(f for f in rec["flags"] if f["rule"] == "15.14")
     assert canary["severity"] == fr.BLOCKER and canary["status"] == "open"
     assert rec["counts"]["open_blockers"] == 1
-    assert sum(r["ran"] for r in rec["rules"]) == len(fr.STATIC_RULES)
+    assert sum(r["ran"] for r in rec["rules"]) == len(fr.STATIC_RULES) + 17  # static + result rules
 
     flag = db.get(Flag, canary["id"])
     with pytest.raises(ValueError):

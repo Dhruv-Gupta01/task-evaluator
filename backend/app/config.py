@@ -43,6 +43,19 @@ class Settings(BaseSettings):
     # Per-script limit for the vendored TB checks. A check that runs out of time is
     # reported as not run, never as a fail or a pass.
     tb_check_timeout_sec: int = 180
+    # Evidence runs (batch 6). Below this many finished trials a pass rate is reported as
+    # counts with an interval and Flag 15.11 fires.
+    min_trials_for_rate: int = 5
+    # Flag 15.27 when the agent timeout is more than this many times the slowest finished trial.
+    timeout_headroom_ratio: float = 3.0
+    # The cheap small model of the evidence set (E4); any pass raises Flag 15.36.
+    cheap_agent_model: str = "anthropic/claude-haiku-5-5"
+    cheap_agent: str = "claude-code"
+    # The second pair of the standard set (G4, E3): another model family.
+    second_agent: str = "codex"
+    second_agent_model: str = "openai/gpt-6-luna"
+    # Repeated Oracle runs (E1) may go up to this many.
+    max_oracle_repeats: int = 50
 
     # Defaults applied when a task.toml omits a section
     default_cpus: float = 1.0

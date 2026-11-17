@@ -36,6 +36,7 @@ import {
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogPanel } from "@/components/LogPanel";
 import { FlagsPanel } from "@/components/FlagsPanel";
+import { PostFixPanel } from "@/components/PostFixPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -146,7 +147,7 @@ function SubmissionDetail() {
   const [cheatEffort, setCheatEffort] = useState<ReasoningEffort | "default" | "same">("same");
   // "same", or "<agent>|<model>" for one pick of the model dropdown.
   const [cheatModel, setCheatModel] = useState("same");
-  const [cheatPrompt, setCheatPrompt] = useState<CheatPromptChoice>("default");
+  const [cheatPrompt, setCheatPrompt] = useState<CheatPromptChoice>("tb");
   // One clean cheat trial proves little (real cheats upstream needed several tries).
   const [cheatN, setCheatN] = useState("3");
   const [cheatCostCap, setCheatCostCap] = useState("");
@@ -433,6 +434,7 @@ function SubmissionDetail() {
       )}
 
       <FlagsPanel id={id} />
+      <PostFixPanel id={id} buildReady={data.build.status === "passed"} />
 
       <div className="grid gap-4 md:grid-cols-2">
         <div className="md:col-span-2">

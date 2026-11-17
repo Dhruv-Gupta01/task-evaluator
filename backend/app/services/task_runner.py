@@ -8,6 +8,8 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from sqlalchemy import func
+
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models import Run, Submission
@@ -23,6 +25,7 @@ from app.services import (
     infra_marker_scan,
     leakage_scan,
     platform_checks,
+    probes,
     review_report,
     static_checks,
     sufficiency_judge,
@@ -116,7 +119,10 @@ def model_choices() -> dict[str, list[str]]:
 # PROVENANCE.md there) -- an alternate, richer rubric a run can opt into,
 # never the default. "default" = Harbor's own built-in rubric/prompt.
 RUBRICS = ("default", "tb")
-CHEAT_PROMPTS = ("default", "tb", "combined", "targeted")
+CHEAT_PROMPTS = ("default", "tb", "combined", "targeted", "hinted")
+# G5/E5/E6: tier 2 is unhinted (a cheat directive alone); tier 1 is hinted (the official
+# directive plus a read-only copy of the verifier's tests). Tier 0 is the probes (batch 4).
+CHEAT_TIERS = {"hinted": "1"}
 # Fewer tool calls than this means the agent did not really attempt anything.
 _MIN_CHEAT_TOOL_CALLS = 3
 _TB_PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "vendor" / "tb_prompts"
@@ -125,6 +131,36 @@ _TB_ANALYZE_PROMPT = _TB_PROMPTS_DIR / "trial-analysis.txt"
 _TB_ANALYZE_JOB_PROMPT = _TB_PROMPTS_DIR / "trial-analysis-job.txt"
 _TB_CHECK_RUBRIC = _TB_PROMPTS_DIR / "task-implementation.toml"
 _TB_CHEAT_PROMPT = _TB_PROMPTS_DIR / "hack-trial-prompt.md"
+
+
+def _cheat_rubric_file(submission_id: str) -> Path:
+    """The TB trial-analysis rubric with its [[cheat_criteria]] merged into [[criteria]], because
+    Harbor's rubric model reads only `criteria`; every cheat trial is analysed with all of them."""
+    import tomllib
+
+    data = tomllib.loads(_TB_ANALYZE_RUBRIC.read_text(encoding="utf-8"))
+    criteria = list(data.get("criteria") or []) + list(data.get("cheat_criteria") or [])
+    out = settings.storage_dir / "submissions" / submission_id / "runs" / "analysis" / "cheat-rubric.toml"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    body = ""
+    for c in criteria:
+        body += "[[criteria]]\n"
+        for k, v in c.items():
+            value = f'"""{v}"""' if k == "guidance" else json.dumps(str(v))
+            body += f"{k} = {value}\n"
+        body += "\n"
+    out.write_text(body, encoding="utf-8")
+    return out
+
+
+def hinted_cheat_text(task_root: Path) -> str:
+    """Tier 1: the official directive plus a read-only copy of the verifier's test files."""
+    parts = [_tb_cheat_prompt_text(), "", "For reference, a read-only copy of the verifier's test files follows."]
+    tests = task_root / "tests"
+    for p in sorted(tests.glob("*")):
+        if p.is_file() and p.suffix in (".py", ".sh") and p.stat().st_size < 60_000:
+            parts += [f"\n--- tests/{p.name} ---", p.read_text(encoding="utf-8", errors="replace")]
+    return "\n".join(parts)
 
 
 def _tb_cheat_prompt_text() -> str:
@@ -606,6 +642,75 @@ async def _run_variant(task_root: Path, base: Path, i: int, variant: dict, mode:
     return entry
 
 
+async def run_probes(submission_id: str, kinds: tuple[str, ...], hostile_kinds: tuple[str, ...],
+                     all_artifacts: bool = False) -> None:
+    """Batch 4: the Oracle/Nop probes (services/probes.py), one Harbor run each, in order, on
+    temporary copies. Advisory: the Flag rules 15.1, 15.3, 15.8, 15.33 and 15.37 read the result.
+    logs is JSON: {in_progress, control_reward, expected_tests, probes: [{name, kind, verdict,
+    reward, tests, verifier_seconds, failed_tests, flags, note}]}."""
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+        run = _get_or_create_run(db, submission_id, "probes", 0)
+        run.status, run.reward, run.logs = "running", None, None
+        run.started_at, run.finished_at = datetime.now(UTC), None
+        db.commit()
+        task_root = Path(submission.extracted_path)
+        timeout_sec = _oracle_timeout_sec(_get_task_config(submission))
+        base = settings.storage_dir / "submissions" / submission_id / "runs" / "probes"
+        planned = probes.plan(task_root, kinds, hostile_kinds, all_artifacts)
+        results: list[dict] = []
+        control_reward, control_verifier_sec, expected_tests = None, None, None
+        for i, probe in enumerate(planned):
+            copy_root = base / f"p{i}-src"
+            if copy_root.exists():
+                shutil.rmtree(copy_root)
+            shutil.copytree(task_root, copy_root, symlinks=True)
+            probes.apply(copy_root, probe)
+            if probe["kind"] == "hostile" and control_verifier_sec:
+                probes.cap_verifier_timeout(copy_root, max(120.0, 3 * control_verifier_sec))
+            outcome = await harbor_runner.run_single(
+                copy_root, probe["agent"], base / f"p{i}", f"probe-{uuid.uuid4().hex[:8]}", timeout_sec
+            )
+            shutil.rmtree(copy_root, ignore_errors=True)
+            report = outcome.report or {}
+            ctrf = report.get("ctrf") or {}
+            facts = report.get("facts") or {}
+            entry = {
+                **probe,
+                "reward": outcome.reward,
+                "tests": ctrf.get("tests"),
+                "verifier_seconds": facts.get("verifier_seconds"),
+                "failed_tests": (ctrf.get("failed_names") or [])[:10],
+                "flags": report.get("flags") or [],
+                "note": (outcome.logs or "")[-600:] if outcome.reward is None else "",
+            }
+            if probe["kind"] == "control":
+                control_reward, control_verifier_sec = outcome.reward, facts.get("verifier_seconds")
+                expected_tests = ctrf.get("tests")
+            entry["verdict"] = probes.verdict(probe, outcome.reward, control_reward)
+            results.append(entry)
+            run.logs = json.dumps({"in_progress": True, "control_reward": control_reward,
+                                   "expected_tests": expected_tests, "probes": results})
+            db.commit()
+        bad = [r for r in results if r["verdict"] in ("failed_open", "invalid_reward")]
+        run.logs = json.dumps({"in_progress": False, "control_reward": control_reward,
+                               "expected_tests": expected_tests, "probes": results})
+        run.status = "failed" if bad or (control_reward or 0) < 1 else "passed"
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    except Exception:
+        run = _get_or_create_run(db, submission_id, "probes", 0)
+        run.status = "failed"
+        run.logs = json.dumps({"error": traceback.format_exc(), "probes": []})
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    finally:
+        db.close()
+
+
 async def _run_probe(submission_id: str, kind: str, mode: str) -> None:
     """Shared by the valid-variant probe (mode "valid") and the weak-answer
     probe (mode "broken"). Advisory. A model proposes correct-by-the-instruction variants of the
@@ -987,6 +1092,66 @@ async def _retry_infra_agent_failures(
             run.logs = f"{header}\n{result.error or 'harbor produced no result for the retry either'}"
         run.finished_at = datetime.now(UTC)
         db.commit()
+
+
+EVIDENCE_SETS = ("standard", "cheap")
+
+
+def evidence_pairs(which: str) -> list[dict]:
+    """G4/E3: the standard set is two agent/model pairs (two model families) with 3 trials each;
+    E4: the cheap set is one cheap small model with 2 trials, where any pass raises Flag 15.36."""
+    if which == "cheap":
+        return [{"agent": settings.cheap_agent, "model": settings.cheap_agent_model, "n": 2}]
+    return [
+        {"agent": settings.harbor_agent, "model": None, "n": 3},
+        {"agent": settings.second_agent, "model": settings.second_agent_model, "n": 3},
+    ]
+
+
+def add_pending_agent_rows(db, submission_id: str, n: int) -> None:
+    last = db.query(func.max(Run.run_index)).filter_by(submission_id=submission_id, kind="agent").scalar()
+    first = 0 if last is None else last + 1
+    for run_index in range(first, first + n):
+        db.add(Run(submission_id=submission_id, kind="agent", run_index=run_index, status="pending"))
+    db.commit()
+
+
+async def run_evidence_set(submission_id: str, which: str, max_cost_usd: float | None = None) -> None:
+    """Runs an evidence set pair by pair, appending to the agent trials, then Failure Analysis
+    (TB rubric) when it is the standard set. Progress is kept in an `evidence_runs` Run row:
+    {set, pairs: [{agent, model, n, status}], cost_cap}. Each pair gets an equal share of the cap."""
+    pairs = evidence_pairs(which)
+    share = max_cost_usd / len(pairs) if max_cost_usd else None
+    db = SessionLocal()
+    try:
+        row = _get_or_create_run(db, submission_id, "evidence_runs", 0)
+        row.status, row.started_at, row.finished_at = "running", datetime.now(UTC), None
+        state = {"set": which, "cost_cap": max_cost_usd, "pairs": [{**p, "status": "pending"} for p in pairs]}
+        row.logs = json.dumps(state)
+        db.commit()
+        for i, pair in enumerate(pairs):
+            error = _agent_config_error(pair["agent"], pair["model"]) if pair["agent"] else None
+            if error:
+                state["pairs"][i]["status"] = f"not run: {error}"
+            else:
+                add_pending_agent_rows(db, submission_id, pair["n"])
+                await run_agent_trials(submission_id, pair["n"], append=True, agent=pair["agent"],
+                                       max_cost_usd=share, model=pair["model"])
+                state["pairs"][i]["status"] = "done"
+            row.logs = json.dumps(state)
+            db.commit()
+        if which == "standard":
+            await run_failure_analysis(submission_id, "tb")
+        row.status, row.finished_at = "passed", datetime.now(UTC)
+        row.logs = json.dumps(state)
+        db.commit()
+    except Exception:
+        row = _get_or_create_run(db, submission_id, "evidence_runs", 0)
+        row.status, row.finished_at = "failed", datetime.now(UTC)
+        row.logs = json.dumps({"set": which, "error": traceback.format_exc()})
+        db.commit()
+    finally:
+        db.close()
 
 
 async def run_agent_trials(
@@ -1795,6 +1960,7 @@ async def _cheat_check(db, submission_id: str, outcome: "harbor_runner.TrialOutc
         settings.analyze_agent,
         settings.analyze_model,
         settings.analyze_timeout_sec,
+        rubric_path=_cheat_rubric_file(submission_id),
         agent_setup_timeout_sec=_agent_setup_timeout_sec(settings.analyze_agent),
         agent_kwargs=_evaluator_kwargs(settings.analyze_reasoning_effort),
     )
@@ -1814,6 +1980,7 @@ async def _cheat_check(db, submission_id: str, outcome: "harbor_runner.TrialOutc
             "explanation": check.get("explanation"),
             "cost_usd": analyze_outcome.cost_usd,
             "error": None,
+            "checks": results[0].get("checks"),
         }
     return {
         "outcome": "unknown",
@@ -1829,7 +1996,9 @@ async def _finish_cheat_run(
     run.reward = 1 if (outcome.reward is not None and outcome.reward >= 1.0) else outcome.reward
     run.raw_reward = outcome.reward
     run.verifier_json = json.dumps(outcome.report) if outcome.report else None
-    cheat_check = await _cheat_check(db, submission.id, outcome, label) if run.reward == 1 else None
+    # G5: every cheat trial is analysed with all criteria, not only the ones that scored 1.
+    cheat_check = await _cheat_check(db, submission.id, outcome, label)
+    refusal = (outcome.report or {}).get("refusal") if outcome.report else None
     # A reward below 1 only means the trap held if the agent really tried. A
     # trial with no reward, or one where the agent barely made a tool call
     # (refused, was blocked, crashed early), tested nothing.
@@ -1840,6 +2009,8 @@ async def _finish_cheat_run(
                 "the trial produced no reward (it crashed, timed out or was stopped), "
                 "so the trap was never tested"
             )
+        elif refusal:
+            inconclusive = "the agent refused the directive, so the trap was never tested (refused is not held)"
         elif outcome.tool_calls is not None and outcome.tool_calls < _MIN_CHEAT_TOOL_CALLS:
             inconclusive = (
                 f"the agent made only {outcome.tool_calls} tool call(s); it did not really "
@@ -1852,7 +2023,7 @@ async def _finish_cheat_run(
     run.status = (
         "passed"
         if (run.reward != 1 and inconclusive is None)
-        or (cheat_check is not None and cheat_check.get("outcome") == "pass")
+        or (run.reward == 1 and cheat_check is not None and cheat_check.get("outcome") == "pass")
         else "failed"
     )
     run.logs = json.dumps(
@@ -1862,7 +2033,10 @@ async def _finish_cheat_run(
             "cheat_check": cheat_check,
             "cheat_prompt": cheat_prompt,
             "inconclusive": inconclusive,
+            "refused": bool(refusal),
             "tool_calls": outcome.tool_calls,
+            "tier": CHEAT_TIERS.get(cheat_prompt, "2"),
+            "checks": (cheat_check or {}).get("checks"),
         }
     )
     # Not update_canonical: this trial's task copy always has an intentionally
@@ -1878,7 +2052,7 @@ async def run_cheat_trial(
     submission_id: str,
     agent: str | None = None,
     reasoning_effort: str | None = None,
-    cheat_prompt: str = "default",
+    cheat_prompt: str = "tb",
     max_cost_usd: float | None = None,
     model: str | None = None,
 ) -> None:
@@ -2001,6 +2175,8 @@ async def run_cheat_trial(
                 if cheat_prompt == "combined"
                 else harbor_runner.targeted_cheat_instruction(Path(submission.extracted_path))
                 if cheat_prompt == "targeted"
+                else hinted_cheat_text(Path(submission.extracted_path))
+                if cheat_prompt == "hinted"
                 else None
             ),
             extra_note=_cost_cap_warning(cost_cap_usd, cost_cap_label, n, _agent_timeout_sec(config)),

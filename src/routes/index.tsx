@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Upload, RefreshCw } from "lucide-react";
 import { api, type SubmissionListItem } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
+import { IdeaReviewCard } from "@/components/PostFixPanel";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
@@ -57,6 +58,7 @@ function SubmissionsPage() {
   return (
     <div className="min-h-screen bg-background">
       <div className="mx-auto max-w-6xl px-6 py-8">
+        <IdeaReviewCard />
         <div className="mb-8 flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">Submissions</h1>

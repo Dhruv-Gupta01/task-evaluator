@@ -566,7 +566,8 @@ export type RubricChoice = (typeof RUBRIC_CHOICES)[number]["value"];
 
 export const CHEAT_PROMPT_CHOICES = [
   { value: "default", label: "Default" },
-  { value: "tb", label: "TB (red-team)" },
+  { value: "tb", label: "TB official (tier 2)" },
+  { value: "hinted", label: "TB + tests copy (tier 1)" },
   { value: "combined", label: "Partial solve + shortcut" },
   { value: "targeted", label: "Targeted (this task's rules)" },
 ] as const;
@@ -754,6 +755,34 @@ export const api = {
   changes: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/changes`).then(handle<SubmissionChanges>),
   flags: (id: string) => fetch(`${API_BASE_URL}/submissions/${id}/flags`).then(handle<FlagRecord>),
+  // Post-fix stages: stored results, probes (batch 4), evidence sets (batch 6), generators (batch 8)
+  extras: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/extras`).then(
+      handle<Record<string, { status: StageStatus; logs: string | null }>>,
+    ),
+  probes: (id: string, kinds: string, hostileKinds: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/probes?kinds=${kinds}&hostile_kinds=${hostileKinds}`, {
+      method: "POST",
+    }).then(handle<unknown>),
+  evidenceSet: (id: string, which: "standard" | "cheap", maxCostUsd?: number) =>
+    fetch(
+      `${API_BASE_URL}/submissions/${id}/evidence-set?which=${which}${
+        maxCostUsd ? `&max_cost_usd=${maxCostUsd}` : ""
+      }`,
+      { method: "POST" },
+    ).then(handle<unknown>),
+  agentRubric: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/agent-rubric`, { method: "POST" }).then(handle<unknown>),
+  deliverable: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/deliverable`, { method: "POST" }).then(
+      handle<{ markdown?: string; model?: string }>,
+    ),
+  ideaReview: (idea: string) =>
+    fetch(`${API_BASE_URL}/idea-review`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ idea }),
+    }).then(handle<{ id: string; review: string; model: string }>),
   runFlags: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/flags`, { method: "POST" }).then(handle<FlagRecord>),
   // accepted and disputed need a name and a reason; open needs a name
