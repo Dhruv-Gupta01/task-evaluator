@@ -29,6 +29,7 @@ from app.services import (
     tb_static_checks,
     validation_service,
     variant_probe,
+    vendor_info,
     verifier_report,
 )
 from app.services.llm import factory as llm_factory
@@ -2032,13 +2033,14 @@ async def run_cheat_trial(
 
 async def run_rubric_check(submission_id: str, rubric: str = "tb") -> None:
     """`harbor check`: an evaluator agent reads the whole task and scores it
-    against a rubric -- the vendored 36-criterion Terminal-Bench rubric
-    (vendor/tb_prompts/, see PROVENANCE.md) by default, since criteria such as
+    against a rubric -- the vendored Terminal-Bench rubric (vendor/tb_prompts/, see
+    PROVENANCE.md; its criteria count is read from the file) by default, since criteria such as
     ctrf_reporting, verifier_execution_isolation, resource_configuration and
     effective_instruction_length exist only there (4.1 A.4), or Harbor's own
     11-criterion default with rubric="default". Advisory, like Failure Analysis. Result stored
     as JSON in the Run's logs: {"agent", "model", "cost_usd", "error",
-    "results": [...], "rubric"}."""
+    "results": [...], "rubric", "rubric_info"}; rubric_info (TB only) is the vendored
+    commit, its age and the criteria count."""
     db = SessionLocal()
     try:
         submission = db.get(Submission, submission_id)
@@ -2081,6 +2083,7 @@ async def run_rubric_check(submission_id: str, rubric: str = "tb") -> None:
                 "error": outcome.error,
                 "results": results,
                 "rubric": rubric,
+                "rubric_info": vendor_info.rubric_info() if rubric == "tb" else None,
             }
         )
         has_checks = any(r.get("checks") for r in results)

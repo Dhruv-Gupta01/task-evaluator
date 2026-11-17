@@ -16,6 +16,8 @@ from functools import lru_cache
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.services.vendor_info import checks_info
+
 _TASK_NAME_RE = re.compile(r"^([^/]+)/(.+)$")
 
 _CHECKS_DIR = Path(__file__).resolve().parent.parent.parent / "vendor" / "tb_checks" / "scripts"
@@ -207,17 +209,10 @@ def _link_task(target: Path, link: Path) -> None:
 
 
 def vendor_info() -> dict:
-    """The upstream commit the vendored checks come from (read from PROVENANCE.md) and
-    how many check scripts are vendored, so every result says which rule set it ran."""
-    info: dict = {"commit": None, "date": None, "scripts": len(list(_CHECKS_DIR.glob("check-*.sh")))}  # the scripts that run; check-cpu-threads.py is a helper
-    try:
-        text = (_CHECKS_DIR.parent / "PROVENANCE.md").read_text()
-    except OSError:
-        return info
-    m = re.search(r"Commit:\s*`([0-9a-f]{7,40})`(?:\s*\(([\d-]+)\))?", text)
-    if m:
-        info["commit"], info["date"] = m.group(1), m.group(2)
-    return info
+    """The upstream commit the vendored checks come from, its age, a reminder to diff
+    against upstream when it is old, and how many check scripts run, so every result
+    says which rule set it ran."""
+    return checks_info()
 
 
 def run_tb_static_checks(task_root: Path) -> TbStaticCheckReport:

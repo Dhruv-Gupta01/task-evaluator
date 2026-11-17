@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # edit both in .env when the plan or the exchange rate changes.
     gptzero_inr_per_word: float = 0.014207
     usd_inr_rate: float = 96.9
+    # The vendored TB checks and rubric get a "run scripts/diff_vendored_checks.py"
+    # reminder once their upstream commit is older than this. 0 turns it off.
+    vendor_stale_days: int = 30
 
     # Defaults applied when a task.toml omits a section
     default_cpus: float = 1.0

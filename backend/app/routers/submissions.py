@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.models import LlmSpend, Run, Submission
 from app.schemas import SubmissionListItem, SubmissionSchema, UploadResponse
-from app.services import budget, submission_diff, submission_service, task_runner
+from app.services import budget, redaction, submission_diff, submission_service, task_runner
 from app.workers import task_queue
 
 router = APIRouter()
@@ -434,8 +434,9 @@ async def trigger_rubric_check(
 ) -> dict[str, str]:
     """`harbor check`: an evaluator agent scores the whole task against a
     rubric. Advisory. Needs ANTHROPIC_API_KEY (CHECK_AGENT defaults to
-    claude-code). The default is the vendored 36-criterion Terminal-Bench
-    rubric (4.1 A.4); rubric="default" uses Harbor's own 11-criterion one."""
+    claude-code). The default is the vendored Terminal-Bench rubric (4.1 A.4;
+    its criteria count is read from the file and stored with the result);
+    rubric="default" uses Harbor's own 11-criterion one."""
     if rubric not in task_runner.RUBRICS:
         raise HTTPException(
             status_code=400, detail=f"rubric must be one of {', '.join(task_runner.RUBRICS)}"
@@ -841,10 +842,11 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
             schema, total_cost_usd, cost_report
         ),
     }
-    # C10: strip host usernames from every absolute /Users|home/<user>/...
-    # path before this leaves the platform -- the raw versions are fine in
-    # the UI/DB, just never in something meant for outside reading.
-    bundle = submission_service.redact_host_paths(bundle)
+    # The bundle leaves the platform: strip host usernames from absolute paths (C10)
+    # and API keys, tokens and private keys (known issue 4). The UI and DB keep the raw text.
+    counts: dict[str, int] = {}
+    bundle = redaction.redact_secrets(redaction.redact_host_paths(bundle), counts)
+    bundle["secret_redactions"] = counts
     body = json.dumps(bundle, indent=2)
     return Response(
         content=body,

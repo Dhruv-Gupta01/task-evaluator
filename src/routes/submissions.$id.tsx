@@ -20,6 +20,7 @@ import {
   type StageStatus,
   type StaticCheckReport,
   type TbStaticCheckReport,
+  type VendorInfo,
   type AiDetectionReport,
   type AnalysisCheck,
   type AgentTrialsResult,
@@ -721,6 +722,7 @@ function SubmissionDetail() {
                       </span>
                     )}
                   </div>
+                  <VendorReminder info={report.vendor} />
                   <LogPanel logs={report.text} title="TB check findings" />
                 </>
               );
@@ -1928,7 +1930,7 @@ function LayerBadge({ outcome }: { outcome: string }) {
 // pulled from data already gathered by Rubric Check (TB rubric) and AI
 // Detection above -- shown side by side, never merged into one score.
 // Layer 1 is a written policy (no check to run). Layer 2 is one criterion
-// (instruction_concision) inside the 35-criteria rubric -- an LLM's
+// (instruction_concision) inside the vendored TB rubric -- an LLM's
 // subjective opinion. Layer 3 is a real GPTZero measurement, entirely
 // independent of Layer 2's opinion.
 function AiLayersOverview({
@@ -2066,6 +2068,16 @@ function CheatTrialView({ status, logs }: { status: StageStatus; logs?: string }
   );
 }
 
+// Shown when the vendored upstream files are older than VENDOR_STALE_DAYS (K12).
+function VendorReminder({ info }: { info?: VendorInfo | null }) {
+  if (!info?.stale || !info.reminder) return null;
+  return (
+    <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-800 dark:text-amber-300">
+      {info.reminder}
+    </div>
+  );
+}
+
 function RubricCheckView({ logs }: { logs?: string }) {
   if (!logs) return null;
   let parsed: RubricCheck | null = null;
@@ -2080,7 +2092,16 @@ function RubricCheckView({ logs }: { logs?: string }) {
         {parsed.agent} · {parsed.model}
         {parsed.cost_usd != null && <> · ${parsed.cost_usd.toFixed(3)}</>}
         {parsed.rubric && <> · {parsed.rubric} rubric</>}
+        {parsed.rubric_info && (
+          <>
+            {" "}
+            ({parsed.rubric_info.criteria} criteria
+            {parsed.rubric_info.commit && <>, upstream {parsed.rubric_info.commit.slice(0, 7)}</>}
+            {parsed.rubric_info.date && <> of {parsed.rubric_info.date}</>})
+          </>
+        )}
       </div>
+      <VendorReminder info={parsed.rubric_info} />
       {parsed.error && (
         <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs whitespace-pre-wrap max-h-48 overflow-y-auto">
           {parsed.error}

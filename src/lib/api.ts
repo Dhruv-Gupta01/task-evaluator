@@ -407,8 +407,10 @@ export interface RubricCheck {
   cost_usd?: number | null;
   error?: string | null;
   results: RubricCheckEntry[];
-  // "default" (Harbor's own 11-criterion rubric) or "tb" (vendored 35-criterion).
+  // "default" (Harbor's own 11-criterion rubric) or "tb" (the vendored TB rubric).
   rubric?: string;
+  // TB rubric only: criteria count read from the vendored file, its upstream commit and age.
+  rubric_info?: VendorInfo & { criteria: number };
 }
 
 // `logs` is JSON (see StaticCheckReport below) once the stage has run.
@@ -446,12 +448,22 @@ export interface TbCheckFinding {
   skipped?: boolean;
 }
 
+// Where a vendored Terminal-Bench file set comes from, read from its PROVENANCE.md (K12).
+// `stale` is set once the upstream commit is older than VENDOR_STALE_DAYS.
+export interface VendorInfo {
+  commit: string | null;
+  date: string | null;
+  age_days: number | null;
+  stale: boolean;
+  reminder: string | null;
+}
+
 export interface TbStaticCheckReport {
   pass_count: number;
   fail_count: number;
   skip_count?: number;
   // Which upstream commit the vendored rule set comes from (5.0 F).
-  vendor?: { commit: string | null; date: string | null; scripts: number };
+  vendor?: VendorInfo & { scripts: number };
   results: TbCheckFinding[];
   text: string;
 }

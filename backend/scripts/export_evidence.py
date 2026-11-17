@@ -9,8 +9,12 @@ docs/testing/ from the database. Example:
 import argparse
 import json
 import subprocess
+import sys
 import urllib.request
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from app.services.redaction import redact_host_paths, redact_secrets  # noqa: E402
 
 REPO = "harbor-framework/terminal-bench"
 
@@ -36,6 +40,10 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     with urllib.request.urlopen(f"{a.base}/submissions/{a.id}", timeout=120) as r:
         result = json.loads(r.read())
+    counts: dict[str, int] = {}
+    result = redact_secrets(redact_host_paths(result), counts)
+    if counts:
+        print("redacted", counts)
     result["_test"] = {"task": a.task, "issues": a.issue, "submission_id": a.id}
     (out / "result.json").write_text(json.dumps(result, indent=1))
     if a.issue:

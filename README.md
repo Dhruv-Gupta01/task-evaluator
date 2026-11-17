@@ -166,7 +166,7 @@ Items marked **(4.1)** are new in the 4.1 branch; the rest came with 4.0.
 | AI Detection | Terminal-Bench's three AI-usage layers side by side: written policy, Rubric Check opinion, and a GPTZero measurement. | GPTZero key |
 | Sufficiency | LLM judge: is `instruction.md` plus `environment/` enough to pass the hidden tests? Runs 1 to 3 times (majority decides, disagreement shown); tagged checks for hidden rules, stale numbers, coverage, loose tests and more. **(4.1)** Knows which files are in the image. | LLM |
 | Edge-Case Coverage | Lists edge cases from the instruction alone, then checks which the tests cover. **(4.1)** "Check + run through the grader" breaks the Oracle on each uncovered case and confirms with the real verifier. | LLM |
-| Rubric Check | `harbor check`: an agent scores the task against a rubric (Harbor's own, or the vendored 35-criterion TB rubric, now 36 criteria **(4.1)**; the TB one is pre-selected). | `ANTHROPIC_API_KEY` |
+| Rubric Check | `harbor check`: an agent scores the task against a rubric (Harbor's own, or the vendored TB rubric, whose criteria count is read from the file and shown with the result; the TB one is pre-selected). | `ANTHROPIC_API_KEY` |
 | Valid-Variant Probe | Runs other correct forms of the Oracle's answer through the verifier; a rejection means the grader may be too strict. | LLM, Docker |
 | Weak-Answer Probe | Breaks one stated rule at a time in the Oracle's answer; a broken answer that still scores 1 means a rule is not enforced. | LLM, Docker |
 | Cheat Trial | One trial told to cheat. Reward 1 triggers an automatic reward-hacking check. **(4.1)** Runs 1 to 3 trials with a combined summary. An agent that never really tried is "inconclusive". | Agent key |
@@ -277,8 +277,8 @@ tokens and cost, and flags where the reward and the tests disagree.
 - **Rubric dropdowns (Failure Analysis, Rubric Check) and Cheat Trial's Prompt dropdown**: all three
   can swap in a richer, vendored Terminal-Bench alternative (`backend/vendor/tb_prompts/`, copied
   verbatim from `harbor-framework/terminal-bench` at a pinned commit -- see `PROVENANCE.md` there)
-  instead of Harbor's own default. Rubric Check's TB option is a 35-criterion review (vs. Harbor's
-  own 11); Cheat Trial's TB prompt is a more aggressive, explicit red-team-style directive than the
+  instead of Harbor's own default. Rubric Check's TB option is the larger TB review (its criteria count is
+  shown with each result; Harbor's own has 11); Cheat Trial's TB prompt is a more aggressive, explicit red-team-style directive than the
   platform's own hand-written one. None of these are the default -- pick them per-run when the
   richer review is worth the extra cost.
 - **Rubric check**: the Rubric Check card's "Run Rubric Check" button runs `harbor check` — a

@@ -38,28 +38,6 @@ from app.schemas import (
 
 _TERMINAL = {"passed", "failed", "not-run"}
 
-# C10: build/trial logs and check reports embed absolute host paths
-# (backend/storage/..., a candidate's own machine's home dir in task file
-# content, etc.) -- fine for the platform's own UI, but a submission's
-# username shouldn't leak into anything exported for outside reading. Only
-# the username segment is redacted, not the whole path, so the rest (still
-# useful for debugging) survives.
-_HOST_PATH_RE = re.compile(r"(/(?:Users|home)/)([^/\s\"'\\]+)")
-
-
-def redact_host_paths(value):
-    """Recursively redacts `/Users/<user>/...` and `/home/<user>/...`
-    segments in strings, dicts and lists -- used on export only (see
-    routers.submissions.get_evidence_bundle), never on data stored or shown
-    inside the platform itself."""
-    if isinstance(value, str):
-        return _HOST_PATH_RE.sub(lambda m: f"{m.group(1)}<redacted>", value)
-    if isinstance(value, dict):
-        return {k: redact_host_paths(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [redact_host_paths(v) for v in value]
-    return value
-
 
 def _get_run(submission: Submission, kind: str, run_index: int = 0) -> Run | None:
     for r in submission.runs:

@@ -1241,7 +1241,7 @@ async def run_check(
     """`harbor check` over one task directory: an evaluator agent reads the
     whole task and scores it against a rubric -- Harbor's built-in default
     (an automated stand-in for a human task reviewer) unless rubric_path
-    points at a custom one (e.g. vendor/tb_prompts/'s 35-criterion review).
+    points at a custom one (e.g. the vendored TB rubric in vendor/tb_prompts/).
     Different from run_analyze, which grades agent trajectories, not the
     task itself. Harbor writes <out_dir>/<job_name>/check_report.json. Known
     limitation: Harbor's own launcher passes the agent's instruction as a

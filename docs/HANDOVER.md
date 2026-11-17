@@ -87,7 +87,7 @@ Files: backend/storage/submissions/{id}/ (zip, extracted task, logs, Harbor outp
 | Fresh Build | Rebuilds with no cache, then runs one Oracle with every `RUN` step redone. Catches a dependency that no longer installs. | Docker |
 | AI Detection | Terminal-Bench's GPTZero check on the instruction and solution. | `GPTZERO_API_KEY` (optional) |
 | Edge-Case Coverage | Lists edge cases from the instruction, checks which the tests cover; optionally breaks the Oracle's answer on each uncovered case and runs it through the real grader. | LLM, Docker |
-| Rubric Check | `harbor check`: an agent scores the task against a quality rubric (the vendored 36-criterion TB rubric by default). | Anthropic key |
+| Rubric Check | `harbor check`: an agent scores the task against a quality rubric (the vendored TB rubric by default; its criteria count is shown with the result). | Anthropic key |
 | Valid-Variant Probe | Runs other correct forms of the Oracle's answer; a rejection suggests the grader is too strict. | LLM, Docker |
 | Weak-Answer Probe | Breaks one stated rule at a time in the Oracle's answer; a broken answer that still scores 1 means a rule is not enforced. | LLM, Docker |
 | Cheat Trial | Runs 1 to 3 trials told to cheat. A reward of 1 triggers an automatic reward-hacking check. A trial where the agent made fewer than 3 tool calls is "inconclusive", not "the trap held". | agent key |
@@ -175,9 +175,8 @@ image per submission. Clean up with `docker image prune -a` and by deleting old 
 
 Read these before relying on the platform.
 
-1. **Reviewer decision cannot save from the browser.** The backend allows only GET and POST
-   across origins, and the UI calls PUT. Confirmed: the preflight request returns 400. The fix is
-   adding `"PUT"` to `allow_methods` in `backend/app/main.py`.
+1. **Reviewer decision cannot save from the browser.** Fixed (K1): `allow_methods` in
+   `backend/app/main.py` now includes `"PUT"`; `backend/tests/test_housekeeping.py` checks the preflight.
 2. **Single machine only.** The platform needs a local Docker daemon, keeps its job queue in
    memory and stores absolute paths in the database. It cannot run on AWS Lambda, Fargate, Cloud
    Run or Runpod pods. A cloud plan exists (`docs/cloud-deployment-plan.md`: one Docker VM, a login
@@ -187,8 +186,10 @@ Read these before relying on the platform.
 4. **API keys can leak into stored logs.** Codex and Claude Code run inside the task container and
    receive the provider key in their environment. An agent that dumps its environment (for example
    a cheat trial told to look around) writes the key into the trial log, which the evidence bundle
-   then includes. Path redaction does not remove it. Redacting key-like strings is not built yet.
-   Check a log before you share an evidence file, and rotate any key that appears in one.
+   then includes. Fixed for exports (K4): the evidence download and `scripts/export_evidence.py`
+   pass through `services/redaction.py`, which removes every key value configured on this machine
+   plus key-shaped strings, and the bundle's `secret_redactions` says how many were removed. The
+   database and the UI still hold the raw logs, so a key that appears there should still be rotated.
 5. **Windows has never been run.** The code has Windows handling and `.gitattributes` keeps shell
    scripts on LF, but no one has tried it.
 6. **Docker Desktop for Mac cannot enforce `no-network`**, so every task is run with network access
@@ -211,7 +212,8 @@ Read these before relying on the platform.
   linked to a Lovable project, and commits pushed to the connected branch sync into it. **Never
   force-push, and never rebase, amend or squash commits that are already pushed.** Push with
   `git -c http.postBuffer=524288000 push origin <branch>`.
-- **No test suite.** Verification is done by running stages on real tasks. `docs/testing/` holds
+- **Tests.** `backend/tests/` holds unit tests for platform logic (run from `backend/` with
+  `uv run --with pytest --with httpx pytest`). Stage behaviour is still verified by running stages on real tasks. `docs/testing/` holds
   recorded runs on real Terminal-Bench tasks with the platform's results, for 4.0, 4.1 and 5.0
   checks. Use `examples/smoke-task` for a quick check that the setup works.
 - **Where to add a stage**: a function in `services/task_runner.py` (copy `run_edge_case_check`),
