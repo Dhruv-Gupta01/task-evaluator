@@ -482,7 +482,7 @@ def rule_metadata_fields(ctx: Context) -> RuleResult:
     findings = []
     meta = ctx.toml.get("metadata") or {}
     github = str(meta.get("author_github", "")).strip()
-    if github.lower() in _PLACEHOLDER_AUTHORS:
+    if github.lower() in _PLACEHOLDER_AUTHORS or re.search(r"an+on", github, re.I):
         findings.append(Finding(
             "15.15",
             "author_github does not name a real GitHub account, which defeats tagging the author.",

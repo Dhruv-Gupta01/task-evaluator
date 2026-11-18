@@ -306,3 +306,8 @@ def test_vendored_harbor_fields_match_the_installed_harbor():
                           env={**os.environ, "PYTHONUTF8": "1"})
     assert proc.returncode == 0, proc.stderr
     assert set(json.loads(proc.stdout)) == fr.harbor_fields()
+
+
+def test_15_15_misspelled_anonymous_author(tmp_path):
+    assert [f.key for f in fired(make_task(tmp_path / "a", github="annonymous"), "15.15")] == ["author"]
+    assert fired(make_task(tmp_path / "b", github="RajeshA76"), "15.15") == []
