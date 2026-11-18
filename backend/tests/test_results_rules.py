@@ -164,3 +164,11 @@ def test_cheat_trials_of_another_tier_are_kept(tmp_path, monkeypatch):
         assert rows == [(1, "passed"), (2, "pending")]  # tier 2 replaced, tier 1 kept
     finally:
         app.dependency_overrides.clear()
+
+
+def test_case_count_quiet_when_the_verifier_noticed():
+    noticed = [_probe_run([
+        {"name": "control", "kind": "control", "verdict": "reached_1", "reward": 1.0, "tests": 131},
+        {"name": "remove tests/fixtures", "kind": "data_removal", "verdict": "held", "reward": 0.0, "tests": 0},
+    ], expected=131)]
+    assert fired("15.8", noticed) == [] and fired("15.1", noticed) == []

@@ -86,6 +86,7 @@ def rule_case_count(runs, ctx=None) -> RuleResult:
         f"{p['name']}: {p.get('tests')} test(s) collected, control {expected}"
         for p in data.get("probes", [])
         if p["kind"] == "data_removal" and expected and p.get("tests") is not None and p["tests"] < expected
+        and p.get("verdict") == "failed_open"  # fewer cases AND still passed: the verifier did not notice
     ]
     findings = [Finding("15.8", "The verifier collects fewer cases when its data is missing and does not "
                         "notice. Compare the collected count with the expected count.", evidence)] if evidence else []
