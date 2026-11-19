@@ -623,7 +623,9 @@ async def _tier0_harbor_probe(submission: Submission, spec, probe, config) -> di
     return asdict(res)
 
 
-async def run_tier0_stage(submission_id: str, repeats: int = 1, harbor: bool = True) -> None:
+async def run_tier0_stage(
+    submission_id: str, repeats: int = 1, harbor: bool = True, task_root: Path | None = None
+) -> None:
     """Tier 0 of the cheat-trial loop (services/tier0/): human-written static probes. No agent
     and no model. Each probe builds the files an exploit would leave, the verifier is run on
     them (a replica of Harbor's separate-verifier contract, in Docker), and the reward is read.
@@ -657,7 +659,7 @@ async def run_tier0_stage(submission_id: str, repeats: int = 1, harbor: bool = T
 
         base = {"platform": settings.docker_platform, "repeats": repeats, "skipped": None}
         try:
-            spec = tier0_taskspec.load(submission.extracted_path)
+            spec = tier0_taskspec.load(task_root or submission.extracted_path)  # task_root: a hardened copy
         except (ValueError, FileNotFoundError) as exc:
             run.logs = json.dumps({**base, "task": None, "skipped": str(exc), "summary": None, "results": []})
             run.status, run.reward = "passed", 1
@@ -2475,6 +2477,7 @@ async def run_tier1_stage(
     reasoning_effort: str | None = None,
     max_attempts: int | None = None,
     max_cost_usd: float | None = None,
+    task_root: Path | None = None,
 ) -> None:
     """Tier 1 of the cheat-trial loop (services/tier1/): a hinted agent (Claude Code by default,
     on TIER1_HACKER_MODEL) is told to get reward 1 without doing the work, sees a read-only copy
@@ -2511,7 +2514,7 @@ async def run_tier1_stage(
             finish("failed", None, {"error": config_error, "attempts": [], "fixes": []})
             return
 
-        src = Path(submission.extracted_path)
+        src = task_root or Path(submission.extracted_path)  # task_root: the last round's hardened copy
         base = settings.storage_dir / "submissions" / submission_id / "tier1"
         if base.exists():
             shutil.rmtree(base)
@@ -2726,32 +2729,194 @@ def tier1_hardened_dir(submission_id: str) -> Path | None:
     return path if (path / "task.toml").is_file() else None
 
 
-async def run_all_tiers(
+def _stage_snapshot(submission_id: str, kind: str) -> dict:
+    """A short, JSON-safe summary of one tier's stored result, kept per round in the cycle row."""
+    db = SessionLocal()
+    try:
+        row = db.query(Run).filter_by(submission_id=submission_id, kind=kind, run_index=0).one_or_none()
+        if row is None:
+            return {"status": "not-run"}
+        try:
+            logs = json.loads(row.logs) if row.logs else {}
+        except ValueError:
+            logs = {}
+        if not isinstance(logs, dict):
+            logs = {}
+        out: dict = {"status": row.status, "result": logs.get("status"), "reason": logs.get("reason"),
+                     "error": (logs.get("error") or "")[-300:] or None, "skipped": logs.get("skipped")}
+        if kind == "tier0_probes":
+            summary = logs.get("summary") or {}
+            out["summary"] = {k: summary.get(k) for k in ("probes_run", "exploited", "fail_open", "false_zero", "relies_on_harbor")}
+        else:
+            attempts = logs.get("attempts") or []
+            counts: dict[str, int] = {}
+            for a in attempts:
+                counts[a.get("verdict") or "unknown"] = counts.get(a.get("verdict") or "unknown", 0) + 1
+            out["attempts"] = len(attempts)
+            out["labels"] = counts
+            out["cost_usd"] = float(logs.get("cost_usd") or 0.0)
+            if kind == "tier1_loop":
+                out["fixes_accepted"] = sum(1 for f in (logs.get("fixes") or []) if f.get("accepted"))
+        return out
+    finally:
+        db.close()
+
+
+def tier_cycle_dir(submission_id: str) -> Path:
+    return settings.storage_dir / "submissions" / submission_id / "tier_cycle"
+
+
+async def run_tier_cycle(
     submission_id: str,
     repeats: int = 1,
     model: str | None = None,
     max_attempts: int | None = None,
     max_cost_usd: float | None = None,
+    max_rounds: int = 3,
 ) -> None:
-    """Tier 0, then Tier 1, then Tier 2, one after another (never two Harbor jobs at once).
-    Each tier is the same stage the single buttons run and keeps its own row, result and
-    cost cap (`max_cost_usd` applies to Tier 1 and to Tier 2 separately, not to the three
-    together). Tier 2 takes Tier 1's hardened copy when Tier 1 made one (its default), so it
-    tests the patched task. Tier 0 always runs on the upload and is not run again on the
-    hardened copy. A tier that fails or errors does not stop the next one: each is evidence,
-    not a gate. The caller has already marked the three rows pending."""
-    steps = (
-        ("tier0", lambda: run_tier0_stage(submission_id, repeats, True)),
-        ("tier1", lambda: run_tier1_stage(submission_id, None, model, None, max_attempts, max_cost_usd)),
-        ("tier2", lambda: run_tier2_stage(submission_id, None, model, None, max_attempts, max_cost_usd, None)),
-    )
-    for name, step in steps:
+    """The whole cheat-trial pipeline, repeated until the task stops changing.
+
+    A round is Tier 0 (static probes), then Tier 1 (hinted agent, patches a hardened copy), then
+    Tier 2 (unhinted agent) on the same copy. Only Tier 1 changes the task. If it accepted a patch,
+    the round ends there (Tier 2 would be testing a task that is about to change) and the next
+    round starts all three tiers again on the patched copy. The loop ends when:
+      * a round makes no patch: "robust" if Tier 1 and Tier 2 both ended robust, "exploited" if
+        Tier 2 got reward 1 by a shortcut (a person rules; nothing is patched from Tier 2),
+        "inconclusive" if nobody really tried (honest solves, refusals) so nothing is proven;
+      * Tier 1 stopped for a person (unfixed, unpatchable, needs_review): "needs_review";
+      * `max_rounds` rounds all made a patch: "not_converged";
+      * the shared `max_cost_usd` (Tier 1 + Tier 2 across all rounds; 0 or none = each tier's own
+        default cap per round) is spent: "budget".
+    The upload is never edited: each round's hardened copy is kept under tier_cycle/round-N/ and
+    the cumulative diff against the upload is stored. Tier 0 findings are reported per round but
+    never trigger a patch. Each tier keeps its own row (showing the latest round), and this row
+    ("tier_cycle") keeps every round. Advisory; "passed" only when robust."""
+    upload_root: Path | None = None
+    started = datetime.now(UTC)
+    rounds: list[dict] = []
+    state: dict = {"status": None, "reason": None, "in_progress": True, "rounds": rounds,
+                   "max_rounds": max_rounds, "cost_usd": 0.0, "max_cost_usd": max_cost_usd or 0.0, "diff": ""}
+
+    def save(final: str | None = None, reason: str | None = None) -> None:
+        db = SessionLocal()
         try:
-            await step()
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 - one tier's crash must not hide the others
-            traceback.print_exc()  # each stage records its own errors; this only guards the chain
+            row = _get_or_create_run(db, submission_id, "tier_cycle", 0)
+            state["in_progress"] = final is None
+            if final is not None:
+                state.update(status=final, reason=reason)
+                row.status = "passed" if final == "robust" else "failed"
+                row.reward = 1 if final == "robust" else 0
+                row.finished_at = datetime.now(UTC)
+            else:
+                row.status = "running"
+                row.reward = None
+            row.started_at = row.started_at or started
+            row.logs = json.dumps(state)
+            db.commit()
+        finally:
+            db.close()
+
+    def mark_pending(kinds) -> None:
+        db = SessionLocal()
+        try:
+            for kind in kinds:
+                row = _get_or_create_run(db, submission_id, kind, 0)
+                row.status = "pending"
+            db.commit()
+        finally:
+            db.close()
+
+    try:
+        db = SessionLocal()
+        try:
+            submission = db.get(Submission, submission_id)
+            if submission is None or submission.extracted_path is None:
+                return
+            upload_root = Path(submission.extracted_path)
+        finally:
+            db.close()
+        cycle = tier_cycle_dir(submission_id)
+        if cycle.exists():
+            shutil.rmtree(cycle)
+        cycle.mkdir(parents=True)
+        save()
+
+        task_root: Path | None = None  # None = the upload; later rounds = the last hardened copy
+        spent = 0.0
+        final, reason = "not_converged", f"{max_rounds} rounds each still needed a patch"
+
+        def remaining() -> float | None:
+            return None if not max_cost_usd else max(max_cost_usd - spent, 0.0)
+
+        for n in range(1, max_rounds + 1):
+            if max_cost_usd and spent >= max_cost_usd:
+                final, reason = "budget", f"spend reached the cap of ${max_cost_usd:.2f} before round {n}"
+                break
+            this = {"round": n, "task_copy": "upload" if task_root is None else f"hardened copy from round {n - 1}",
+                    "tier0": None, "tier1": None, "tier2": None, "patched": 0}
+            rounds.append(this)
+            mark_pending(("tier0_probes", "tier1_loop"))
+            save()
+
+            await run_tier0_stage(submission_id, repeats, True, task_root)
+            this["tier0"] = _stage_snapshot(submission_id, "tier0_probes")
+            save()
+
+            await run_tier1_stage(submission_id, None, model, None, max_attempts, remaining(), task_root)
+            this["tier1"] = _stage_snapshot(submission_id, "tier1_loop")
+            spent += this["tier1"].get("cost_usd") or 0.0
+            patched = this["tier1"].get("fixes_accepted") or 0
+            this["patched"] = patched
+            state["cost_usd"] = round(spent, 4)
+            hardened = tier1_hardened_dir(submission_id)
+            if hardened is not None and patched:
+                keep = cycle / f"round-{n}" / "hardened"
+                keep.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(hardened, keep, symlinks=True)
+                task_root = keep
+            save()
+
+            t1 = this["tier1"].get("result")
+            if t1 in ("unfixed", "unpatchable", "needs_review"):
+                final, reason = "needs_review", f"Tier 1 stopped ({t1}): {this['tier1'].get('reason') or 'a person has to look'}"
+                break
+            if patched:
+                if n == max_rounds:
+                    final, reason = "not_converged", f"round {n} still needed a patch and the round limit ({max_rounds}) is reached"
+                    break
+                continue  # the task changed: start again from Tier 0 on the patched copy
+
+            if max_cost_usd and spent >= max_cost_usd:
+                final, reason = "budget", f"spend reached the cap of ${max_cost_usd:.2f} before Tier 2"
+                break
+            mark_pending(("tier2_loop",))
+            await run_tier2_stage(submission_id, None, model, None, max_attempts, remaining(), None)
+            this["tier2"] = _stage_snapshot(submission_id, "tier2_loop")
+            spent += this["tier2"].get("cost_usd") or 0.0
+            state["cost_usd"] = round(spent, 4)
+            t2 = this["tier2"].get("result")
+            if t2 == "exploited":
+                final, reason = "exploited", "Tier 2 got reward 1 by a shortcut on the final task; a person has to rule (Tier 2 patches nothing)"
+            elif t1 == "robust" and t2 == "robust":
+                final, reason = "robust", f"round {n}: no patch was needed, Tier 1 and Tier 2 both ended robust"
+            elif t2 == "needs_review":
+                final, reason = "needs_review", "a Tier 2 run scored 1 and the judge could not say whether it was a shortcut"
+            else:
+                final, reason = "inconclusive", (
+                    f"round {n}: no hack was found and no patch was needed, but the attackers did not really try "
+                    f"(Tier 1 {t1 or 'no result'}, Tier 2 {t2 or 'no result'}), so this is not proof the task is robust"
+                )
+            break
+
+        if task_root is not None and upload_root is not None:
+            state["diff"] = tier1_fixer.tree_diff(upload_root, task_root)
+            (cycle / "hardened.diff").write_text(state["diff"])
+        save(final, reason)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        state["error"] = traceback.format_exc()
+        save("error", "the cycle crashed; see error")
 
 
 async def run_tier2_stage(

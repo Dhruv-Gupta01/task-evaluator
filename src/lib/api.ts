@@ -518,6 +518,50 @@ export interface Tier1 {
 // no cheat charter, no memory) run repeatedly and independently. Stops "robust" after 3 genuine
 // failed shortcut attempts in a row, or "exploited" at the first shortcut that gets reward 1.
 // Honest solves and failures are neutral, so many runs end "inconclusive". "passed" = robust.
+// The whole Tier 0 -> 1 -> 2 pipeline repeated until the task stops changing (POST /tiers).
+export interface TierCycleStage {
+  status: string;
+  result?: string | null;
+  reason?: string | null;
+  error?: string | null;
+  skipped?: string | null;
+  attempts?: number;
+  labels?: Record<string, number>;
+  cost_usd?: number;
+  fixes_accepted?: number;
+  summary?: Record<string, number | null>;
+}
+export interface TierCycleRound {
+  round: number;
+  task_copy: string;
+  patched: number;
+  tier0: TierCycleStage | null;
+  tier1: TierCycleStage | null;
+  tier2: TierCycleStage | null;
+}
+export interface TierCycleReport {
+  status:
+    | "robust"
+    | "exploited"
+    | "inconclusive"
+    | "needs_review"
+    | "not_converged"
+    | "budget"
+    | "error"
+    | null;
+  reason: string | null;
+  in_progress: boolean;
+  max_rounds: number;
+  cost_usd: number;
+  max_cost_usd: number;
+  diff: string;
+  error?: string;
+  rounds: TierCycleRound[];
+}
+export interface TierCycleResult {
+  status: StageStatus;
+  logs?: string;
+}
 // Keep these numbers apart from Tier 1's: hinted and unhinted are never combined.
 export interface Tier2Result {
   status: StageStatus;
@@ -866,6 +910,7 @@ export interface Submission {
   tier1_decisions?: Record<string, Tier1Ruling>;
   tier2: Tier2Result;
   tier2_decisions?: Record<string, Tier1Ruling>;
+  tier_cycle?: TierCycleResult;
   // A reviewer's genuine-or-fake call per trial, key "<stage>:<index>" (oracle | nop | agent).
   trial_verdicts?: Record<string, TrialVerdictRuling>;
   regrade?: RegradeResult;
@@ -994,12 +1039,20 @@ export const api = {
     fetch(`${API_BASE_URL}/submissions/${id}/tier0?repeats=${repeats}&harbor=${harbor}`, {
       method: "POST",
     }).then(handle<unknown>),
-  // Tier 0, then 1, then 2 as one job. maxCostUsd caps Tier 1 and Tier 2 each, not the three together.
+  // Tier 0, 1, 2 repeated on the patched task until a round needs no patch. maxCostUsd is one
+  // shared cap for Tier 1 and Tier 2 across every round.
   allTiers: (
     id: string,
-    opts: { repeats?: number; maxAttempts?: number; maxCostUsd?: number; model?: string } = {},
+    opts: {
+      repeats?: number;
+      maxAttempts?: number;
+      maxCostUsd?: number;
+      model?: string;
+      maxRounds?: number;
+    } = {},
   ) => {
     const q = new URLSearchParams();
+    if (opts.maxRounds) q.set("max_rounds", String(opts.maxRounds));
     if (opts.repeats) q.set("repeats", String(opts.repeats));
     if (opts.maxAttempts) q.set("max_attempts", String(opts.maxAttempts));
     if (opts.maxCostUsd !== undefined) q.set("max_cost_usd", String(opts.maxCostUsd));
