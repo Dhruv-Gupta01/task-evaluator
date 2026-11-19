@@ -42,6 +42,18 @@ export function FlagsPanel({ id }: { id: string }) {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  // A tests/-only change is a Minor bump: the saved trials stay valid and only need re-scoring.
+  const regrade = useMutation({
+    mutationFn: (kind: "agent" | "oracle") => api.regrade(id, kind, "previous"),
+    onSuccess: () => {
+      toast.success(
+        "Re-grade started. See the Re-grade card; run the Flag checks again when it finishes.",
+      );
+      qc.invalidateQueries({ queryKey: ["submission", id] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
   const live = data?.flags.filter((f) => f.present) ?? [];
   const gone = data?.flags.filter((f) => !f.present) ?? [];
   const c = data?.counts;
@@ -95,6 +107,30 @@ export function FlagsPanel({ id }: { id: string }) {
           {data.version.old_version ?? "none"} → {data.version.new_version ?? "none"}, declared{" "}
           {data.version.declared_class ?? "unknown"}, the {data.version.changed.length} changed
           file(s) call for {data.version.suggested_class ?? "nothing"}. {data.version.redo}
+          {data.version.suggested_class === "minor" && (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={regrade.isPending}
+                onClick={() => regrade.mutate("agent")}
+              >
+                Regrade saved agent trials from {data.version.against.slice(0, 8)}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={regrade.isPending}
+                onClick={() => regrade.mutate("oracle")}
+              >
+                Regrade saved Oracle runs
+              </Button>
+              <span className="text-muted-foreground">
+                Scores the earlier upload's trials with this upload's grader; no agent runs. The
+                solution is not re-run, so run Oracle too if solution/ also changed.
+              </span>
+            </div>
+          )}
         </div>
       )}
 
