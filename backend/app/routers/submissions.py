@@ -725,6 +725,42 @@ async def trigger_tier1(
     return {"status": "started"}
 
 
+@router.post("/submissions/{submission_id}/tiers", status_code=202)
+async def trigger_all_tiers(
+    submission_id: str,
+    repeats: int = 1,
+    model: str | None = None,
+    max_attempts: int | None = None,
+    max_cost_usd: float | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    """Runs Tier 0, Tier 1 and Tier 2 in that order as one job (the three single endpoints
+    stay). Tier 1 and Tier 2 cost real credits: `max_cost_usd` caps each of them separately
+    (0 = no cap), `model` overrides both hackers. Tier 2 tests Tier 1's hardened copy when one
+    exists. Needs Build and a passing Oracle. Posting again cancels the running job."""
+    if not 1 <= repeats <= 3:
+        raise HTTPException(status_code=400, detail="repeats must be between 1 and 3")
+    if model:
+        model_error = task_runner.valid_model_override("claude-code", model)
+        if model_error:
+            raise HTTPException(status_code=400, detail=model_error)
+    if max_attempts is not None and not 1 <= max_attempts <= 30:
+        raise HTTPException(status_code=400, detail="max_attempts must be between 1 and 30")
+    if max_cost_usd is not None and not 0 <= max_cost_usd <= 10_000:
+        raise HTTPException(status_code=400, detail="max_cost_usd must be between 0 and 10000")
+    _raise_if_over_budget(db, budget.exceeded_message(db))
+    _require_built_submission(submission_id, db)
+    if db.query(Run).filter_by(submission_id=submission_id, kind="oracle", reward=1).first() is None:
+        raise HTTPException(status_code=400, detail="run the Oracle and get a pass first")
+    for kind in ("tier0_probes", "tier1_loop", "tier2_loop"):
+        _queue_row(db, submission_id, kind)
+    await task_queue.submit(
+        f"{submission_id}:tiers",
+        task_runner.run_all_tiers(submission_id, repeats, model, max_attempts, max_cost_usd),
+    )
+    return {"status": "started"}
+
+
 @router.post("/submissions/{submission_id}/tier2", status_code=202)
 async def trigger_tier2(
     submission_id: str,
