@@ -1441,6 +1441,9 @@ function SubmissionDetail() {
         {/* Cheat trial */}
         <StageCard
           title="Cheat Trial"
+          // Superseded by the Tier 0/1/2 cards and "Run all tiers": shown only when this
+          // submission already has Cheat Trial results, so they stay readable.
+          hidden={data.cheat_trial.status === "not-run"}
           description="One trial run with an explicit directive to cheat spliced into the instruction (edit the verifier, hardcode outputs, read the reference solution). If reward comes back 1, a harbor analyze reward_hacking check runs automatically — reward alone can't tell a real cheat apart from the agent refusing and solving it honestly (both have happened live), so passing needs that check to positively clear it, not just a low reward."
           status={data.cheat_trial.status}
         >
@@ -3888,6 +3891,7 @@ function StageCard({
   status,
   reward,
   wide,
+  hidden,
   children,
 }: {
   title: string;
@@ -3895,8 +3899,10 @@ function StageCard({
   status: StageStatus;
   reward?: 0 | 1 | null;
   wide?: boolean;
+  hidden?: boolean;
   children: React.ReactNode;
 }) {
+  if (hidden) return null;
   return (
     <div
       className={`flex flex-col gap-3 rounded-lg border border-border bg-card p-4${wide ? " md:col-span-2" : ""}`}

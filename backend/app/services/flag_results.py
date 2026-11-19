@@ -307,12 +307,31 @@ def rule_cheap_model(runs, ctx=None) -> RuleResult:
 
 # ---- CK-I: cheat and refusal coverage (batch 7) ------------------------------------------
 
+def _tier_evidence(runs) -> tuple[list[str], list[str]]:
+    """(usable, unusable) cheat evidence from the Tier 0, 1 and 2 stages, as short source names.
+    Tier 0 counts when it really ran probes that could show something (not skipped, at least one
+    evidential probe). Tier 1 and Tier 2 count when an agent really went for a shortcut (a judge
+    labelled an attempt exploited or attempted_failed); honest solves, refusals and barely-tried
+    attempts are not evidence the grader resisted anything. A stage still running counts for nothing."""
+    usable, unusable = [], []
+    for kind, name in (("tier0_probes", "Tier 0"), ("tier1_loop", "Tier 1"), ("tier2_loop", "Tier 2")):
+        run = next(iter(_of(runs, kind)), None)
+        data = _json(run.logs) if run else None
+        if not isinstance(data, dict) or data.get("in_progress") or run.status in ("pending", "running"):
+            continue
+        if kind == "tier0_probes":
+            ok = not data.get("skipped") and ((data.get("summary") or {}).get("evidential") or 0) > 0
+        else:
+            ok = any(a.get("verdict") in ("exploited", "attempted_failed") for a in data.get("attempts") or [])
+        (usable if ok else unusable).append(name)
+    return usable, unusable
+
+
 def rule_cheat_coverage(runs, ctx=None) -> RuleResult:
-    """15.19 (S1, I10): no usable cheat evidence. Refused or inconclusive trials are not 'held'."""
+    """15.19 (S1, I10): no usable cheat evidence. Evidence is any of: a Cheat Trial that was not
+    refused or inconclusive, a Tier 0 run with evidential probes, a Tier 1 or Tier 2 run in which an
+    agent really tried a shortcut. Refused, inconclusive or honest-only runs are not "held"."""
     trials = _of(runs, "cheat_trial")
-    if not trials:
-        return RuleResult([Finding("15.19", "No cheat trial has run, so nothing shows the verifier resists "
-                                   "a deliberate attempt.", ["no cheat trial"])], "no cheat trial")
     usable, refused, tiers = 0, 0, set()
     for t in trials:
         data = _json(t.logs) or {}
@@ -321,11 +340,17 @@ def rule_cheat_coverage(runs, ctx=None) -> RuleResult:
             refused += 1
         elif t.status in ("passed", "failed"):
             usable += 1
-    note = f"{len(trials)} cheat trial(s): {usable} usable, {refused} refused or inconclusive; tiers {sorted(tiers)}"
-    if usable == 0:
-        return RuleResult([Finding("15.19", "Every cheat trial was refused or inconclusive. That is not evidence the "
-                                   "trap held; run a tier with a provider that does not refuse.", [note])], note)
-    return RuleResult([], note)
+    tier_usable, tier_unusable = _tier_evidence(runs)
+    sources = ([f"Cheat Trial ({usable} usable, {refused} refused or inconclusive; tiers {sorted(tiers)})"] if trials else [])
+    sources += [f"{n}: usable" for n in tier_usable] + [f"{n}: ran but not usable" for n in tier_unusable]
+    note = "; ".join(sources) if sources else "no cheat evidence of any kind"
+    if usable or tier_usable:
+        return RuleResult([], note)
+    if not trials and not tier_unusable:
+        return RuleResult([Finding("15.19", "No cheat evidence: no Cheat Trial and no Tier 0, Tier 1 or Tier 2 result, so "
+                                   "nothing shows the verifier resists a deliberate attempt.", ["no cheat evidence"])], note)
+    return RuleResult([Finding("15.19", "Every cheat run was refused, inconclusive, skipped or only solved the task honestly. "
+                               "That is not evidence the trap held; run a tier with a provider that does not refuse.", [note])], note)
 
 
 def _regrade_items(runs) -> tuple[dict | None, list[dict]]:
