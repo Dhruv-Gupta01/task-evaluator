@@ -752,20 +752,25 @@ async def trigger_tier1(
 
 
 @router.post("/submissions/{submission_id}/tiers", status_code=202)
-async def trigger_all_tiers(
+async def trigger_tier_cycle(
     submission_id: str,
     repeats: int = 1,
     model: str | None = None,
     max_attempts: int | None = None,
     max_cost_usd: float | None = None,
+    max_rounds: int = 3,
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
-    """Runs Tier 0, Tier 1 and Tier 2 in that order as one job (the three single endpoints
-    stay). Tier 1 and Tier 2 cost real credits: `max_cost_usd` caps each of them separately
-    (0 = no cap), `model` overrides both hackers. Tier 2 tests Tier 1's hardened copy when one
-    exists. Needs Build and a passing Oracle. Posting again cancels the running job."""
+    """The whole cheat-trial pipeline in a loop: Tier 0, Tier 1, Tier 2 on the task, and whenever
+    Tier 1 patches it (a hardened copy; the upload is never edited) all three run again on the
+    patched copy, up to `max_rounds` (1..5, default 3), until a round needs no patch. Tier 1 and
+    Tier 2 cost real credits: `max_cost_usd` is one shared cap for both across every round (0 or
+    none = each tier's own default cap per round), `model` overrides both hackers. The three
+    single endpoints stay. Needs Build and a passing Oracle. Posting again cancels the running job."""
     if not 1 <= repeats <= 3:
         raise HTTPException(status_code=400, detail="repeats must be between 1 and 3")
+    if not 1 <= max_rounds <= 5:
+        raise HTTPException(status_code=400, detail="max_rounds must be between 1 and 5")
     if model:
         model_error = task_runner.valid_model_override("claude-code", model)
         if model_error:
@@ -778,11 +783,11 @@ async def trigger_all_tiers(
     _require_built_submission(submission_id, db)
     if db.query(Run).filter_by(submission_id=submission_id, kind="oracle", reward=1).first() is None:
         raise HTTPException(status_code=400, detail="run the Oracle and get a pass first")
-    for kind in ("tier0_probes", "tier1_loop", "tier2_loop"):
+    for kind in ("tier_cycle", "tier0_probes", "tier1_loop"):
         _queue_row(db, submission_id, kind)
     await task_queue.submit(
         f"{submission_id}:tiers",
-        task_runner.run_all_tiers(submission_id, repeats, model, max_attempts, max_cost_usd),
+        task_runner.run_tier_cycle(submission_id, repeats, model, max_attempts, max_cost_usd, max_rounds),
     )
     return {"status": "started"}
 

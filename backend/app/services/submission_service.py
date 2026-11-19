@@ -17,6 +17,7 @@ from app.schemas import (
     Tier0Result,
     Tier1Result,
     Tier2Result,
+    TierCycleResult,
     BuildResult,
     ChecksumInfo,
     CheatTrialResult,
@@ -493,6 +494,12 @@ def _tier1_result(run: Run | None) -> Tier1Result:
     return Tier1Result(status=run.status, logs=run.logs)  # type: ignore[arg-type]
 
 
+def _tier_cycle_result(run: Run | None) -> TierCycleResult:
+    if run is None:
+        return TierCycleResult(status="not-run", logs=None)
+    return TierCycleResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
+
+
 def _tier2_result(run: Run | None) -> Tier2Result:
     if run is None:
         return Tier2Result(status="not-run", logs=None)
@@ -582,6 +589,7 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         tier1_decisions=_reviewer_decisions(_get_run(submission, "tier1_decision")),
         tier2=_tier2_result(_get_run(submission, "tier2_loop")),
         tier2_decisions=_reviewer_decisions(_get_run(submission, "tier2_decision")),
+        tier_cycle=_tier_cycle_result(_get_run(submission, "tier_cycle")),
         trial_verdicts=_reviewer_decisions(_get_run(submission, "trial_verdict")),
         regrade=_regrade_result(_get_run(submission, "regrade")),
         image_inventory=_image_inventory_result(_get_run(submission, "image_inventory")),

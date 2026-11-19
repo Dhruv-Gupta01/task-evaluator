@@ -43,6 +43,8 @@ import {
   type SuggestedVerdict,
   type TrialVerdictRuling,
   type RegradeReport,
+  type TierCycleReport,
+  type TierCycleStage,
 } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogPanel } from "@/components/LogPanel";
@@ -330,22 +332,27 @@ function SubmissionDetail() {
     onError: (e: Error) => toast.error(e.message),
   });
   const [allTiersCost, setAllTiersCost] = useState("");
+  const [allTiersRounds, setAllTiersRounds] = useState("3");
   const mAllTiers = useMutation({
     mutationFn: () =>
       api.allTiers(id, {
         repeats: Number(tier0Repeats),
+        maxRounds: Number(allTiersRounds),
         maxCostUsd:
           allTiersCost !== "" && Number(allTiersCost) >= 0 ? Number(allTiersCost) : undefined,
       }),
     onSuccess: () => {
-      toast.success("Tier 0, 1 and 2 started, one after another");
+      toast.success("Tier 0, 1 and 2 started; they repeat on the patched task until clean");
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
   });
   const tiersRunning =
     !!data &&
-    (isActive(data.tier0.status) || isActive(data.tier1.status) || isActive(data.tier2.status));
+    (isActive(data.tier0.status) ||
+      isActive(data.tier1.status) ||
+      isActive(data.tier2.status) ||
+      isActive(data.tier_cycle?.status ?? "not-run"));
   const mTier2 = useMutation({
     mutationFn: () =>
       api.tier2(id, {
@@ -1206,12 +1213,14 @@ function SubmissionDetail() {
 
         {/* All tiers */}
         <section className="rounded-lg border border-border p-4">
-          <h3 className="font-semibold">Run all tiers</h3>
+          <h3 className="font-semibold">Run all tiers (loop until clean)</h3>
           <p className="mt-1 text-xs text-muted-foreground">
-            Tier 0 (static probes), then Tier 1 (hinted agent, patches a hardened copy), then Tier 2
-            (unhinted agent, run on that hardened copy). One after another; each tier keeps its own
-            result below. Tiers 1 and 2 cost real credits. Tier 0 is not run again on the hardened
-            copy. Needs Build and a passing Oracle.
+            A round is Tier 0 (static probes), Tier 1 (hinted agent, patches a hardened copy) and
+            Tier 2 (unhinted agent). Only Tier 1 changes the task: when it patches, the round ends
+            and the next round runs all three tiers again on the patched copy (the upload is never
+            edited). It stops when a round needs no patch, when Tier 1 needs a person, at the round
+            limit, or at the cost cap. Honest solves are never counted as robust. Tiers 1 and 2 cost
+            real credits. Needs Build and a passing Oracle.
           </p>
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <Button
@@ -1229,7 +1238,20 @@ function SubmissionDetail() {
             >
               {tiersRunning ? "Running tiers…" : "Run all tiers"}
             </Button>
-            <label className="text-sm text-muted-foreground">Cost cap $ per tier (1 and 2)</label>
+            <label className="text-sm text-muted-foreground">Max rounds</label>
+            <Select value={allTiersRounds} onValueChange={setAllTiersRounds}>
+              <SelectTrigger className="w-16">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {["1", "2", "3", "4", "5"].map((v) => (
+                  <SelectItem key={v} value={v}>
+                    {v}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <label className="text-sm text-muted-foreground">Shared cost cap $ (Tiers 1 + 2)</label>
             <Input
               className="w-24"
               placeholder="default"
@@ -1242,6 +1264,7 @@ function SubmissionDetail() {
               </span>
             )}
           </div>
+          <TierCycleView logs={data.tier_cycle?.logs} />
         </section>
 
         {/* Tier 0 */}
@@ -2080,6 +2103,114 @@ function Tier0Row({
               Save
             </Button>
           </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+const CYCLE_END: Record<string, { label: string; cls: string }> = {
+  robust: {
+    label: "Robust: a round needed no patch and Tier 1 and Tier 2 both ended robust.",
+    cls: "border-emerald-500/30 bg-emerald-500/10",
+  },
+  exploited: {
+    label: "Exploited: Tier 2 found a shortcut on the final task. A person has to rule.",
+    cls: "border-red-500/30 bg-red-500/10",
+  },
+  inconclusive: {
+    label: "Inconclusive: no hack was found, but the attackers did not really try. Not proof.",
+    cls: "border-amber-500/30 bg-amber-500/10",
+  },
+  needs_review: {
+    label: "Needs a person: Tier 1 could not patch an exploit or could not judge an attempt.",
+    cls: "border-amber-500/30 bg-amber-500/10",
+  },
+  not_converged: {
+    label: "Not converged: every round still needed a patch.",
+    cls: "border-red-500/30 bg-red-500/10",
+  },
+  budget: { label: "Stopped at the shared cost cap.", cls: "border-amber-500/30 bg-amber-500/10" },
+  error: { label: "The loop crashed.", cls: "border-red-500/30 bg-red-500/10" },
+};
+
+function cycleStageText(s: TierCycleStage | null, kind: "t0" | "t1" | "t2"): string {
+  if (!s) return "not run this round";
+  if (s.status === "not-run") return "not run";
+  if (s.skipped) return `skipped: ${s.skipped}`;
+  if (s.error) return `error: ${s.error.slice(0, 80)}`;
+  if (kind === "t0") {
+    const x = s.summary?.exploited ?? 0;
+    return `${x} exploited${s.summary?.fail_open ? `, ${s.summary.fail_open} fail-open` : ""}`;
+  }
+  const labels = Object.entries(s.labels ?? {})
+    .map(([k, n]) => `${n} ${(TIER2_VERDICT[k]?.label ?? k).toLowerCase()}`)
+    .join(", ");
+  const head = s.result ?? s.status;
+  const fixes = kind === "t1" && s.fixes_accepted ? `, ${s.fixes_accepted} patch(es)` : "";
+  return `${head}${fixes}${labels ? ` (${labels})` : ""}`;
+}
+
+function TierCycleView({ logs }: { logs?: string }) {
+  if (!logs) return null;
+  let doc: TierCycleReport;
+  try {
+    doc = JSON.parse(logs) as TierCycleReport;
+  } catch {
+    return null;
+  }
+  const end = doc.status ? CYCLE_END[doc.status] : null;
+  return (
+    <div className="mt-3 space-y-2 text-xs">
+      {end && (
+        <div className={`rounded-md border p-2.5 ${end.cls}`}>
+          {end.label}
+          {doc.reason ? ` ${doc.reason}.` : ""}
+        </div>
+      )}
+      {doc.in_progress && (
+        <div className="rounded-md border border-border bg-muted/40 p-2.5">
+          Round {doc.rounds.length} of at most {doc.max_rounds} is running.
+        </div>
+      )}
+      <table className="w-full text-left">
+        <thead className="text-muted-foreground">
+          <tr>
+            <th className="py-1 pr-2">Round</th>
+            <th className="py-1 pr-2">Task</th>
+            <th className="py-1 pr-2">Tier 0</th>
+            <th className="py-1 pr-2">Tier 1 (hinted)</th>
+            <th className="py-1">Tier 2 (unhinted)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {doc.rounds.map((r) => (
+            <tr key={r.round} className="border-t border-border align-top">
+              <td className="py-1 pr-2 font-mono">{r.round}</td>
+              <td className="py-1 pr-2">{r.task_copy}</td>
+              <td className="py-1 pr-2">{cycleStageText(r.tier0, "t0")}</td>
+              <td className="py-1 pr-2">{cycleStageText(r.tier1, "t1")}</td>
+              <td className="py-1">
+                {r.tier2 ? cycleStageText(r.tier2, "t2") : r.patched ? "skipped: task was patched" : "not run"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="text-muted-foreground">
+        Spent ${doc.cost_usd.toFixed(2)}
+        {doc.max_cost_usd ? ` of the $${doc.max_cost_usd} cap` : ""} on Tiers 1 and 2. Each attempt
+        is labelled on its own tier card below. The patched task and its diff are under
+        storage/submissions/&lt;id&gt;/tier_cycle/.
+      </div>
+      {doc.diff && (
+        <details>
+          <summary className="cursor-pointer text-muted-foreground">
+            Combined patch against the upload (a person must review it)
+          </summary>
+          <pre className="mt-2 max-h-80 overflow-auto rounded-md border border-border bg-muted/40 p-2">
+            {doc.diff}
+          </pre>
         </details>
       )}
     </div>

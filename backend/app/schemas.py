@@ -311,6 +311,17 @@ class Tier1Result(BaseModel):
     logs: str | None = None
 
 
+class TierCycleResult(BaseModel):
+    """The whole Tier 0 -> Tier 1 -> Tier 2 pipeline repeated until the task stops changing
+    (task_runner.run_tier_cycle). "passed" only when the final status is robust. `logs` is JSON:
+    {status (robust | exploited | inconclusive | needs_review | not_converged | budget | error),
+    reason, in_progress, max_rounds, cost_usd, max_cost_usd, diff, rounds: [{round, task_copy,
+    patched, tier0, tier1, tier2}]} where each tier entry is a short snapshot of that round's
+    result (status, result, reason, labels, attempts, cost_usd, fixes_accepted, summary)."""
+    status: StageStatus
+    logs: str | None = None
+
+
 class Tier2Result(BaseModel):
     """Tier 2 of the cheat-trial loop (services/tier2/): an unhinted agent (the task plus one line
     of pressure, no verifier access, no charter, no memory) run repeatedly and independently.
@@ -422,6 +433,7 @@ class SubmissionSchema(BaseModel):
     tier1_decisions: dict[str, dict] = {}
     tier2: Tier2Result
     tier2_decisions: dict[str, dict] = {}
+    tier_cycle: TierCycleResult = TierCycleResult(status="not-run", logs=None)
     trial_verdicts: dict[str, dict] = {}  # a reviewer's genuine-or-fake call per trial, key "<stage>:<index>"
     regrade: RegradeResult
     image_inventory: ImageInventoryResult
