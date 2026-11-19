@@ -168,9 +168,14 @@ def test_without_dockerfile_pin_the_stage_is_incomplete(tmp_path, monkeypatch):
 
 
 def test_a_timed_out_check_is_not_run_not_failed(tmp_path, monkeypatch):
-    from app.config import get_settings
+    import subprocess
 
-    monkeypatch.setattr(get_settings(), "tb_check_timeout_sec", 0.001)
+    # Every script "times out". A tiny real timeout is racy: the two trivial checks
+    # (check-no-cheat-dir, check-task-changelog) can finish inside 1 ms and pass.
+    def _always_times_out(cmd, *args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout") or 0)
+
+    monkeypatch.setattr(tb_static_checks.subprocess, "run", _always_times_out)
     task = _task(tmp_path / "fixture-task", NO_INSTALLS, PINNED_IMAGE)
     report = tb_static_checks.run_tb_static_checks(task)
     assert report.fail_count == 0 and report.pass_count == 0
