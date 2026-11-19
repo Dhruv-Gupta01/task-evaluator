@@ -35,6 +35,7 @@ from app.services import (
     variant_probe,
     vendor_info,
     verifier_report,
+    web_use,
 )
 from app.services.llm import factory as llm_factory
 from app.services.llm import pricing as llm_pricing
@@ -2810,6 +2811,7 @@ async def run_tier1_stage(
                 db.commit()
             return {
                 "reward": outcome.reward, "tool_calls": outcome.tool_calls, "cost_usd": outcome.cost_usd,
+                "web_use": web_use.scan(outcome.trial_dir),
                 "trial_dir": str(outcome.trial_dir) if outcome.trial_dir else None,
                 "refused": bool((outcome.report or {}).get("refusal")),
                 "refusal": (outcome.report or {}).get("refusal"),
@@ -3255,6 +3257,7 @@ async def run_tier2_stage(
                 db.commit()
             return {
                 "reward": outcome.reward, "tool_calls": outcome.tool_calls, "cost_usd": outcome.cost_usd,
+                "web_use": web_use.scan(outcome.trial_dir),
                 "trial_dir": str(outcome.trial_dir) if outcome.trial_dir else None,
                 "refused": bool((outcome.report or {}).get("refusal")),
                 "refusal": (outcome.report or {}).get("refusal"),

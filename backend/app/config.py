@@ -60,7 +60,6 @@ class Settings(BaseSettings):
     # Defaults applied when a task.toml omits a section
     default_cpus: float = 1.0
     default_memory_mb: int = 1024
-    default_allow_internet: bool = False
     default_agent_timeout_sec: int = 600
     default_verifier_timeout_sec: int = 120
     max_agent_trials: int = 50
@@ -93,12 +92,13 @@ class Settings(BaseSettings):
     # the Cheat Trial's reward-hacking check, Rubric Check). Harbor 0.25.0's analyze/check fail with
     # DownloadVerifierDirError; 0.26.0 fixes it. Empty = use harbor_bin for everything.
     harbor_analyze_bin: str = ""
-    # Network policy Harbor runs every task with, applied to a temporary copy
-    # of the task (the extracted files are never edited). Harbor >= 0.23 only
-    # enforces "no-network" when Docker's kernel supports its egress-control
-    # sidecar (not the case on Docker Desktop for Mac) and otherwise rejects
-    # the task, so old `allow_internet = false` tasks would fail every stage.
-    # Set empty to respect each task's own setting instead.
+    # Network policy Harbor runs every task with, applied to a temporary copy of the task (the
+    # extracted files are never edited). "public" matches Terminal-Bench, whose own checks say its
+    # tasks run with open internet (a task that omits the setting gets it anyway; one that declares
+    # `allow_internet = false` fails their check-allow-internet). Docker Desktop's kernel can enforce
+    # the restricted modes now (checked on Docker Desktop 29.9.3, kernel 7.0.14, Harbor 0.26.0), and
+    # Harbor fails closed on a kernel that cannot. Set empty to respect each task's own setting; see
+    # CLAUDE.md for what that breaks (sidecar containers, run-time downloads, DOCKER_ADD_HOSTS).
     harbor_network_mode: str = "public"
 
     # Agent trials: Harbor agent plus a LiteLLM model string. When
@@ -137,11 +137,13 @@ class Settings(BaseSettings):
     codex_bake_into_image: bool = True
     codex_version: str = ""  # pin the Codex CLI; empty installs the latest each trial
     codex_web_search: str = ""  # disabled | cached | live; empty = Codex default
-    # Turns off the agent's built-in web search and fetch tools (Claude Code: WebSearch and WebFetch;
-    # Codex: web_search=disabled) for agent trials, tier runs and the cheat trial. On an open network
-    # an agent could otherwise look the answer up online. It does not stop `curl` in the container:
-    # only a restricted network does that (HARBOR_NETWORK_MODE). An explicit CODEX_WEB_SEARCH wins.
-    agent_disable_web_search: bool = True
+    # Switches off the agent's built-in web search and fetch tools (Claude Code: WebSearch and
+    # WebFetch; Codex: web_search=disabled) for agent trials, tier runs and the cheat trial. Off by
+    # default so agents run with web tools on, as in Terminal-Bench; what an agent did with the web
+    # is counted instead (services/web_use.py) and shown in the evidence. Turn it on for a stricter
+    # run. It does not stop `curl` in the container: only a restricted network does that. An
+    # explicit CODEX_WEB_SEARCH wins for Codex.
+    agent_disable_web_search: bool = False
     # "Failure analysis" stage: `harbor analyze` reads each finished trial's
     # trajectory and grades it (reward hacking, task specification). It runs a
     # small evaluator agent, so pick a cheap model. terminus-2 drives the

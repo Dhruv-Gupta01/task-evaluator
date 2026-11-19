@@ -21,7 +21,7 @@ from pathlib import Path
 import yaml
 
 from app.config import docker_add_host_pairs, get_settings, host_env_for_subprocess
-from app.services import infra_marker_scan, refusal_detector, reward_kit_checks, verifier_report, versions
+from app.services import infra_marker_scan, refusal_detector, reward_kit_checks, verifier_report, versions, web_use
 from app.services.llm import pricing
 from app.services.llm.base import Usage
 
@@ -790,6 +790,15 @@ def _parse_trial(
                    else "it said it would not help and did almost no work")
                 + f"): \"{refusal['evidence']}\". A refusal scores 0 like a failure but says nothing about the "
                 "task's difficulty."
+            )
+        # What the agent did with the web, counted from its own tool calls. Terminal-Bench runs agents with
+        # open internet and web tools on, so this is evidence for a reader, not a failure.
+        web = web_use.scan(trial_dir)
+        outcome.report["web_use"] = web
+        if web and web.get("used_web"):
+            outcome.report["flags"].append(
+                "the agent used the web (" + web_use.describe(web) + "). Terminal-Bench runs agents with open internet, "
+                "so this is not a failure; check that it did not look the answer up."
             )
         # E.6: a trial that ended on a model-request timeout, a full disk or a
         # Docker error was not decided by the task.

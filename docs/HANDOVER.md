@@ -152,7 +152,7 @@ Restart the backend after changing it. The groups that matter:
 | Database | `DATABASE_URL`, `CORS_ORIGINS` | Defaults match `docker-compose.yml` and the Vite dev server. |
 | Judge model | `LLM_PROVIDER`, `LLM_MODEL`, `LLM_REASONING_EFFORT`, the provider key | Example file uses OpenAI `gpt-6-sol`. `gpt-6-luna` is far cheaper but missed one issue in a five-task comparison; a Gemini flash-lite model matched `sol` on Sufficiency (use a paid Google key, since free-tier prompts may be used for training). |
 | Agents | `HARBOR_AGENT`, `AGENT_MODEL`, `CLAUDE_AGENT_MODEL`, `AGENT_REASONING_EFFORT`, `AGENT_TIMEOUT_SEC` | The UI picks agent, model and reasoning per run; these are the defaults. `AGENT_TIMEOUT_SEC=28800` forces Terminal-Bench's 8-hour timeout on every task. |
-| Harbor and Docker | `HARBOR_BIN`, `HARBOR_NETWORK_MODE`, `DOCKER_PLATFORM`, `DOCKER_ADD_HOSTS` | `HARBOR_NETWORK_MODE=public` is needed because Docker Desktop for Mac cannot enforce `no-network`. |
+| Harbor and Docker | `HARBOR_BIN`, `HARBOR_NETWORK_MODE`, `DOCKER_PLATFORM`, `DOCKER_ADD_HOSTS` | `HARBOR_NETWORK_MODE=public` follows Terminal-Bench, whose tasks run with open internet; restricted modes work on Docker Desktop now but break sidecar containers and run-time downloads. |
 | Codex | `CODEX_BAKE_INTO_IMAGE`, `CODEX_VERSION`, `CODEX_WEB_SEARCH` | Codex is installed into the task image at build time so trials start fast. |
 | Other tools | `ANALYZE_*`, `CHECK_*`, `CHEAT_TRIAL_TIMEOUT_SEC`, `GPTZERO_API_KEY` | Failure Analysis, Rubric Check, Cheat Trial and AI Detection. |
 | Cost | `AGENT_RUN_BUDGET_USD`, `LLM_BUDGET_USD`, `MIN_TRIAL_COST_USD` | See section 5. |
@@ -231,8 +231,10 @@ Read these before relying on the platform.
    database and the UI still hold the raw logs, so a key that appears there should still be rotated.
 5. **Windows has never been run.** The code has Windows handling and `.gitattributes` keeps shell
    scripts on LF, but no one has tried it.
-6. **Docker Desktop for Mac cannot enforce `no-network`**, so every task is run with network access
-   on (`HARBOR_NETWORK_MODE=public`). A task that relies on being offline is not truly tested.
+6. **Every task runs with open internet and web tools on** (`HARBOR_NETWORK_MODE=public`, `AGENT_DISABLE_WEB_SEARCH=false`),
+   as Terminal-Bench does, so an agent can look an answer up online. The evidence counts each trial's web use and says what a
+   task declared against what the run used. A restricted network works on Docker Desktop now (Harbor 0.26.0), but it blocks
+   compose sidecar containers and run-time downloads, so it is not the default; see `CLAUDE.md`.
 7. **Two Harbor jobs at once** caused start-up timeouts on the author's Mac, so the platform runs
    one Harbor job at a time. Untested on a larger machine.
 8. **Budget guard covers priced models only** (section 5).

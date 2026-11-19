@@ -8,7 +8,12 @@ settings = get_settings()
 class EnvironmentConfig(BaseModel):
     cpus: float = settings.default_cpus
     memory_mb: int = settings.default_memory_mb
-    allow_internet: bool = settings.default_allow_internet
+    # What the task file declares about the network; None = not declared. Harbor's default is open
+    # (public), Terminal-Bench tells authors to leave these out, and `allow_internet` is deprecated in
+    # favour of `network_mode`. Nothing here is the policy a run used; see services/network_policy.py.
+    allow_internet: bool | None = None
+    network_mode: str | None = None
+    allowed_hosts: list[str] | None = None
     build_timeout_sec: float = 600.0
 
 

@@ -35,7 +35,17 @@ export interface SuggestedVerdict {
   action: string;
 }
 
+// What an agent did with the web, counted from its own tool calls (backend services/web_use.py).
+export interface WebUse {
+  used_web: boolean;
+  web_tool_calls: number;
+  fetches: number; // curl, wget or git clone
+  installs: number; // pip, npm, apt and the like
+  hosts: string[];
+  examples: string[];
+}
 export interface VerifierReport {
+  web_use?: WebUse | null;
   reward_raw: number | null;
   ctrf: CtrfSummary | null;
   details: { file: string; content: string } | null;
@@ -401,6 +411,7 @@ export type Tier1Verdict =
   | "infra_failed"
   | "needs_review";
 export interface Tier1Attempt {
+  web_use?: WebUse | null;
   index: number;
   verdict: Tier1Verdict;
   reward: number | null;
@@ -577,6 +588,7 @@ export type Tier2Verdict =
   | "unclassified"
   | "needs_review";
 export interface Tier2Attempt {
+  web_use?: WebUse | null;
   index: number;
   verdict: Tier2Verdict;
   reward: number | null;
