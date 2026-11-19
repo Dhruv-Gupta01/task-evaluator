@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     # Oracle/Nop and agent trials run through the Harbor CLI
     # (`uv tool install harbor`).
     harbor_bin: str = "harbor"
+    # Optional separate Harbor binary for `harbor analyze` and `harbor check` only (Failure Analysis,
+    # the Cheat Trial's reward-hacking check, Rubric Check). Harbor 0.25.0's analyze/check fail with
+    # DownloadVerifierDirError; 0.26.0 fixes it. Empty = use harbor_bin for everything.
+    harbor_analyze_bin: str = ""
     # Network policy Harbor runs every task with, applied to a temporary copy
     # of the task (the extracted files are never edited). Harbor >= 0.23 only
     # enforces "no-network" when Docker's kernel supports its egress-control
@@ -154,8 +158,35 @@ class Settings(BaseSettings):
     check_agent: str = "claude-code"
     check_model: str = "anthropic/claude-fable-5-1"
     check_timeout_sec: int = 3600
+    # How long the Rubric Check's evaluator agent may work. Harbor fixes this at 1800 s; the
+    # TB rubric over a large task can need longer, and a run that hits the wall
+    # has already spent its tokens and returns no verdict.
+    check_agent_timeout_sec: int = 3300
     # Same idea for the rubric check: empty = the model's own default effort.
     check_reasoning_effort: str = ""
+    # Tier 1 (hinted agent + hardening loop). Haiku 5.5 ($0.10 / $0.50 per million tokens) while the
+    # loop is being tested; it retires 2026-11-30, then move these to a current model.
+    # The hacker runs as the Claude Code agent, so its model needs the anthropic/ prefix; the
+    # judge and fixer call the Anthropic API directly, so theirs does not.
+    tier1_hacker_model: str = "anthropic/claude-haiku-5-5"
+    tier1_judge_model: str = "claude-haiku-5-5"
+    tier1_fixer_model: str = "claude-haiku-5-5"
+    tier1_reasoning_effort: str = "medium"
+    # Safe defaults, tuned later: wall time and spend are capped per attempt and per run.
+    tier1_attempt_timeout_sec: int = 1800  # the task's own 8 h would let one attempt cost a fortune
+    tier1_attempt_cost_usd: float = 1.0
+    tier1_max_attempts: int = 10
+    tier1_max_fixes: int = 5
+    tier1_max_cost_usd: float = 10.0  # whole loop (hacker + judge + fixer); 0 = no cap
+    # Tier 2 (unhinted agent): same cheap model while testing. Honest runs are neutral, so it
+    # may need several runs to see 3 real shortcut attempts (or end inconclusive).
+    tier2_hacker_model: str = "anthropic/claude-haiku-5-5"
+    tier2_judge_model: str = "claude-haiku-5-5"
+    tier2_reasoning_effort: str = "medium"
+    tier2_attempt_timeout_sec: int = 1800
+    tier2_attempt_cost_usd: float = 2.0
+    tier2_max_attempts: int = 8
+    tier2_max_cost_usd: float = 10.0  # whole loop (agent + judge); 0 = no cap
     # "Cheat Trial" stage: one agent trial run with an explicit directive to
     # cheat spliced into instruction.md, to confirm the anti-cheat design
     # holds even when the agent is told to game the grading, not just when it

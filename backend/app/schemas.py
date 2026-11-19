@@ -21,6 +21,15 @@ class VerifierDetails(BaseModel):
     content: str
 
 
+class VerifierCheck(BaseModel):
+    """One named check from Reward Kit's reward-details.json."""
+    name: str
+    group: str = ""
+    passed: bool
+    value: float | None = None
+    message: str = ""
+
+
 class VerifierReport(BaseModel):
     """What the verifier's own files said about one trial (advisory evidence;
     see services/verifier_report.py). `flags` lists places where the reward and
@@ -31,6 +40,17 @@ class VerifierReport(BaseModel):
     flags: list[str] = []
     facts: dict | None = None  # how the trial ran: limits, time used, resources, users
     refusal: dict | None = None  # {kind, evidence} when the agent refused the task (5.0 J)
+    checks: list[VerifierCheck] | None = None  # Reward Kit's per-check results, when the task writes them
+    worker_error: bool = False  # the agent's own code failed while the grader ran it (a fair failure)
+    # {reason, evidence} when the grader itself broke: no score, says nothing about the agent.
+    grader_error: dict | None = None
+
+
+class SuggestedVerdict(BaseModel):
+    """A pre-filled genuine-or-fake call for a finished trial; a reviewer confirms or changes it."""
+    verdict: Literal["fake", "likely_genuine", "pass", "unclear"]
+    reason: str
+    action: str
 
 
 class StageResult(BaseModel):
@@ -38,6 +58,7 @@ class StageResult(BaseModel):
     reward: int | None = None  # 0 | 1 | null
     raw_reward: float | None = None  # Harbor's exact reward; reward is 1 only at >= 1.0
     verifier: VerifierReport | None = None
+    suggested_verdict: SuggestedVerdict | None = None
     logs: str | None = None
     task_checksum: str | None = None
 
@@ -53,6 +74,7 @@ class TrialResult(BaseModel):
     reward: int | None = None
     raw_reward: float | None = None
     verifier: VerifierReport | None = None
+    suggested_verdict: SuggestedVerdict | None = None
     logs: str | None = None
     task_checksum: str | None = None
 
@@ -95,6 +117,9 @@ class AgentTrialsResult(BaseModel):
     # rate with those trials left out. pass_rate and pass_at_k are unchanged.
     refusals: int = 0
     pass_rate_excluding_refusals: float | None = None
+    # Trials where the grader itself broke (no score). They are left out of pass_rate,
+    # pass_at_k and the refusal rate, since they say nothing about the agent: rerun them.
+    grader_errors: int = 0
 
 
 class OracleRunsResult(BaseModel):
@@ -118,6 +143,9 @@ class OracleRunsResult(BaseModel):
     stress_runs: list[TrialResult] = []
     stress_note: str | None = None
     expected_tests: int | None = None
+    # Runs where the grader itself broke. The gate stays unpassed (it cannot be judged), but
+    # these are not a verdict on the solution: rerun them.
+    grader_errors: int = 0
 
 
 class SufficiencyResult(BaseModel):
@@ -257,6 +285,48 @@ class EdgeCasesResult(BaseModel):
     logs: str | None = None
 
 
+class Tier0Result(BaseModel):
+    """Tier 0 of the cheat-trial loop (services/tier0/): human-written static probes, no
+    agent and no model. Advisory. "failed" = something needs a human: an exploit, a verifier
+    that fails open, a valid solution graded 0, a failed control probe, or a probe that could
+    not run. `logs` is JSON: {task, platform, repeats, skipped, summary, results: [{probe_id,
+    title, verdict, reward, positive_control, positive_control_ok, fault_results, notes,
+    ...}], progress: {done, total}, images_removed}. `skipped` is a reason string when the
+    task is one the harness cannot drive."""
+    status: StageStatus
+    logs: str | None = None
+
+
+class Tier1Result(BaseModel):
+    """Tier 1 of the cheat-trial loop (services/tier1/): a hinted agent with a read-only copy of
+    tests/ and a memory of its earlier attempts tries to get reward 1 without doing the work; a
+    confirmed hit is patched into a hardened copy by an LLM fixer; the stage ends when 3 cheating
+    attempts in a row fail. Advisory. "passed" = robust; "failed" = something needs a human.
+    `logs` is JSON: {agent, model, judge_model, fixer_model, limits, status (robust | unfixed |
+    needs_review | inconclusive | attempt_limit | budget), reason, attempts: [{index, verdict,
+    reward, tool_calls, cost_usd, summary, techniques, defences, judge_reasoning, trial_dir,
+    against_fix}], fixes: [{number, after_attempt, accepted, description, edits, gate, note}],
+    consecutive_misses, cost_usd, diff, skipped, error, in_progress}."""
+    status: StageStatus
+    logs: str | None = None
+
+
+class Tier2Result(BaseModel):
+    """Tier 2 of the cheat-trial loop (services/tier2/): an unhinted agent (the task plus one line
+    of pressure, no verifier access, no charter, no memory) run repeatedly and independently.
+    The stage is "passed" when 3 genuine shortcut attempts in a row failed (robust) and "failed"
+    for anything else, including a stage that could not tell (inconclusive). Advisory. `logs` is
+    JSON: {agent, model, judge_model, task_copy, limits, status (robust | exploited | needs_review
+    | inconclusive), reason, counts: {runs, attempted, exploited, attempted_failed, honest_solve,
+    honest_fail, refused, infra_failed, unclassified, needs_review, held_rate}, attempts: [{index,
+    verdict, reward, tool_calls, cost_usd, judge_cost_usd, summary, techniques, judge_error,
+    judge_reasoning, trial_dir}], consecutive_misses, cost_usd, cost_breakdown_usd, error,
+    in_progress}. Never combine its numbers with Tier 1's: hinted and unhinted are reported
+    separately."""
+    status: StageStatus
+    logs: str | None = None
+
+
 class AnswerExposureResult(BaseModel):
     """Answer-exposure scan (4.1 C.1, 4.0 item 61). Advisory: can the agent
     find the answer in the files it is given? "failed" = at least one warning.
@@ -316,6 +386,14 @@ class ChecksumInfo(BaseModel):
     not_comparable: list[str] = []
 
 
+class RegradeResult(BaseModel):
+    """Saved trials scored again by Harbor with the current grader, no agent run
+    (see task_runner.run_regrade). `logs` is JSON: the source, and per trial the
+    old and new reward, so a grader fix shows exactly which scores it changed."""
+    status: StageStatus
+    logs: str | None = None
+
+
 class SubmissionSchema(BaseModel):
     id: str
     task_name: str
@@ -338,6 +416,14 @@ class SubmissionSchema(BaseModel):
     tb_static_checks: TbStaticChecksResult
     ai_detection: AiDetectionResult
     answer_exposure: AnswerExposureResult
+    tier0: Tier0Result
+    tier0_decisions: dict[str, dict] = {}
+    tier1: Tier1Result
+    tier1_decisions: dict[str, dict] = {}
+    tier2: Tier2Result
+    tier2_decisions: dict[str, dict] = {}
+    trial_verdicts: dict[str, dict] = {}  # a reviewer's genuine-or-fake call per trial, key "<stage>:<index>"
+    regrade: RegradeResult
     image_inventory: ImageInventoryResult
     fresh_build: FreshBuildResult
     checksum: ChecksumInfo

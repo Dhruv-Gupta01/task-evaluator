@@ -109,8 +109,38 @@ Files: backend/storage/submissions/{id}/ (zip, extracted task, logs, Harbor outp
   stage's result, cost per stage, run limits and an auto-written summary (no LLM writes it).
   Home-directory usernames in paths are redacted. See known issue 4 about keys.
 - **Budget guard**: caps priced LLM spend per UTC month and per agent run (section 5).
+- **Infrastructure retry**: an agent trial with no reward and a known infrastructure error (timeout,
+  rate limit, DNS, Docker) is retried once, sequentially. The original failure stays in the log. A
+  trial with reward 0, or a retry that shows infrastructure noise again, is never retried.
 
-The README has a longer table of the same stages with the extra detail added in 4.0, 4.1 and 5.0.
+### Terminal-Bench 5.0 additions (branch `harbor-5.0`)
+
+All advisory, no new buttons; each extends an existing stage.
+
+- **Agent user**: 5.0 moves agents to a non-root user (`[agent] user`). Static Checks warn about a
+  root agent, a user the Dockerfile never creates, sudo rights, toolchains left under `/root`, and a
+  user set only by a Dockerfile `USER` (some runners ignore it). Running trial containers are asked
+  `id -u`, so the log shows the real uid. A non-root Oracle that fails is the strongest signal.
+- **Refusals**: a model's safety refusal scores 0 like a real failure. Trials are scanned for it and
+  the page shows `pass_rate_excluding_refusals` next to the unchanged pass rate (phrase matching,
+  so evidence only). Failure Analysis defaults to the TB rubric, which has a `refusals` criterion.
+- **Environment causes**: architecture, glibc, GitHub rate-limit and sandbox failures are flagged on
+  a failing trial as "environment, not the agent". Image Contents records architecture, OS and
+  glibc; run limits warn on glibc below 2.36 and an image/platform mismatch.
+- **Grader hardening**: extra Static Checks for a grader that reads the submission's source to
+  enforce a rule or leaks file descriptors to agent code; a Targeted Cheat Trial prompt built from
+  the task's own restrictions (never run by default); more cases in the Weak-Answer Probe.
+- **Sufficiency and edge-case recall**: the judge adds field, docstring, number, identifier and
+  ground-truth checks; Edge-Case Coverage reads format and spec files and checks the Oracle handles
+  each option.
+- **Lock and licence hygiene**: toolchain and Hugging Face revision pinning, plus info notes on
+  bundled data licences and task size.
+
+Not built for 5.0: a cross-architecture Oracle, scanning archives for binaries, an
+independent-tool ground-truth comparison, and author-supplied equivalent or false solutions (all
+four are also in section 7, item 11).
+
+The README has a longer table of the same stages, with the 5.0 detail in its "5.0 additions" section.
 
 ## 4. Configuration
 

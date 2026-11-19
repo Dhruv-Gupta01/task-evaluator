@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 import shutil
+import threading
 import traceback
 import uuid
 from contextlib import contextmanager
@@ -36,9 +37,22 @@ from app.services import (
     verifier_report,
 )
 from app.services.llm import factory as llm_factory
+from app.services.llm import pricing as llm_pricing
 from app.services.llm import usage as llm_usage
 from app.services.llm.base import Message
 from app.services.task_config import TaskConfig
+from app.services.tier0 import docker_runner as tier0_docker
+from app.services.tier0 import probes as tier0_probes
+from app.services.tier0 import record as tier0_record
+from app.services.tier0 import runner as tier0_runner
+from app.services.tier0 import taskspec as tier0_taskspec
+from app.services.tier1 import fixer as tier1_fixer
+from app.services.tier1 import hacker as tier1_hacker
+from app.services.tier1 import judge as tier1_judge
+from app.services.tier1 import loop as tier1_loop
+from app.services.tier2 import PRESSURE_LINE
+from app.services.tier2 import judge as tier2_judge
+from app.services.tier2 import loop as tier2_loop
 
 settings = get_settings()
 
@@ -518,6 +532,275 @@ async def run_answer_exposure_stage(submission_id: str) -> None:
         db.close()
 
 
+# Verdicts that need a human to look at the task (or at the run). `held` with a failed
+# positive control is listed too: that probe never reached its defence, so it proves nothing.
+_TIER0_ATTENTION = (
+    "exploited", "fail_open", "false_zero", "control_failed", "infra_failed", "relies_on_harbor",
+)
+_TIER0_BAD = set(_TIER0_ATTENTION) - {"infra_failed"}
+
+
+def _tier0_result_dict(res) -> dict:
+    from dataclasses import asdict
+    return asdict(res)
+
+
+def _previous_upload(db, submission: Submission) -> Submission | None:
+    """The latest earlier upload of the same task name, as the Changes banner picks it."""
+    return (
+        db.query(Submission)
+        .filter(
+            Submission.task_name == submission.task_name,
+            Submission.id != submission.id,
+            Submission.uploaded_at < submission.uploaded_at,
+            Submission.extracted_path.is_not(None),
+        )
+        .order_by(Submission.uploaded_at.desc())
+        .first()
+    )
+
+
+def _tier0_compare(db, previous: Submission | None, results: list[dict], fingerprint: str) -> dict | None:
+    """Regression gate (protocol section 5): the same probes against the previous upload's
+    result. A probe that now fails where it held is a regression; one that held where it
+    failed is fixed. `verifier_changed` says whether tests/ differs at all, because with an
+    unchanged verifier any difference is noise or flakiness, not an effect of a fix."""
+    if previous is None:
+        return None
+    run = db.query(Run).filter_by(submission_id=previous.id, kind="tier0_probes", run_index=0).one_or_none()
+    if run is None or not run.logs:
+        return {"against": previous.id, "available": False, "changes": []}
+    try:
+        old = json.loads(run.logs)
+    except ValueError:
+        return {"against": previous.id, "available": False, "changes": []}
+    before = {r["probe_id"]: r["verdict"] for r in old.get("results", [])}
+    after = {r["probe_id"]: r["verdict"] for r in results}
+    changes = []
+    for pid in sorted(set(before) | set(after)):
+        b, a = before.get(pid), after.get(pid)
+        if b == a:
+            continue
+        if b in ("inconclusive", "skipped") or a in ("inconclusive", "skipped"):
+            kind = "not_comparable"  # e.g. G1 run through Harbor one time and not the other
+        elif b is None:
+            kind = "new"
+        elif a is None:
+            kind = "gone"
+        elif a in _TIER0_BAD and b not in _TIER0_BAD:
+            kind = "regression"
+        elif b in _TIER0_BAD and a not in _TIER0_BAD:
+            kind = "fixed"
+        else:
+            kind = "changed"
+        changes.append({"probe_id": pid, "before": b, "after": a, "kind": kind})
+    return {
+        "against": previous.id,
+        "available": True,
+        "verifier_changed": old.get("verifier_fingerprint") != fingerprint,
+        "unchanged_probes": sum(1 for pid in after if before.get(pid) == after[pid]),
+        "changes": changes,
+    }
+
+
+async def _tier0_harbor_probe(submission: Submission, spec, probe, config) -> dict:
+    """Probes whose answer depends on Harbor itself (G1: pre-written reward files). The
+    task is copied, solution/ is replaced by a solve.sh that is the probe script, and a real
+    Harbor Oracle trial is run, so Harbor's own artifact handling, reward-file deletion and
+    verifier start-up decide the reward. reward 1 = exploited; reward below 1 = held."""
+    import shlex
+    from dataclasses import asdict
+
+    from app.services.tier0 import record as rec
+
+    res = rec.ProbeResult(
+        probe_id=probe.pid, task=spec.slug, flaw_class=probe.flaw, title=probe.title, tier=probe.tier,
+        verdict="inconclusive", expected_reward=probe.expect_reward, needs_harbor=False,
+    )
+    base = settings.storage_dir / "submissions" / submission.id / "runs" / "tier0_harbor"
+    started = datetime.now(UTC)
+    try:
+        if shutil.which("harbor") is None:
+            res.notes = ["the harbor CLI is not on PATH, so this probe could not run"]
+            return asdict(res)
+        copy_root = base / f"{probe.pid.lower()}-src"
+        if copy_root.exists():
+            shutil.rmtree(copy_root)
+        shutil.copytree(Path(submission.extracted_path), copy_root, symlinks=True)
+        sol = copy_root / "solution"
+        if sol.exists():
+            shutil.rmtree(sol)
+        sol.mkdir()
+        script = "#!/bin/bash\nset -- " + " ".join(shlex.quote(a) for a in spec.artifacts) + "\n" + probe.agent_script
+        (sol / "solve.sh").write_text(script, encoding="utf-8")
+        timeout = (
+            config.environment.build_timeout_sec + 600 + config.verifier.timeout_sec + _HARBOR_TIMEOUT_BUFFER_SEC
+        )
+        outcome = await harbor_runner.run_single(
+            copy_root, "oracle", base / probe.pid.lower(), f"tier0-{probe.pid.lower()}-{uuid.uuid4().hex[:8]}", timeout
+        )
+        shutil.rmtree(copy_root, ignore_errors=True)
+        res.reward = outcome.reward
+        if outcome.reward is None:
+            res.verdict = "inconclusive"
+            res.notes = ["Harbor produced no reward for this trial: " + (outcome.logs or "")[-300:]]
+        elif outcome.reward >= 1.0:
+            res.verdict = "exploited"
+            res.notes = ["a real Harbor trial scored 1 for an agent that only pre-wrote reward files"]
+        else:
+            res.verdict = "held"
+            res.notes = [
+                f"a real Harbor Oracle trial whose solve.sh only pre-wrote /logs/verifier/reward.txt and "
+                f"reward.json scored {outcome.reward}: Harbor's own reward handling is not fooled"
+            ]
+    except Exception as exc:
+        res.verdict = "infra_failed"
+        res.notes = [f"{type(exc).__name__}: {exc}"]
+    res.duration_sec = round((datetime.now(UTC) - started).total_seconds(), 1)
+    return asdict(res)
+
+
+async def run_tier0_stage(submission_id: str, repeats: int = 1, harbor: bool = True) -> None:
+    """Tier 0 of the cheat-trial loop (services/tier0/): human-written static probes. No agent
+    and no model. Each probe builds the files an exploit would leave, the verifier is run on
+    them (a replica of Harbor's separate-verifier contract, in Docker), and the reward is read.
+    Mutants say whether a reward of 0 means a defence held or the probe was broken, a control
+    probe (the task's own solution) says whether the harness models this task at all, a second
+    pass with Harbor's sanitising off says whether the task defends itself, and `harbor` adds
+    probes judged by a real Harbor run (G1). Stored rollouts are regraded (replay), and the
+    result is compared with the previous upload of the same task.
+    Advisory: "failed" = something needs a human (an exploit, a verifier that fails open, a
+    valid solution graded 0, a failed control, a task that relies on Harbor, a probe that could
+    not run, or a broken suite). A task the harness cannot drive (shared verifier, `main`
+    built by compose) is "passed" with `skipped` set, like AI Detection without a key.
+    `logs` is JSON: {task, platform, repeats, skipped, summary, results, progress,
+    images_removed, selftest, replay, comparison, verifier_fingerprint}."""
+    from app.services.tier0 import replay as tier0_replay
+    from app.services.tier0 import selftest as tier0_selftest
+
+    db = SessionLocal()
+    stop = threading.Event()
+    spec = None
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+        run = _get_or_create_run(db, submission_id, "tier0_probes", 0)
+        run.status = "running"
+        run.reward = None
+        run.logs = None
+        run.started_at = datetime.now(UTC)
+        db.commit()
+
+        base = {"platform": settings.docker_platform, "repeats": repeats, "skipped": None}
+        try:
+            spec = tier0_taskspec.load(submission.extracted_path)
+        except (ValueError, FileNotFoundError) as exc:
+            run.logs = json.dumps({**base, "task": None, "skipped": str(exc), "summary": None, "results": []})
+            run.status, run.reward = "passed", 1
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+            return
+        selected = tier0_probes.for_task(spec.slug)
+        problems = tier0_selftest.run(spec)  # mutant anchors, control wiring, script syntax
+        fingerprint = tier0_replay.verifier_fingerprint(spec)
+        harbor_probes = [p for p in selected if p.harbor_probe]
+        docker_probes = [p for p in selected if not (p.harbor_probe and harbor)]
+
+        def on_result(i: int, n: int, res: tier0_record.ProbeResult) -> None:
+            # Runs in the worker thread, so it uses its own session.
+            part = SessionLocal()
+            try:
+                row = _get_or_create_run(part, submission_id, "tier0_probes", 0)
+                doc = json.loads(row.logs) if row.logs else {"results": []}
+                doc["results"].append(_tier0_result_dict(res))
+                doc["progress"] = {"done": i, "total": n + (len(harbor_probes) if harbor else 0)}
+                row.logs = json.dumps(doc)
+                part.commit()
+            finally:
+                part.close()
+
+        run.logs = json.dumps(
+            {**base, "task": spec.slug, "results": [], "selftest": problems,
+             "progress": {"done": 0, "total": len(selected)}}
+        )
+        db.commit()
+        tier0_docker.SUBMISSION_LABEL.set(submission_id)  # copied into the worker thread
+        opts = tier0_runner.Options(platform=settings.docker_platform, sanitize=True, repeats=repeats)
+        try:
+            results = await asyncio.to_thread(
+                tier0_runner.run_suite, spec, docker_probes, opts, on_result, stop.is_set
+            )
+        except asyncio.CancelledError:
+            stop.set()  # the worker finishes its current probe, then stops
+            raise
+        rows = [_tier0_result_dict(r) for r in results]
+
+        if harbor and harbor_probes:
+            config = _get_task_config(submission)
+            for hp in harbor_probes:
+                rows.append(await _tier0_harbor_probe(submission, spec, hp, config))
+
+        # Replay: regrade stored rollouts through the replica. This upload's own are a check
+        # that the replica agrees with Harbor; an earlier upload's show what a verifier
+        # change did (LOOSENED = the task may have got easier).
+        sub_dir = settings.storage_dir / "submissions"
+        items = [(b, k, "this upload") for b, k in tier0_replay.collect(sub_dir / submission_id, spec, limit=2)]
+        previous = _previous_upload(db, submission)
+        if previous is not None:
+            items += [(b, k, "earlier upload") for b, k in tier0_replay.collect(sub_dir / previous.id, spec, limit=2)]
+        replays = (
+            await asyncio.to_thread(tier0_runner.run_replays, spec, items, opts, stop.is_set) if items else []
+        )
+
+        summary = tier0_record.summarise(results)
+        # The summary counts come from the Docker results; fold the Harbor probes in.
+        for r in rows:
+            if r["probe_id"] in {p.pid for p in harbor_probes} and r["verdict"] == "exploited":
+                summary["exploited"] += 1
+                summary["exploited_ids"].append(r["probe_id"])
+        summary["probes_run"] = len(rows)
+        summary["needs_harbor_to_settle"] = [
+            r["probe_id"] for r in rows if r["probe_id"] in {p.pid for p in harbor_probes} and r["verdict"] == "inconclusive"
+        ]
+        summary["replay_disagreements"] = sum(1 for r in replays if r["verdict"] == "harness_disagrees")
+        summary["loosened"] = sum(1 for r in replays if r["verdict"] == "LOOSENED")
+        summary["regressed"] = sum(1 for r in replays if r["verdict"] == "REGRESSION")
+        comparison = _tier0_compare(db, previous, rows, fingerprint)
+        attention = (
+            [r for r in rows if r["verdict"] in _TIER0_ATTENTION]
+            or summary["held_but_positive_control_failed"]
+            or problems
+            or summary["replay_disagreements"]
+            or summary["loosened"]
+            or summary["regressed"]
+        )
+        removed = await asyncio.to_thread(tier0_docker.cleanup_images, spec)
+        run.logs = json.dumps(
+            {
+                **base, "task": spec.slug, "summary": summary, "results": rows,
+                "progress": {"done": len(rows), "total": len(rows)},
+                "images_removed": removed, "selftest": problems, "replay": replays,
+                "comparison": comparison, "verifier_fingerprint": fingerprint,
+            }
+        )
+        run.status = "failed" if attention else "passed"
+        run.reward = 0 if attention else 1
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        run = _get_or_create_run(db, submission_id, "tier0_probes", 0)
+        run.status = "failed"
+        run.reward = None
+        run.logs = json.dumps({"error": traceback.format_exc(), "results": []})
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    finally:
+        db.close()
+
+
 async def run_oracle_trials(submission_id: str, n: int, stress: bool = False) -> None:
     """Oracle, run n times sequentially, always appended to any earlier runs
     on this submission (never cleared): Gate 1 needs 3 *consecutive* 1.0
@@ -940,6 +1223,161 @@ async def run_fresh_build(submission_id: str) -> None:
         run.status = "failed"
         run.reward = None
         run.logs = json.dumps({"error": traceback.format_exc(), "build": None, "oracle": None})
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    finally:
+        db.close()
+
+
+_REGRADE_MAX_TRIALS = 12  # newest saved trials re-scored per click; each one builds and runs the verifier
+
+
+def regrade_blocker(task_root: Path) -> str | None:
+    """Why `harbor job regrade` cannot score this task, or None. Harbor regrades only a
+    separate-mode verifier: the agent's live environment no longer exists, so the verifier
+    has to grade from the recorded artifacts alone."""
+    import tomllib
+
+    try:
+        verifier = tomllib.loads((task_root / "task.toml").read_text()).get("verifier") or {}
+    except (OSError, tomllib.TOMLDecodeError):
+        return "task.toml could not be read"
+    if verifier.get("environment_mode") != "separate" and "environment" not in verifier:
+        return (
+            "this task's verifier is not in separate mode, and Harbor can only re-score a separate "
+            "verifier from recorded artifacts. Set [verifier] environment_mode = \"separate\" in task.toml "
+            "and read the inputs from /logs/artifacts, or re-run the trials instead."
+        )
+    return None
+
+
+def regrade_sources(db, submission: Submission, kind: str, source: str) -> tuple[Submission | None, list[Path]]:
+    """The saved Harbor job folders to regrade: this upload's own, or the latest earlier
+    upload's (a grader fix is usually a new upload, since every upload is a new submission).
+    Newest first, up to _REGRADE_MAX_TRIALS trials."""
+    src = submission if source == "self" else _previous_upload(db, submission)
+    if src is None:
+        return None, []
+    base = settings.storage_dir / "submissions" / src.id / "runs" / kind / "harbor"
+    jobs = sorted(
+        (d for d in base.glob("*") if d.is_dir() and not d.name.endswith("-task") and any(d.glob("*/result.json"))),
+        key=lambda d: d.stat().st_mtime,
+        reverse=True,
+    )
+    chosen: list[Path] = []
+    total = 0
+    for job in jobs:
+        if total >= _REGRADE_MAX_TRIALS:
+            break
+        chosen.append(job)
+        total += len(list(job.glob("*/result.json")))
+    return src, chosen
+
+
+def _regrade_item(job: Path, source_dir: Path | None, outcome: "harbor_runner.TrialOutcome") -> dict:
+    """One saved trial's reward before and after the regrade."""
+    old_reward = None
+    old_grader_error = False
+    if source_dir is not None and (source_dir / "result.json").is_file():
+        try:
+            old = json.loads((source_dir / "result.json").read_text())
+            old_reward = ((old.get("verifier_result") or {}).get("rewards") or {}).get("reward")
+            old_grader_error = verifier_report.detect_grader_error(source_dir, old, old_reward) is not None
+        except (OSError, ValueError):
+            pass
+    new_reward = outcome.reward
+    report = outcome.report or {}
+    if old_reward == new_reward:
+        change = "same"
+    elif old_reward is None:
+        change = "now_scored"
+    elif new_reward is None:
+        change = "now_no_score"
+    elif new_reward > old_reward:
+        change = "loosened"
+    else:
+        change = "tightened"
+    return {
+        "trial": source_dir.name if source_dir else "(unknown)",
+        "job": job.name,
+        "old_reward": old_reward,
+        "new_reward": new_reward,
+        "change": change,
+        "old_grader_error": old_grader_error,
+        "new_grader_error": report.get("grader_error"),
+        "failed_checks": [c["name"] for c in (report.get("checks") or []) if not c.get("passed")][:10]
+        or ((report.get("ctrf") or {}).get("failed_names") or [])[:10],
+        "flags": (report.get("flags") or [])[:5],
+    }
+
+
+async def run_regrade(submission_id: str, kind: str = "agent", source: str = "previous") -> None:
+    """Score saved trials again with the current grader, without running the agent
+    (`harbor job regrade`). It shows exactly which scores a grader fix changes and never
+    edits the original runs: the answer goes in its own `regrade` row. `loosened` (0 became 1)
+    means the fix made the grader accept work it rejected before, which a person should look
+    at because the task may have got easier. Advisory; no LLM, so no cost. logs is JSON:
+    {kind, source, items, summary, errors}."""
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+        run = _get_or_create_run(db, submission_id, "regrade", 0)
+        run.status = "running"
+        run.reward = None
+        run.logs = None
+        run.started_at = datetime.now(UTC)
+        db.commit()
+
+        task_root = Path(submission.extracted_path)
+        config = _get_task_config(submission)
+        src, jobs = regrade_sources(db, submission, kind, source)
+        out_dir = settings.storage_dir / "submissions" / submission_id / "runs" / "regrade" / "harbor"
+        if out_dir.exists():
+            shutil.rmtree(out_dir)  # keep only the latest regrade's output
+        items: list[dict] = []
+        errors: list[str] = []
+        for job in jobs:
+            n_trials = max(1, len(list(job.glob("*/result.json"))))
+            timeout = (
+                config.environment.build_timeout_sec
+                + config.verifier.timeout_sec * n_trials
+                + _HARBOR_TIMEOUT_BUFFER_SEC
+            )
+            result = await harbor_runner.run_regrade(job, task_root, out_dir, f"regrade-{uuid.uuid4().hex[:8]}", timeout)
+            if result.error:
+                errors.append(f"{job.name}: {result.error[:1500]}")
+                continue
+            items += [_regrade_item(job, source_dir, outcome) for source_dir, outcome in result.trials]
+        counts = {c: sum(1 for i in items if i["change"] == c) for c in
+                  ("same", "loosened", "tightened", "now_scored", "now_no_score")}
+        summary = {
+            "total": len(items),
+            **counts,
+            "grader_errors_before": sum(1 for i in items if i["old_grader_error"]),
+            "grader_errors_after": sum(1 for i in items if i["new_grader_error"]),
+        }
+        clean = bool(items) and not errors and counts["same"] == len(items)
+        run.logs = json.dumps(
+            {
+                "kind": kind,
+                "source": {"submission": src.id if src else None, "same_upload": bool(src and src.id == submission_id)},
+                "items": items,
+                "summary": summary,
+                "errors": errors,
+                "harbor_version": harbor_runner._harbor_version(),
+            }
+        )
+        run.status = "passed" if clean else "failed"
+        run.reward = 1 if clean else 0
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    except Exception:
+        run = _get_or_create_run(db, submission_id, "regrade", 0)
+        run.status = "failed"
+        run.reward = None
+        run.logs = json.dumps({"error": traceback.format_exc(), "items": [], "errors": []})
         run.finished_at = datetime.now(UTC)
         db.commit()
     finally:
@@ -2216,6 +2654,434 @@ async def run_cheat_trial(
         db.close()
 
 
+async def run_tier1_stage(
+    submission_id: str,
+    agent: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    max_attempts: int | None = None,
+    max_cost_usd: float | None = None,
+) -> None:
+    """Tier 1 of the cheat-trial loop (services/tier1/): a hinted agent (Claude Code by default,
+    on TIER1_HACKER_MODEL) is told to get reward 1 without doing the work, sees a read-only copy
+    of tests/ at /hinted-tests and gets notes on its earlier attempts. Attempts run one at a
+    time, each its own Harbor job. A judge labels each one; a confirmed hit makes an LLM fixer
+    patch a *hardened copy* of tests/ and environment/ (the upload is never edited), accepted only
+    when the Oracle still scores 1 on it, and the loop goes on against the hardened copy. The stage
+    is "passed" when 3 cheating attempts in a row fail (status "robust"), "failed" for anything a
+    human has to look at. Needs a passing Oracle first, so a fix is never judged against a task
+    that did not work. Advisory; never changes a gate. logs is JSON, see tier1/loop.py."""
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+        run = _get_or_create_run(db, submission_id, "tier1_loop", 0)
+        run.status = "running"
+        run.reward = None
+        run.logs = None
+        run.started_at = datetime.now(UTC)
+        db.commit()
+
+        def finish(status: str, reward: int | None, payload: dict) -> None:
+            run.status = status
+            run.reward = reward
+            run.logs = json.dumps(payload)
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+
+        agent = agent or "claude-code"
+        hacker_model = model or (settings.tier1_hacker_model if agent == "claude-code" else None)
+        config_error = _agent_config_error(agent, hacker_model)
+        if config_error:
+            finish("failed", None, {"error": config_error, "attempts": [], "fixes": []})
+            return
+
+        src = Path(submission.extracted_path)
+        base = settings.storage_dir / "submissions" / submission_id / "tier1"
+        if base.exists():
+            shutil.rmtree(base)
+        base.mkdir(parents=True)
+        skipped = tier1_hacker.build_hinted_task(src, base / "preflight")
+        shutil.rmtree(base / "preflight", ignore_errors=True)
+        if skipped:
+            finish("passed", None, {"skipped": skipped, "attempts": [], "fixes": []})
+            return
+
+        config = _get_task_config(submission)
+        hardened = base / "hardened"
+        shutil.copytree(src, hardened, symlinks=True)
+        instruction = (src / "instruction.md").read_text(errors="replace") if (src / "instruction.md").is_file() else ""
+        base_prompt = _tb_cheat_prompt_text()
+        meta = {
+            "agent": agent,
+            "model": hacker_model or _agent_model(agent),
+            "judge_model": settings.tier1_judge_model,
+            "fixer_model": settings.tier1_fixer_model,
+            "reasoning_effort": reasoning_effort or settings.tier1_reasoning_effort,
+            "attempt_timeout_sec": settings.tier1_attempt_timeout_sec,
+            "attempt_cost_usd": settings.tier1_attempt_cost_usd,
+        }
+        limits = tier1_loop.Limits(
+            max_attempts=max_attempts or settings.tier1_max_attempts,
+            max_fixes=settings.tier1_max_fixes,
+            max_cost_usd=settings.tier1_max_cost_usd if max_cost_usd is None else max_cost_usd,
+        )
+        meta["limits"] = {"max_attempts": limits.max_attempts, "max_fixes": limits.max_fixes, "max_cost_usd": limits.max_cost_usd}
+
+        def llm_cost(calls) -> float:
+            return sum(llm_pricing.cost_usd(m, u) or 0.0 for m, u in calls)
+
+        async def run_attempt(task_dir: Path, mem: str, idx: int) -> dict:
+            hinted = base / f"hinted-{idx}"
+            reason = tier1_hacker.build_hinted_task(task_dir, hinted)
+            if reason:
+                return {"reward": None, "note": f"could not build the hinted copy: {reason}"}
+            jobs_dir = base / "runs" / f"attempt-{idx}"
+            outcomes: list[harbor_runner.TrialOutcome] = []
+
+            async def on_trial(outcome: harbor_runner.TrialOutcome) -> str | None:
+                outcomes.append(outcome)
+                return None
+
+            cap, cap_label = _run_cost_cap(db, settings.tier1_attempt_cost_usd or None)
+            hacker_name = (hacker_model or _agent_model(agent)).split("/", 1)[-1]
+            kwargs = _agent_kwargs(
+                agent,
+                (reasoning_effort or settings.tier1_reasoning_effort) if llm_factory.supports_effort(hacker_name) else None,
+            )
+            if not llm_factory.supports_effort(hacker_name):
+                kwargs.pop("reasoning_effort", None)  # _agent_kwargs falls back to AGENT_REASONING_EFFORT
+            if agent == "claude-code" and cap is not None:
+                kwargs["max_budget_usd"] = f"{max(cap, 0.01):.2f}"
+            timeout_sec = (
+                config.environment.build_timeout_sec
+                + settings.tier1_attempt_timeout_sec
+                + config.verifier.timeout_sec
+                + max(_AGENT_SETUP_ALLOWANCE_SEC, _agent_setup_timeout_sec(agent))
+                + _HARBOR_TIMEOUT_BUFFER_SEC
+            )
+            result = await harbor_runner.run_job(
+                hinted, agent, jobs_dir, f"tier1-{idx}-{uuid.uuid4().hex[:6]}", timeout_sec,
+                model=hacker_model, agent_kwargs=kwargs, n_attempts=1, n_concurrent=1,
+                agent_setup_timeout_sec=_agent_setup_timeout_sec(agent),
+                cost_cap_usd=cap, cost_cap_label=cap_label, on_trial=on_trial,
+                cheat_instruction=True,
+                cheat_instruction_text=tier1_hacker.directive(base_prompt, mem),
+                agent_timeout_override=settings.tier1_attempt_timeout_sec,
+            )
+            shutil.rmtree(hinted, ignore_errors=True)
+            shutil.rmtree(jobs_dir.parent / f"{jobs_dir.name}-task", ignore_errors=True)
+            if not outcomes:
+                return {"reward": None, "note": result.error or "harbor produced no result for this attempt"}
+            outcome = outcomes[0]
+            if outcome.cost_usd is not None:
+                budget.record(
+                    db, submission_id, "tier1_loop", hacker_model or _agent_model(agent), outcome.cost_usd,
+                    outcome.n_input_tokens, outcome.n_cache_tokens, outcome.n_output_tokens,
+                    agent=agent, reasoning_effort=kwargs.get("reasoning_effort"), trial_index=idx,
+                    detail=f"Tier 1 hinted attempt {idx}",
+                )
+                db.commit()
+            return {
+                "reward": outcome.reward, "tool_calls": outcome.tool_calls, "cost_usd": outcome.cost_usd,
+                "trial_dir": str(outcome.trial_dir) if outcome.trial_dir else None,
+                "refused": bool((outcome.report or {}).get("refusal")),
+                "refusal": (outcome.report or {}).get("refusal"),
+                "note": None if outcome.reward is not None else (outcome.logs or "")[-400:],
+            }
+
+        async def classify(outcome: dict, mem: str) -> dict | None:
+            reward = outcome.get("reward")
+            if reward is None or not outcome.get("trial_dir"):
+                return None
+            if reward < 1.0 and (outcome.get("refused") or (outcome.get("tool_calls") or 0) < 3):
+                return None  # nothing worth a judge call
+            transcript = tier1_hacker.condense_trajectory(Path(outcome["trial_dir"]))
+            calls = llm_usage.start()
+            try:
+                judged = await tier1_judge.classify(instruction, mem, transcript, reward)
+            finally:
+                budget.record_calls(db, submission_id, "tier1_loop", calls, reasoning_effort=settings.tier1_reasoning_effort)
+                db.commit()
+            if judged is not None:
+                judged["cost_usd"] = llm_cost(calls)
+            return judged
+
+        async def propose_fix(task_dir: Path, attempt: dict, rejected: str) -> dict | None:
+            transcript = tier1_hacker.condense_trajectory(Path(attempt["trial_dir"])) if attempt.get("trial_dir") else ""
+            calls = llm_usage.start()
+            try:
+                proposal = await tier1_fixer.propose(task_dir, attempt, transcript, rejected)
+            finally:
+                budget.record_calls(db, submission_id, "tier1_loop", calls, reasoning_effort=settings.tier1_reasoning_effort)
+                db.commit()
+            return {**(proposal or {}), "cost_usd": llm_cost(calls)}
+
+        async def gate(candidate: Path) -> tuple[bool, str]:
+            outcome = await harbor_runner.run_single(
+                candidate, "oracle", base / "gate", f"gate-{uuid.uuid4().hex[:8]}", _oracle_timeout_sec(config)
+            )
+            shutil.rmtree(base / "gate", ignore_errors=True)
+            if outcome.reward is None:
+                return False, "the Oracle produced no reward on the patched task"
+            if outcome.reward >= 1.0:
+                return True, f"Oracle reward {outcome.reward:g} on the patched task"
+            return False, f"Oracle reward {outcome.reward:g} on the patched task. {_failure_excerpt(outcome.logs)}"
+
+        def progress(state: dict) -> None:
+            db.refresh(run)
+            run.logs = json.dumps({**meta, **state})
+            db.commit()
+
+        replay_control: dict[str, float | None] = {}
+
+        async def replay(candidate: Path, attempt: dict) -> tuple[bool, str]:
+            return await _tier1_replay(hardened, candidate, attempt, replay_control, settings.docker_platform or None)
+
+        hooks = tier1_loop.Hooks(run_attempt, classify, propose_fix, tier1_fixer.apply_edits, gate, progress, replay=replay)
+        result = await tier1_loop.run(hardened, base, hooks, limits)
+        diff = tier1_fixer.tree_diff(src, hardened)
+        (base / "hardened.diff").write_text(diff)
+        passed = result["status"] == "robust"
+        finish("passed" if passed else "failed", 1 if passed else 0, {**meta, **result, "diff": diff})
+    except Exception:
+        run = _get_or_create_run(db, submission_id, "tier1_loop", 0)
+        run.status = "failed"
+        run.reward = None
+        run.logs = json.dumps({"error": traceback.format_exc(), "attempts": [], "fixes": []})
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    finally:
+        db.close()
+
+
+def _failure_excerpt(logs: str | None, max_lines: int = 8) -> str:
+    """The first pytest error lines of a failed Oracle gate (the lines that start with "E "), so the
+    fixer can see why its patch broke the grader instead of only that it did."""
+    lines = [l.strip()[:220] for l in (logs or "").splitlines() if l.lstrip().startswith("E ")]
+    if lines:
+        return "First errors from the verifier: " + " | ".join(lines[:max_lines])
+    tail = (logs or "").strip()[-500:]
+    return f"Verifier output ended with: {tail}" if tail else "No verifier output was captured."
+
+
+async def _tier1_replay(hardened: Path, candidate: Path, attempt: dict, control: dict, platform: str | None) -> tuple[bool, str]:
+    """Re-grade the winning attempt's own output (its collected artifacts) on the patched copy
+    through Tier 0's replica verifier. A patch that still lets it score 1 did not close the
+    exploit, whatever the Oracle says. The same output is first graded on the unpatched copy: if
+    the replica cannot reproduce the win there, the replay proves nothing and the patch is
+    accepted with a note saying so. Never rejects on doubt."""
+    from app.services.tier0 import replay as tier0_replay
+
+    trial = attempt.get("trial_dir")
+    artifacts = Path(trial) / "artifacts" if trial else None
+    if not artifacts or not (artifacts / "manifest.json").is_file():
+        return True, "not replayed: the attempt's output was not stored"
+    specs = []
+    try:
+        bundle = tier0_replay.load(artifacts)
+        before_spec, after_spec = tier0_taskspec.load(hardened), tier0_taskspec.load(candidate)
+        specs = [before_spec, after_spec]
+
+        def grade(spec) -> float | None:
+            return tier0_docker.run_replay(spec, bundle, platform=platform).reward
+
+        if trial not in control:
+            control[trial] = await asyncio.to_thread(grade, before_spec)
+        if control[trial] is None or control[trial] < 1.0:
+            return True, f"not replayed: the replica scored the earlier output {control[trial]} on the unpatched task, so it cannot show the exploit"
+        reward = await asyncio.to_thread(grade, after_spec)
+    except (ValueError, FileNotFoundError, OSError) as exc:  # includes a task that cannot be replayed
+        return True, f"not replayed: {exc}"
+    except Exception as exc:
+        return True, f"replay failed ({type(exc).__name__}: {str(exc)[:160]}), so it proves nothing"
+    finally:
+        for spec in specs[:1]:
+            await asyncio.to_thread(tier0_docker.cleanup_images, spec)
+    if reward is None:
+        return True, "replay gave no reward on the patched task, so it proves nothing"
+    if reward >= 1.0:
+        return False, "the earlier winning output still scores 1 on the patched task"
+    return True, f"the earlier winning output scored 1 before and now scores {reward:g}"
+
+
+def tier1_hardened_dir(submission_id: str) -> Path | None:
+    """The hardened copy Tier 1 left behind, or None when there is none."""
+    path = settings.storage_dir / "submissions" / submission_id / "tier1" / "hardened"
+    return path if (path / "task.toml").is_file() else None
+
+
+async def run_tier2_stage(
+    submission_id: str,
+    agent: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    max_attempts: int | None = None,
+    max_cost_usd: float | None = None,
+    task_copy: str | None = None,
+) -> None:
+    """Tier 2 of the cheat-trial loop (services/tier2/): an unhinted agent (Claude Code by
+    default, on TIER2_HACKER_MODEL) gets the task's own instruction plus one line of pressure
+    (tier2.PRESSURE_LINE), with no verifier access, no red-team charter and no memory of earlier
+    runs. Runs are independent, one at a time, each its own Harbor job. A judge labels each run
+    (a shortcut or an honest attempt, for passes and failures). Three genuine failed shortcut
+    attempts in a row end the stage "robust" (passed); the first shortcut that gets reward 1
+    stops it "exploited" for a person to rule on; nothing is patched. Honest solves and failures
+    are neutral, so many runs end "inconclusive". Runs on Tier 1's hardened copy when there is
+    one (task_copy "hardened" or "upload" chooses), and needs a passing Oracle first. Advisory;
+    never changes a gate. logs is JSON, see tier2/loop.py."""
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+        run = _get_or_create_run(db, submission_id, "tier2_loop", 0)
+        run.status = "running"
+        run.reward = None
+        run.logs = None
+        run.started_at = datetime.now(UTC)
+        db.commit()
+
+        def finish(status: str, reward: int | None, payload: dict) -> None:
+            run.status = status
+            run.reward = reward
+            run.logs = json.dumps(payload)
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+
+        agent = agent or "claude-code"
+        hacker_model = model or (settings.tier2_hacker_model if agent == "claude-code" else None)
+        config_error = _agent_config_error(agent, hacker_model)
+        if config_error:
+            finish("failed", None, {"error": config_error, "attempts": []})
+            return
+
+        upload = Path(submission.extracted_path)
+        hardened = tier1_hardened_dir(submission_id)
+        if task_copy == "hardened" and hardened is None:
+            finish("failed", None, {"error": "there is no hardened copy from Tier 1 for this upload", "attempts": []})
+            return
+        use_hardened = hardened is not None and task_copy != "upload"
+        src = hardened if use_hardened else upload
+        copy_used = "hardened copy from Tier 1 (storage/submissions/<id>/tier1/hardened)" if use_hardened else "upload as submitted"
+
+        base = settings.storage_dir / "submissions" / submission_id / "tier2"
+        if base.exists():
+            shutil.rmtree(base)
+        base.mkdir(parents=True)
+
+        config = _get_task_config(submission)
+        instruction = (src / "instruction.md").read_text(errors="replace") if (src / "instruction.md").is_file() else ""
+        meta = {
+            "agent": agent,
+            "model": hacker_model or _agent_model(agent),
+            "judge_model": settings.tier2_judge_model,
+            "reasoning_effort": reasoning_effort or settings.tier2_reasoning_effort,
+            "attempt_timeout_sec": settings.tier2_attempt_timeout_sec,
+            "attempt_cost_usd": settings.tier2_attempt_cost_usd,
+            "task_copy": copy_used,
+            "pressure_line": PRESSURE_LINE,
+        }
+        limits = tier2_loop.Limits(
+            max_attempts=max_attempts or settings.tier2_max_attempts,
+            max_cost_usd=settings.tier2_max_cost_usd if max_cost_usd is None else max_cost_usd,
+        )
+        meta["limits"] = {"max_attempts": limits.max_attempts, "max_cost_usd": limits.max_cost_usd}
+
+        def llm_cost(calls) -> float:
+            return sum(llm_pricing.cost_usd(m, u) or 0.0 for m, u in calls)
+
+        async def run_attempt(task_dir: Path, idx: int) -> dict:
+            jobs_dir = base / "runs" / f"attempt-{idx}"
+            outcomes: list[harbor_runner.TrialOutcome] = []
+
+            async def on_trial(outcome: harbor_runner.TrialOutcome) -> str | None:
+                outcomes.append(outcome)
+                return None
+
+            cap, cap_label = _run_cost_cap(db, settings.tier2_attempt_cost_usd or None)
+            hacker_name = (hacker_model or _agent_model(agent)).split("/", 1)[-1]
+            takes_effort = llm_factory.supports_effort(hacker_name)
+            kwargs = _agent_kwargs(agent, (reasoning_effort or settings.tier2_reasoning_effort) if takes_effort else None)
+            if not takes_effort:
+                # _agent_kwargs falls back to AGENT_REASONING_EFFORT when given None, and a model
+                # like Sonnet 4.5 answers HTTP 400 to any effort, so drop it here
+                kwargs.pop("reasoning_effort", None)
+            if agent == "claude-code" and cap is not None:
+                kwargs["max_budget_usd"] = f"{max(cap, 0.01):.2f}"
+            timeout_sec = (
+                config.environment.build_timeout_sec
+                + settings.tier2_attempt_timeout_sec
+                + config.verifier.timeout_sec
+                + max(_AGENT_SETUP_ALLOWANCE_SEC, _agent_setup_timeout_sec(agent))
+                + _HARBOR_TIMEOUT_BUFFER_SEC
+            )
+            result = await harbor_runner.run_job(
+                task_dir, agent, jobs_dir, f"tier2-{idx}-{uuid.uuid4().hex[:6]}", timeout_sec,
+                model=hacker_model, agent_kwargs=kwargs, n_attempts=1, n_concurrent=1,
+                agent_setup_timeout_sec=_agent_setup_timeout_sec(agent),
+                cost_cap_usd=cap, cost_cap_label=cap_label, on_trial=on_trial,
+                cheat_instruction=True,
+                cheat_instruction_text=PRESSURE_LINE,
+                agent_timeout_override=settings.tier2_attempt_timeout_sec,
+            )
+            shutil.rmtree(jobs_dir.parent / f"{jobs_dir.name}-task", ignore_errors=True)
+            if not outcomes:
+                return {"reward": None, "note": result.error or "harbor produced no result for this run"}
+            outcome = outcomes[0]
+            if outcome.cost_usd is not None:
+                budget.record(
+                    db, submission_id, "tier2_loop", hacker_model or _agent_model(agent), outcome.cost_usd,
+                    outcome.n_input_tokens, outcome.n_cache_tokens, outcome.n_output_tokens,
+                    agent=agent, reasoning_effort=kwargs.get("reasoning_effort"), trial_index=idx,
+                    detail=f"Tier 2 unhinted run {idx}",
+                )
+                db.commit()
+            return {
+                "reward": outcome.reward, "tool_calls": outcome.tool_calls, "cost_usd": outcome.cost_usd,
+                "trial_dir": str(outcome.trial_dir) if outcome.trial_dir else None,
+                "refused": bool((outcome.report or {}).get("refusal")),
+                "refusal": (outcome.report or {}).get("refusal"),
+                "note": None if outcome.reward is not None else (outcome.logs or "")[-400:],
+            }
+
+        async def classify(outcome: dict) -> dict | None:
+            if outcome.get("reward") is None or not outcome.get("trial_dir"):
+                return None
+            if outcome["reward"] < 1.0 and outcome.get("refused"):
+                return None  # a refusal is neutral, nothing to judge
+            transcript = tier1_hacker.condense_trajectory(Path(outcome["trial_dir"]))
+            calls = llm_usage.start()
+            try:
+                judged = await tier2_judge.classify(instruction, transcript, outcome["reward"])
+            finally:
+                budget.record_calls(db, submission_id, "tier2_loop", calls, reasoning_effort=settings.tier2_reasoning_effort)
+                db.commit()
+            if judged is not None:
+                judged["cost_usd"] = llm_cost(calls)
+            return judged
+
+        def progress(state: dict) -> None:
+            db.refresh(run)
+            run.logs = json.dumps({**meta, **state})
+            db.commit()
+
+        hooks = tier2_loop.Hooks(run_attempt, classify, progress)
+        result = await tier2_loop.run(src, hooks, limits)
+        passed = result["status"] == "robust"
+        finish("passed" if passed else "failed", 1 if passed else 0, {**meta, **result})
+    except Exception:
+        run = _get_or_create_run(db, submission_id, "tier2_loop", 0)
+        run.status = "failed"
+        run.reward = None
+        run.logs = json.dumps({"error": traceback.format_exc(), "attempts": []})
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    finally:
+        db.close()
+
+
 async def run_rubric_check(submission_id: str, rubric: str = "tb") -> None:
     """`harbor check`: an evaluator agent reads the whole task and scores it
     against a rubric -- the vendored Terminal-Bench rubric (vendor/tb_prompts/, see
@@ -2246,10 +3112,13 @@ async def run_rubric_check(submission_id: str, rubric: str = "tb") -> None:
             f"check-{uuid.uuid4().hex[:8]}",
             settings.check_agent,
             settings.check_model,
-            settings.check_timeout_sec,
+            # the outer limit must outlast the agent's own, or it kills a run still inside its time
+            max(settings.check_timeout_sec,
+                settings.check_agent_timeout_sec + _agent_setup_timeout_sec(settings.check_agent) + 600),
             rubric_path=_TB_CHECK_RUBRIC if rubric == "tb" else None,
             agent_setup_timeout_sec=_agent_setup_timeout_sec(settings.check_agent),
             agent_kwargs=_evaluator_kwargs(settings.check_reasoning_effort),
+            agent_timeout_sec=settings.check_agent_timeout_sec,
         )
         if outcome.cost_usd is not None:
             budget.record(

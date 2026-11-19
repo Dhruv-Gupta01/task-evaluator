@@ -5,12 +5,18 @@ from collections import Counter
 
 from app.config import get_settings
 from app.models import LlmSpend, Run, Submission
-from app.services import image_inventory, verifier_report
+from app.services import image_inventory, verifier_report, versions
 from app.services.harbor_runner import CODEX_BAKE_NOTE_MARKER
 from app.services.task_config import TaskConfig
+from app.services.tier2 import memory as tier2_memory
 from app.schemas import (
     AgentTrialsResult,
     AnswerExposureResult,
+    RegradeResult,
+    SuggestedVerdict,
+    Tier0Result,
+    Tier1Result,
+    Tier2Result,
     BuildResult,
     ChecksumInfo,
     CheatTrialResult,
@@ -73,19 +79,44 @@ def _expected_tests(submission: Submission) -> int | None:
     return counts.most_common(1)[0][0] if counts else None
 
 
+def _is_grader_error(run: Run) -> bool:
+    """The grader itself broke on this run (no score): it says nothing about the agent."""
+    return bool((_verifier(run) or {}).get("grader_error"))
+
+
+def _suggested_verdict(run: Run, verifier: dict | None) -> dict | None:
+    """A pre-filled genuine-or-fake call, only for a run that has finished."""
+    if run.status not in ("passed", "failed"):
+        return None
+    reward = run.raw_reward if run.raw_reward is not None else run.reward
+    suggestion = verifier_report.suggest_verdict(reward, verifier)
+    if run.kind in ("oracle", "oracle_stress") and suggestion["verdict"] == "likely_genuine":
+        # The reference solution is not an agent: when it fails named checks, the solution or
+        # the grader is at fault, and a reviewer has to decide which.
+        suggestion = {
+            "verdict": "unclear",
+            "reason": "the reference solution failed named checks: either the solution is broken or the grader "
+            f"is too strict. {suggestion['reason']}",
+            "action": "Read the failed checks against the instruction and the solution; this fails the Oracle gate.",
+        }
+    return suggestion
+
+
 def _trial(r: Run, expected_tests: int | None) -> TrialResult:
+    verifier = _verifier(r, expected_tests)
     return TrialResult(
-        index=r.run_index, reward=r.reward, raw_reward=r.raw_reward, verifier=_verifier(r, expected_tests),
-        logs=r.logs, task_checksum=r.task_checksum,
+        index=r.run_index, reward=r.reward, raw_reward=r.raw_reward, verifier=verifier,
+        suggested_verdict=_suggested_verdict(r, verifier), logs=r.logs, task_checksum=r.task_checksum,
     )
 
 
 def _stage_result(run: Run | None) -> StageResult:
     if run is None:
         return StageResult(status="not-run", reward=None, logs=None)
+    verifier = _verifier(run)
     return StageResult(
-        status=run.status, reward=run.reward, raw_reward=run.raw_reward, verifier=_verifier(run),  # type: ignore[arg-type]
-        logs=run.logs, task_checksum=run.task_checksum,
+        status=run.status, reward=run.reward, raw_reward=run.raw_reward, verifier=verifier,  # type: ignore[arg-type]
+        suggested_verdict=_suggested_verdict(run, verifier), logs=run.logs, task_checksum=run.task_checksum,
     )
 
 
@@ -101,8 +132,29 @@ def _invert_status(status: StageStatus) -> StageStatus:
     return status
 
 
+def _nop_verdict(result: StageResult) -> SuggestedVerdict | None:
+    """Nop wants reward 0 (a do-nothing agent must not solve the task), so the agent-trial
+    reading of a 0 as 'likely genuine' would be backwards here."""
+    verdict = result.suggested_verdict
+    reward = result.raw_reward if result.raw_reward is not None else result.reward
+    if verdict is None or verdict.verdict == "fake" or reward is None:
+        return verdict  # a grader error, or no score at all: the generic reading holds
+    if reward >= 1.0:
+        return SuggestedVerdict(
+            verdict="unclear",
+            reason="a do-nothing agent scored 1: the grader accepts an empty solution",
+            action="Read the tests; this is a weak grader, not a genuine pass, and it fails the Nop gate.",
+        )
+    return SuggestedVerdict(
+        verdict="pass",
+        reason="reward 0 is the expected result for a do-nothing agent",
+        action="Spot-check only.",
+    )
+
+
 def _nop_stage_result(run: Run | None) -> StageResult:
     result = _stage_result(run)
+    result = result.model_copy(update={"suggested_verdict": _nop_verdict(result)})
     if result.status == "failed" and result.reward is None:
         # No reward at all means the run itself errored (build failure,
         # crash, timeout) — that must not display as a nop pass.
@@ -164,10 +216,17 @@ def _oracle_runs_result(submission: Submission) -> OracleRunsResult:
             f"the solution writes to ({', '.join(_fragile_findings(submission))}): run at least "
             f"{_SUGGESTED_ORACLE_RUNS}, plus a stress run, since such tests fail only some of the time."
         )
+    grader_errors = sum(1 for r in oracle_runs if r.status in _TERMINAL and _is_grader_error(r))
+    if grader_errors:
+        note = (
+            f"{grader_errors} of {n} Oracle run(s) were grader errors (the verifier broke, no score): not a "
+            "verdict on the solution. Rerun them; the gate cannot be judged until every run has a score."
+        )
+        flaky_note = f"{flaky_note} {note}" if flaky_note else note
     return OracleRunsResult(
         status=status, n=n, runs=[_trial(r, expected) for r in oracle_runs], all_passed=all_passed,
         flaky=flaky, flaky_note=flaky_note, stress_runs=stress_runs, stress_note=stress_note,
-        expected_tests=expected,
+        expected_tests=expected, grader_errors=grader_errors,
     )
 
 
@@ -222,12 +281,16 @@ def _agent_trials_result(submission: Submission) -> AgentTrialsResult:
     else:
         status = "passed" if any(r.reward == 1 for r in agent_runs) else "failed"
 
+    # A grader error is the grader's fault, not the agent's result: it is left out of the pass
+    # rate, pass@k and the refusal rate, and flagged for a rerun instead.
+    grader_errors = sum(1 for r in agent_runs if r.status in _TERMINAL and _is_grader_error(r))
+    scored_n = n - grader_errors
     pass_rate = None
     pass_at_k = None
-    if all_terminal:
+    if all_terminal and scored_n > 0:
         passed = sum(1 for r in agent_runs if r.reward == 1)
-        pass_rate = passed / n
-        pass_at_k = _pass_at_k_table(n, passed)
+        pass_rate = passed / scored_n
+        pass_at_k = _pass_at_k_table(scored_n, passed)
 
     expected = _expected_tests(submission)
     trials = [_trial(r, expected) for r in agent_runs]
@@ -238,11 +301,12 @@ def _agent_trials_result(submission: Submission) -> AgentTrialsResult:
         )
     refused = sum(1 for r in agent_runs if (_verifier(r) or {}).get("refusal"))
     rate_without = None
-    if all_terminal and n - refused > 0:
-        rate_without = sum(1 for r in agent_runs if r.reward == 1) / (n - refused)
+    if all_terminal and scored_n - refused > 0:
+        rate_without = sum(1 for r in agent_runs if r.reward == 1) / (scored_n - refused)
     return AgentTrialsResult(
         status=status, n=n, trials=trials, pass_rate=pass_rate, pass_at_k=pass_at_k,
         test_summary=test_summary, refusals=refused, pass_rate_excluding_refusals=rate_without,
+        grader_errors=grader_errors,
     )
 
 
@@ -417,6 +481,24 @@ def _edge_cases_result(run: Run | None) -> EdgeCasesResult:
     return EdgeCasesResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
 
 
+def _tier0_result(run: Run | None) -> Tier0Result:
+    if run is None:
+        return Tier0Result(status="not-run", logs=None)
+    return Tier0Result(status=run.status, logs=run.logs)  # type: ignore[arg-type]
+
+
+def _tier1_result(run: Run | None) -> Tier1Result:
+    if run is None:
+        return Tier1Result(status="not-run", logs=None)
+    return Tier1Result(status=run.status, logs=run.logs)  # type: ignore[arg-type]
+
+
+def _tier2_result(run: Run | None) -> Tier2Result:
+    if run is None:
+        return Tier2Result(status="not-run", logs=None)
+    return Tier2Result(status=run.status, logs=run.logs)  # type: ignore[arg-type]
+
+
 def _answer_exposure_result(run: Run | None) -> AnswerExposureResult:
     if run is None:
         return AnswerExposureResult(status="not-run", logs=None)
@@ -443,6 +525,12 @@ def _reviewer_decisions(run: Run | None) -> dict:
     except ValueError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _regrade_result(run: Run | None) -> RegradeResult:
+    if run is None:
+        return RegradeResult(status="not-run", logs=None)
+    return RegradeResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
 
 
 def _rubric_check_result(run: Run | None) -> RubricCheckResult:
@@ -488,6 +576,14 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         tb_static_checks=_tb_static_checks_result(_get_run(submission, "tb_static_checks")),
         ai_detection=_ai_detection_result(_get_run(submission, "ai_detection")),
         answer_exposure=_answer_exposure_result(_get_run(submission, "answer_exposure")),
+        tier0=_tier0_result(_get_run(submission, "tier0_probes")),
+        tier0_decisions=_reviewer_decisions(_get_run(submission, "tier0_decision")),
+        tier1=_tier1_result(_get_run(submission, "tier1_loop")),
+        tier1_decisions=_reviewer_decisions(_get_run(submission, "tier1_decision")),
+        tier2=_tier2_result(_get_run(submission, "tier2_loop")),
+        tier2_decisions=_reviewer_decisions(_get_run(submission, "tier2_decision")),
+        trial_verdicts=_reviewer_decisions(_get_run(submission, "trial_verdict")),
+        regrade=_regrade_result(_get_run(submission, "regrade")),
         image_inventory=_image_inventory_result(_get_run(submission, "image_inventory")),
         fresh_build=_fresh_build_result(_get_run(submission, "fresh_build")),
         checksum=_checksum_info(submission),
@@ -516,6 +612,98 @@ def to_list_item(submission: Submission) -> SubmissionListItem:
 
 def _fmt_pct(x: float | None) -> str:
     return f"{x * 100:.1f}%" if x is not None else "not run yet"
+
+
+def _tier1_summary_line(t: Tier1Result) -> str:
+    line = f"- Tier 1 (hinted agent + fixer): {_fmt_status(t.status)}"
+    if not t.logs:
+        return line
+    try:
+        doc = json.loads(t.logs)
+    except ValueError:
+        return line
+    if doc.get("skipped"):
+        return line + f" (skipped: {doc['skipped']})"
+    attempts = doc.get("attempts") or []
+    if not attempts:
+        return line
+    hits = sum(1 for a in attempts if a.get("verdict") == "exploited")
+    fixes = sum(1 for f in doc.get("fixes") or [] if f.get("accepted"))
+    attempted = sum(1 for a in attempts if a.get("verdict") in ("exploited", "attempted_failed"))
+    bits = [f"{len(attempts)} attempt(s)", f"attempted {attempted}", f"{hits} exploited", f"{fixes} patch(es) accepted"]
+    if doc.get("status"):
+        bits.append(f"ended: {doc['status']}")
+    return line + " (" + ", ".join(bits) + ")"
+
+
+def _tier1_counts(t: Tier1Result) -> tuple[int, int] | None:
+    """(attempted, exploited) for Tier 1, or None when it has no attempts yet."""
+    try:
+        attempts = (json.loads(t.logs) if t.logs else {}).get("attempts") or []
+    except ValueError:
+        return None
+    if not attempts:
+        return None
+    exploited = sum(1 for a in attempts if a.get("verdict") == "exploited")
+    return exploited + sum(1 for a in attempts if a.get("verdict") == "attempted_failed"), exploited
+
+
+def _tier2_summary_line(t: Tier2Result, tier1: Tier1Result | None = None) -> str:
+    """Tier 2's own counts, then Tier 1's, never one blended number: hinted and unhinted agents
+    answer different questions."""
+    line = f"- Tier 2 (unhinted agent): {_fmt_status(t.status)}"
+    if not t.logs:
+        return line
+    try:
+        doc = json.loads(t.logs)
+    except ValueError:
+        return line
+    attempts = doc.get("attempts") or []
+    if not attempts:
+        return line
+    c = tier2_memory.counts(attempts)
+    bits = [tier2_memory.counts_text(c)]
+    if c["attempted"]:
+        bits.append(f"{c['attempted_failed']} of {c['attempted']} shortcut attempts failed")
+    else:
+        bits.append("no shortcut was attempted, so the grader was not really tested")
+    if doc.get("status"):
+        bits.append(f"ended: {doc['status']}")
+    line += " (" + "; ".join(bits) + ")"
+    hinted = _tier1_counts(tier1) if tier1 is not None else None
+    if hinted is not None:
+        line += (
+            f". Hinted (Tier 1): attempted {hinted[0]}, exploited {hinted[1]}. "
+            "Hinted and unhinted results are separate numbers and are not combined"
+        )
+    return line
+
+
+def _tier0_summary_line(t: Tier0Result) -> str:
+    line = f"- Tier 0 probes: {_fmt_status(t.status)}"
+    if not t.logs:
+        return line
+    try:
+        doc = json.loads(t.logs)
+    except ValueError:
+        return line
+    if doc.get("skipped"):
+        return line + f" (skipped: {doc['skipped']})"
+    s = doc.get("summary") or {}
+    if not s:
+        return line
+    bits = [f"{s.get('held', 0)} held", f"{s.get('exploited', 0)} exploited"]
+    if s.get("fail_open"):
+        bits.append(f"{s['fail_open']} fail open")
+    if s.get("false_zero"):
+        bits.append(f"{s['false_zero']} valid solution graded 0")
+    if s.get("held_but_positive_control_failed"):
+        bits.append(f"{len(s['held_but_positive_control_failed'])} unproven")
+    if s.get("control_ok") is False:
+        bits.append("CONTROL FAILED: harness does not model this task")
+    elif s.get("control_ok"):
+        bits.append("control ok")
+    return line + f" ({', '.join(bits)})"
 
 
 def _fmt_status(status: str) -> str:
@@ -691,7 +879,14 @@ def run_limits(submission: Submission, schema: SubmissionSchema) -> dict:
             f"AGENT_TIMEOUT_SEC={settings.agent_timeout_sec:g}s overrides the task's own "
             f"timeout_sec={config.agent.timeout_sec:g}s"
         )
+    harbor = versions.info()["harbor"]
+    if harbor["worker_supported"] is False:
+        warnings.append(
+            f"Harbor {harbor['version']} is older than {harbor['min_for_reward_kit_worker']}: a task whose grader "
+            "uses Reward Kit's Worker is not graded as designed on this Harbor"
+        )
     return {
+        "harbor_version": harbor["version"],
         "image": image,
         "agent_timeout_sec": applied,
         "agent_timeout_source": "AGENT_TIMEOUT_SEC" if settings.agent_timeout_sec else "task.toml",
@@ -775,7 +970,21 @@ def build_summary_markdown(
             if schema.agent_trials.refusals
             else []
         ),
+        *(
+            [
+                f"- Grader errors: {schema.agent_trials.grader_errors} of {schema.agent_trials.n} trials "
+                "(the verifier broke, no score; left out of the pass rate and pass@k, rerun them)"
+            ]
+            if schema.agent_trials.grader_errors
+            else []
+        ),
     ]
+    if schema.oracle.grader_errors:
+        lines.insert(
+            lines.index("## Agent Trials") - 1,
+            f"- Oracle grader errors: {schema.oracle.grader_errors} of {schema.oracle.n} run(s) "
+            "(the verifier broke, no score; rerun them)",
+        )
     if schema.agent_trials.pass_at_k:
         pass_k_line = ", ".join(
             f"pass@{k}: {_fmt_pct(v)}"
@@ -811,6 +1020,9 @@ def build_summary_markdown(
         + (f" ({schema.cheat_trial.summary})" if schema.cheat_trial.summary else ""),
         f"- Answer Exposure: {_fmt_status(schema.answer_exposure.status)}"
         + (f" ({_json_field(schema.answer_exposure.logs, 'warn_count')} warning(s))" if schema.answer_exposure.logs else ""),
+        _tier0_summary_line(schema.tier0),
+        _tier1_summary_line(schema.tier1),
+        _tier2_summary_line(schema.tier2, schema.tier1),
         f"- Fresh build (no cache, Oracle): {_fmt_status(schema.fresh_build.status)}",
         f"- Failure Analysis: {_fmt_status(schema.failure_analysis.status)}",
         f"- Review Report: {_fmt_status(schema.review_report.status)}",

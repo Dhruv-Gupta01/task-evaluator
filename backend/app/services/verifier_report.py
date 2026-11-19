@@ -292,6 +292,162 @@ def facts_flags(facts: dict, trial_dir: Path) -> list[str]:
     return flags
 
 
+MAX_CHECKS = 200
+MAX_CHECK_MESSAGE_CHARS = 300
+
+# Reward Kit's own file: {group: {"criteria": [{name, value, error?, reasoning?}],
+# "components": [{"detail": {...}}]}}. Other sidecars have their own shapes and
+# are only collected as text, never interpreted.
+REWARD_DETAILS_FILE = "reward-details.json"
+# Written by a task's own grader when Reward Kit's Worker could not set up its
+# isolation (the 4.1 tasks delete partial score files and exit with code 2).
+WORKER_SETUP_MARKER = "worker-setup-error"
+# Harbor raises these after the verifier ran but left no usable reward.
+_NO_REWARD_EXCEPTIONS = ("RewardFileNotFoundError", "RewardFileEmptyError", "VerifierOutputParseError")
+_SETUP_ERROR_RE = re.compile(
+    r"WorkerSetupError|worker setup or cleanup failed|Worker could not install required protections"
+)
+_WORKER_ERROR_RE = re.compile(r"\bWorkerError\b")
+
+
+def _walk_criteria(node: object, group: str, out: list[dict]) -> None:
+    if not isinstance(node, dict):
+        return
+    for item in node.get("criteria") or []:
+        if not isinstance(item, dict) or not item.get("name"):
+            continue
+        value = item.get("value")
+        number = float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+        message = item.get("error") or item.get("reasoning") or ""
+        out.append(
+            {
+                "name": _short(item["name"]),
+                "group": group,
+                "passed": number is not None and number >= 1.0,
+                "value": number,
+                "message": str(message)[:MAX_CHECK_MESSAGE_CHARS],
+            }
+        )
+    for component in node.get("components") or []:
+        if isinstance(component, dict):
+            _walk_criteria(component.get("detail"), group, out)
+
+
+def read_checks(verifier_dir: Path) -> list[dict] | None:
+    """Reward Kit's per-check results (name, pass or fail, message) from
+    reward-details.json; None when the file is missing or not in its format."""
+    path = verifier_dir / REWARD_DETAILS_FILE
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    out: list[dict] = []
+    for group, node in data.items():
+        _walk_criteria(node, str(group), out)
+    return out[:MAX_CHECKS] if out else None
+
+
+def _text(path: Path) -> str:
+    try:
+        return path.read_text(errors="replace")
+    except OSError:
+        return ""
+
+
+def _line_with(text: str, pattern: re.Pattern) -> str:
+    match = pattern.search(text)
+    if not match:
+        return ""
+    start = text.rfind("\n", 0, match.start()) + 1
+    end = text.find("\n", match.end())
+    return text[start : end if end != -1 else len(text)].strip()[:200]
+
+
+def detect_grader_error(trial_dir: Path, result: dict, reward: float | None) -> dict | None:
+    """The verifier itself broke, which says nothing about the agent: Reward
+    Kit's Worker could not set up its isolation (marker file, WorkerSetupError
+    in the output), or the verifier ran but left no usable reward file. A trial
+    that never reached grading (build failure, agent crash, timeout) is not one.
+    Harbor 0.23 does not record the grader's exit code, so exit code 2 shows up
+    as the missing reward file Reward Kit's fail-closed handling leaves behind.
+    Returns {reason, evidence} or None. A trial with a reward is never one."""
+    if reward is not None:
+        return None
+    verifier_dir = trial_dir / "verifier"
+    if (verifier_dir / WORKER_SETUP_MARKER).exists():
+        return {
+            "reason": "worker_setup_error",
+            "evidence": f"the verifier left a {WORKER_SETUP_MARKER} marker file",
+        }
+    output = _text(verifier_dir / "test-stdout.txt") + "\n" + _text(verifier_dir / "test-stderr.txt")
+    line = _line_with(output, _SETUP_ERROR_RE)
+    if line:
+        return {"reason": "worker_setup_error", "evidence": line}
+    exc = result.get("exception_info") or {}
+    if exc.get("exception_type") in _NO_REWARD_EXCEPTIONS:
+        return {
+            "reason": "no_reward_file",
+            "evidence": f"{exc['exception_type']}: {str(exc.get('exception_message') or '')[:200]}",
+        }
+    return None
+
+
+def worker_error_seen(verifier_dir: Path) -> bool:
+    """Reward Kit's WorkerError: the agent's own code failed (crashed, errored
+    or timed out) while the grader ran it. A fair failure, not a grader fault."""
+    output = _text(verifier_dir / "test-stdout.txt") + "\n" + _text(verifier_dir / "test-stderr.txt")
+    return bool(_WORKER_ERROR_RE.search(output))
+
+
+def suggest_verdict(reward: float | None, report: dict | None) -> dict:
+    """A pre-filled genuine-or-fake call for one finished trial (a reviewer
+    confirms or changes it). `reward` is Harbor's exact reward. Fake means the
+    failure is the grader's, not the agent's; likely_genuine means the agent's
+    own work failed named checks; unclear means the evidence does not say."""
+    report = report or {}
+    if report.get("grader_error"):
+        ge = report["grader_error"]
+        return {
+            "verdict": "fake",
+            "reason": f"grader problem ({ge['reason'].replace('_', ' ')}): {ge['evidence']}",
+            "action": "Rerun; report the task if it repeats.",
+        }
+    if reward is not None and reward >= 1.0:
+        return {"verdict": "pass", "reason": "reward 1", "action": "Spot-check only."}
+    if reward is None:
+        return {
+            "verdict": "unclear",
+            "reason": "no reward and no grader-error sign: the trial crashed, timed out or never reached grading",
+            "action": "Read the infrastructure flags and the trial log before counting it.",
+        }
+    failed = [c for c in (report.get("checks") or []) if not c.get("passed")]
+    ctrf_failed = ((report.get("ctrf") or {}).get("failed_names")) or []
+    names = [c["name"] for c in failed] or list(ctrf_failed)
+    if report.get("worker_error"):
+        return {
+            "verdict": "likely_genuine",
+            "reason": "the agent's own code failed while the grader ran it (WorkerError)"
+            + (f"; failed checks: {', '.join(names[:5])}" if names else ""),
+            "action": "Read the error and confirm.",
+        }
+    if names:
+        return {
+            "verdict": "likely_genuine",
+            "reason": f"reward {reward:g} with failed checks: {', '.join(names[:5])}"
+            + (f" (+{len(names) - 5} more)" if len(names) > 5 else ""),
+            "action": "Read the failed checks against the instruction and confirm the tests are fair.",
+        }
+    return {
+        "verdict": "unclear",
+        "reason": f"reward {reward:g} but no per-check record says which check failed",
+        "action": "Read the trial log; the grader gives no per-check detail.",
+    }
+
+
 def read_verifier_report(verifier_dir: Path, reward: float | None) -> dict | None:
     """None when the trial has no verifier folder at all (crash before grading)."""
     if not verifier_dir.is_dir():
@@ -302,6 +458,9 @@ def read_verifier_report(verifier_dir: Path, reward: float | None) -> dict | Non
         "reward_raw": reward,
         "ctrf": ctrf,
         "details": details,
+        "checks": read_checks(verifier_dir),
+        "worker_error": worker_error_seen(verifier_dir),
+        "grader_error": None,  # filled by the caller, which has result.json
         "flags": _flags(reward, ctrf) + _details_flags(details, reward),
         "facts": None,
     }
@@ -310,6 +469,18 @@ def read_verifier_report(verifier_dir: Path, reward: float | None) -> dict | Non
 def summary_lines(report: dict) -> str:
     """Plain text for the trial log (the Review Report reads log tails)."""
     lines = [f"raw reward: {report['reward_raw']}"]
+    grader_error = report.get("grader_error")
+    if grader_error:
+        lines.append(
+            f"GRADER ERROR ({grader_error['reason'].replace('_', ' ')}): {grader_error['evidence']}. "
+            "The grader broke, not the agent: no score, rerun this trial."
+        )
+    checks = report.get("checks")
+    if checks:
+        failed_checks = [c["name"] for c in checks if not c["passed"]]
+        lines.append(f"named checks: {len(checks) - len(failed_checks)} of {len(checks)} passed")
+        if failed_checks:
+            lines.append("failed checks: " + ", ".join(failed_checks[:10]))
     ctrf = report["ctrf"]
     if ctrf:
         lines.append(
