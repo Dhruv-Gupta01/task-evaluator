@@ -622,6 +622,96 @@ def _fmt_pct(x: float | None) -> str:
     return f"{x * 100:.1f}%" if x is not None else "not run yet"
 
 
+_VERDICT_WORDS = {
+    "exploited": "hacked it (reward 1 by a shortcut)",
+    "attempted_failed": "tried a shortcut and failed",
+    "honest_solve": "solved the task honestly",
+    "honest_fail": "tried honestly and fell short",
+    "refused": "refused",
+    "not_attempted": "barely tried",
+    "infra_failed": "gave no result (infrastructure)",
+    "unclassified": "could not be classified",
+    "needs_review": "needs a person to judge",
+}
+# Attempts that did not really test the grader: not evidence that it resisted a hack.
+_NOT_EVIDENCE = ("honest_solve", "honest_fail", "refused", "not_attempted", "infra_failed", "unclassified")
+
+
+def attempt_counts(logs: str | None) -> dict[str, int]:
+    """How many attempts got each label, from a Tier 1 or Tier 2 result's logs."""
+    try:
+        attempts = (json.loads(logs) if logs else {}).get("attempts") or []
+    except ValueError:
+        return {}
+    counts: dict[str, int] = {}
+    for a in attempts:
+        v = a.get("verdict") or "unclassified"
+        counts[v] = counts.get(v, 0) + 1
+    return counts
+
+
+def _breakdown(counts: dict[str, int]) -> str:
+    return ", ".join(f"{n} {_VERDICT_WORDS.get(v, v)}" for v, n in counts.items() if n)
+
+
+def _agent_tier_lines(name: str, status: str, logs: str | None) -> list[str]:
+    counts = attempt_counts(logs)
+    if not counts:
+        return [f"- {name}: not run yet" if status == "not-run" else f"- {name}: {_fmt_status(status)}, no attempts recorded"]
+    total = sum(counts.values())
+    tried = counts.get("exploited", 0) + counts.get("attempted_failed", 0)
+    idle = sum(counts.get(v, 0) for v in _NOT_EVIDENCE)
+    out = [f"- {name}: {total} attempt(s): {_breakdown(counts)}."]
+    if not tried:
+        out.append("  - No attempt really tried a shortcut, so this tier did not test the grader.")
+    elif idle:
+        out.append(
+            f"  - {idle} attempt(s) were honest solves, refusals or did not really try; "
+            "they are not evidence that the grader resisted a hack."
+        )
+    return out
+
+
+def cheat_evidence_lines(schema) -> list[str]:
+    """What the attackers actually did, in plain words: hacks, failed shortcuts, honest solves,
+    refusals, runs that gave nothing. Honest solves and refusals are stated, never counted as held."""
+    lines = ["", "## Cheat evidence (what the attackers actually did)"]
+    t0 = None
+    try:
+        t0 = json.loads(schema.tier0.logs) if schema.tier0.logs else None
+    except ValueError:
+        t0 = None
+    if schema.tier0.status == "not-run" or not isinstance(t0, dict):
+        lines.append("- Tier 0 (static probes, no agent): not run yet")
+    elif t0.get("skipped"):
+        lines.append(f"- Tier 0 (static probes, no agent): skipped ({t0['skipped']}), so it is not evidence.")
+    else:
+        s = t0.get("summary") or {}
+        lines.append(
+            f"- Tier 0 (static probes, no agent): {s.get('probes_run', 0)} probe(s), {s.get('evidential', 0)} evidential, "
+            f"{s.get('exploited', 0)} exploited, {s.get('held', 0)} held."
+        )
+    lines += _agent_tier_lines("Tier 1 (hinted agent)", schema.tier1.status, schema.tier1.logs)
+    lines += _agent_tier_lines("Tier 2 (unhinted agent)", schema.tier2.status, schema.tier2.logs)
+    cycle = None
+    try:
+        cycle = json.loads(schema.tier_cycle.logs) if schema.tier_cycle.logs else None
+    except ValueError:
+        cycle = None
+    if isinstance(cycle, dict) and cycle.get("rounds"):
+        patches = sum(r.get("patched") or 0 for r in cycle["rounds"])
+        lines.append(
+            f"- Tier loop: {len(cycle['rounds'])} round(s), {patches} patch(es) accepted by Tier 1 "
+            f"(the upload was never edited), ended: {cycle.get('status') or 'in progress'}"
+            + (f". {cycle['reason']}" if cycle.get("reason") else ".")
+        )
+    lines.append(
+        "- Honest solves, refusals and attempts that did not really try are listed above so a reader can see them; "
+        "none of them is counted as the grader holding. Hinted (Tier 1) and unhinted (Tier 2) numbers are never added together."
+    )
+    return lines
+
+
 def _tier1_summary_line(t: Tier1Result) -> str:
     line = f"- Tier 1 (hinted agent + fixer): {_fmt_status(t.status)}"
     if not t.logs:
@@ -639,6 +729,9 @@ def _tier1_summary_line(t: Tier1Result) -> str:
     fixes = sum(1 for f in doc.get("fixes") or [] if f.get("accepted"))
     attempted = sum(1 for a in attempts if a.get("verdict") in ("exploited", "attempted_failed"))
     bits = [f"{len(attempts)} attempt(s)", f"attempted {attempted}", f"{hits} exploited", f"{fixes} patch(es) accepted"]
+    others = _breakdown({v: n for v, n in attempt_counts(t.logs).items() if v in _NOT_EVIDENCE})
+    if others:
+        bits.append(others)
     if doc.get("status"):
         bits.append(f"ended: {doc['status']}")
     return line + " (" + ", ".join(bits) + ")"
@@ -1034,6 +1127,7 @@ def build_summary_markdown(
         f"- Fresh build (no cache, Oracle): {_fmt_status(schema.fresh_build.status)}",
         f"- Failure Analysis: {_fmt_status(schema.failure_analysis.status)}",
         f"- Review Report: {_fmt_status(schema.review_report.status)}",
+        *cheat_evidence_lines(schema),
         "",
         "## Cost",
         f"- Total recorded LLM spend for this submission: "

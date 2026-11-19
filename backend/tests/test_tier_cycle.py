@@ -157,3 +157,42 @@ def test_a_crash_is_recorded_not_raised(world, monkeypatch):
     go()
     status, doc = result(world)
     assert status == "failed" and doc["status"] == "error" and doc.get("error")
+
+
+# The evidence summary states what the attackers actually did (honest solves, refusals, ...)
+def _schema(tier0=None, tier1=None, tier2=None, cycle=None):
+    from types import SimpleNamespace as NS
+
+    def stage(doc):
+        return NS(status="not-run" if doc is None else "failed", logs=None if doc is None else json.dumps(doc))
+
+    return NS(tier0=stage(tier0), tier1=stage(tier1), tier2=stage(tier2), tier_cycle=stage(cycle))
+
+
+def test_summary_states_honest_solves_and_refusals():
+    from app.services import submission_service as ss
+
+    attempts = [{"verdict": v} for v in ("honest_solve", "honest_solve", "refused", "attempted_failed", "not_attempted")]
+    text = "\n".join(ss.cheat_evidence_lines(_schema(tier2={"attempts": attempts})))
+    assert "2 solved the task honestly" in text and "1 refused" in text and "1 tried a shortcut and failed" in text
+    assert "1 barely tried" in text
+    assert "not evidence that the grader resisted a hack" in text
+    assert "never added together" in text
+
+
+def test_summary_says_when_nothing_really_tried_or_nothing_ran():
+    from app.services import submission_service as ss
+
+    only_honest = "\n".join(ss.cheat_evidence_lines(_schema(tier1={"attempts": [{"verdict": "honest_solve"}] * 3})))
+    assert "No attempt really tried a shortcut, so this tier did not test the grader" in only_honest
+    nothing = "\n".join(ss.cheat_evidence_lines(_schema()))
+    assert nothing.count("not run yet") == 3
+
+
+def test_summary_reports_the_loop_and_a_skipped_tier0():
+    from app.services import submission_service as ss
+
+    cycle = {"status": "robust", "reason": "no patch was needed", "rounds": [{"patched": 2}, {"patched": 0}]}
+    text = "\n".join(ss.cheat_evidence_lines(_schema(tier0={"skipped": "shared verifier"}, cycle=cycle)))
+    assert "skipped (shared verifier), so it is not evidence" in text
+    assert "2 round(s), 2 patch(es) accepted by Tier 1 (the upload was never edited), ended: robust" in text
