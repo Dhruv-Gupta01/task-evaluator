@@ -1207,13 +1207,21 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
             "status": schema.tier1.status,
             "not_run": schema.tier1.status == "not-run",
             "report": _json_or_raw(schema.tier1.logs),
+            "counts": submission_service.attempt_counts(schema.tier1.logs),
             "rulings": schema.tier1_decisions,
         },
         "tier2": {
             "status": schema.tier2.status,
             "not_run": schema.tier2.status == "not-run",
             "report": _json_or_raw(schema.tier2.logs),
+            "counts": submission_service.attempt_counts(schema.tier2.logs),
             "rulings": schema.tier2_decisions,
+        },
+        # Tier 0, 1 and 2 repeated on the patched task until a round needs no patch (every round kept).
+        "tier_cycle": {
+            "status": schema.tier_cycle.status,
+            "not_run": schema.tier_cycle.status == "not-run",
+            "report": _json_or_raw(schema.tier_cycle.logs),
         },
         "fresh_build": {
             "status": schema.fresh_build.status,
