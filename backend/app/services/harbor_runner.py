@@ -21,7 +21,7 @@ from pathlib import Path
 import yaml
 
 from app.config import docker_add_host_pairs, get_settings, host_env_for_subprocess
-from app.services import infra_marker_scan, refusal_detector, verifier_report
+from app.services import infra_marker_scan, refusal_detector, reward_kit_checks, verifier_report, versions
 from app.services.llm import pricing
 from app.services.llm.base import Usage
 
@@ -38,7 +38,15 @@ MAX_AGENT_OUTPUT_CHARS = 4_000
 _HARBOR_DEFAULT_SETUP_TIMEOUT_SEC = 360
 
 
-def _write_agent_setup_timeout_config(out_dir: Path, job_name: str, agent_setup_timeout_sec: int) -> Path:
+# `harbor check` builds its wrapper task from a template whose agent timeout is fixed at
+# 1800 s (harbor/analyze/check-task-template/task.toml). Only a JobConfig multiplier can
+# change it, so the wanted timeout is expressed as a multiple of that value.
+_HARBOR_CHECK_AGENT_TIMEOUT_SEC = 1800
+
+
+def _write_agent_setup_timeout_config(
+    out_dir: Path, job_name: str, agent_setup_timeout_sec: int, agent_timeout_sec: int = 0
+) -> Path:
     """`harbor check` and `harbor analyze` have no --agent-setup-timeout-multiplier
     CLI flag -- unlike `harbor run`, confirmed against the installed harbor 0.23.0
     CLI (`harbor check -h` lists no such option; passing it anyway is a hard CLI
@@ -48,9 +56,13 @@ def _write_agent_setup_timeout_config(out_dir: Path, job_name: str, agent_setup_
     both commands apply their own explicit --agent/--model/--rubric args on top of
     whatever --config loaded, so this is safe to combine with the rest of the
     command line."""
-    multiplier = agent_setup_timeout_sec / _HARBOR_DEFAULT_SETUP_TIMEOUT_SEC
+    doc: dict[str, float] = {}
+    if agent_setup_timeout_sec > 0:
+        doc["agent_setup_timeout_multiplier"] = agent_setup_timeout_sec / _HARBOR_DEFAULT_SETUP_TIMEOUT_SEC
+    if agent_timeout_sec > 0:
+        doc["agent_timeout_multiplier"] = agent_timeout_sec / _HARBOR_CHECK_AGENT_TIMEOUT_SEC
     path = out_dir / f"{job_name}.setup-timeout-config.json"
-    path.write_text(json.dumps({"agent_setup_timeout_multiplier": multiplier}))
+    path.write_text(json.dumps(doc))
     return path
 # How often the cost watchdog re-reads in-flight trials' running cost.
 _COST_CHECK_INTERVAL_SEC = 10
@@ -71,6 +83,11 @@ def _harbor_version() -> str:
         except (OSError, subprocess.SubprocessError):
             _harbor_version_cache = "unknown (harbor CLI not found)"
     return _harbor_version_cache
+
+
+def _analyze_bin() -> str:
+    """The Harbor binary for `analyze` and `check`: HARBOR_ANALYZE_BIN when set, else HARBOR_BIN."""
+    return settings.harbor_analyze_bin or settings.harbor_bin
 
 
 @dataclass
@@ -356,6 +373,7 @@ def _prepare_task(
     cheat_instruction: bool = False,
     cheat_instruction_text: str | None = None,
     fresh_build: bool = False,
+    agent_timeout_override: int | None = None,
 ) -> tuple[Path, str | None]:
     """Returns (task path for Harbor, notes for the logs). When
     HARBOR_NETWORK_MODE or AGENT_TIMEOUT_SEC differ from the task file, or
@@ -364,7 +382,7 @@ def _prepare_task(
     temporary copy of the task with those changes; the extracted files are
     never edited."""
     mode = settings.harbor_network_mode
-    timeout = settings.agent_timeout_sec
+    timeout = agent_timeout_override or settings.agent_timeout_sec
     toml_path = task_root / "task.toml"
     original = tomllib.loads(toml_path.read_text())
     env = original.get("environment", {})
@@ -382,7 +400,8 @@ def _prepare_task(
     if timeout and agent_section.get("timeout_sec") != timeout:
         edits["[agent]"] = (("timeout_sec",), f"timeout_sec = {timeout}.0")
         notes.append(
-            f"(agent timeout forced to {timeout}s by the platform setting AGENT_TIMEOUT_SEC; "
+            f"(agent timeout forced to {timeout}s by "
+            f"{'this stage' if agent_timeout_override else 'the platform setting AGENT_TIMEOUT_SEC'}; "
             f"the task file had {agent_section.get('timeout_sec', 'no timeout')})"
         )
     bake = (
@@ -738,9 +757,25 @@ def _parse_trial(
         facts = verifier_report.read_run_facts(result, task_toml, settings.docker_platform)
         facts_flags = verifier_report.facts_flags(facts, trial_dir)
         if outcome.report is None:  # crashed before grading: keep the run facts anyway
-            outcome.report = {"reward_raw": reward, "ctrf": None, "details": None, "flags": []}
+            outcome.report = {
+                "reward_raw": reward, "ctrf": None, "details": None, "checks": None,
+                "worker_error": False, "grader_error": None, "flags": [],
+            }
         outcome.report["facts"] = facts
         outcome.report["flags"] += facts_flags
+        # Reward Kit's Worker needs Harbor 0.25+; say so when a task needs it and this Harbor is older.
+        if reward != 1.0 and task_toml is not None and reward_kit_checks.uses_worker(task_toml.parent):
+            worker_note = versions.worker_flag(_harbor_version())
+            if worker_note:
+                outcome.report["flags"].append(worker_note)
+        # A broken grader is not an agent failure: label it so it is kept out of pass rates.
+        grader_error = verifier_report.detect_grader_error(trial_dir, result, reward)
+        outcome.report["grader_error"] = grader_error
+        if grader_error:
+            outcome.report["flags"].append(
+                f"grader error ({grader_error['reason'].replace('_', ' ')}): {grader_error['evidence']}. "
+                "This says nothing about the agent; rerun the trial, and report the task if it repeats."
+            )
         outcome.report["flags"] += verifier_report.reward_file_flags(trial_dir / "verifier", reward)
         outcome.report["flags"] += verifier_report.harness_error_flags(trial_dir, reward)
         # J: a refusal scores 0 like a real failure; label it so the pass rate can be read both ways.
@@ -889,6 +924,7 @@ async def run_job(
     cheat_instruction_text: str | None = None,
     extra_note: str = "",
     fresh_build: bool = False,
+    agent_timeout_override: int | None = None,
 ) -> HarborJobResult:
     """Run `harbor run` with `n_attempts` trials of `agent` against the task
     at `task_root`. If `cost_cap_usd` is set, the job is stopped once the cost
@@ -902,6 +938,7 @@ async def run_job(
         cheat_instruction=cheat_instruction,
         cheat_instruction_text=cheat_instruction_text,
         fresh_build=fresh_build,
+        agent_timeout_override=agent_timeout_override,
     )
     job_dir = jobs_dir / job_name
     hosts_overlay = _write_build_hosts_overlay(jobs_dir.parent / f"{jobs_dir.name}-build-hosts.yaml")
@@ -1135,6 +1172,67 @@ async def run_single(
 
 
 @dataclass
+class RegradeJobResult:
+    # (source trial dir, regraded outcome); the source dir is None if Harbor did not record it.
+    trials: list[tuple[Path | None, TrialOutcome]]
+    error: str | None = None
+
+
+async def run_regrade(
+    source_job: Path, task_root: Path, out_dir: Path, job_name: str, timeout_sec: float
+) -> RegradeJobResult:
+    """`harbor job regrade`: score a recorded job's trials again with `task_root`'s
+    verifier, without running the agent. Harbor restores each trial's recorded
+    artifacts and runs the (separate) verifier on them in a new job directory,
+    one trial at a time (two concurrent Harbor jobs have failed on this machine).
+    The source job is never modified. Only a task with a separate-mode verifier
+    whose declared inputs the source trial recorded can be regraded."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    task_path, _note = _prepare_task(task_root, out_dir / f"{job_name}-task")
+    cmd = [
+        settings.harbor_bin, "job", "regrade", str(source_job),
+        "--task-path", str(task_path), "--jobs-dir", str(out_dir), "--job-name", job_name,
+        "--n-concurrent", "1",
+    ]
+    env = host_env_for_subprocess({"DOCKER_DEFAULT_PLATFORM": settings.docker_platform})
+    cli_output_path = out_dir / f"{job_name}.cli.log"
+    with open(cli_output_path, "wb") as cli_output:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, cwd=out_dir, env=env, stdout=cli_output, stderr=asyncio.subprocess.STDOUT, **_new_group()
+            )
+        except FileNotFoundError:
+            return RegradeJobResult([], f"harbor CLI not found ({settings.harbor_bin!r}).")
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout_sec)
+        except TimeoutError:
+            await _stop(proc)
+            return RegradeJobResult([], f"harbor job regrade timed out after {timeout_sec:.0f}s")
+        except asyncio.CancelledError:
+            await _stop(proc)
+            raise
+
+    trials: list[tuple[Path | None, TrialOutcome]] = []
+    for result_path in sorted((out_dir / job_name).glob("*/result.json")):
+        try:
+            source = ((json.loads(result_path.read_text()).get("config") or {}).get("source_trial") or {}).get("path")
+        except (OSError, json.JSONDecodeError):
+            source = None
+        try:
+            outcome = _parse_trial(result_path, None, None, task_path / "task.toml")
+        except (OSError, json.JSONDecodeError):
+            continue
+        trials.append((Path(source) if source else None, outcome))
+    error = None
+    if not trials:
+        error = (
+            f"harbor job regrade exited with code {proc.returncode} and produced no trial result\n\n"
+            f"=== HARBOR OUTPUT ===\n{_truncate(_read_text(cli_output_path))}"
+        )
+    return RegradeJobResult(trials, error)
+
+
+@dataclass
 class AnalyzeJobResult:
     report: dict | None  # harbor's analysis.json: {"results": [...]}
     cost_usd: float | None
@@ -1165,7 +1263,7 @@ async def run_analyze(
     agents self-install)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
-        settings.harbor_bin, "analyze", str(trial_or_job_dir),
+        _analyze_bin(), "analyze", str(trial_or_job_dir),
         "--agent", agent, "--model", model,
         "--jobs-dir", str(out_dir), "--job-name", job_name,
         "--n-concurrent", "2", "--quiet",
@@ -1186,7 +1284,7 @@ async def run_analyze(
                 *cmd, cwd=out_dir, env=env, stdout=cli_output, stderr=asyncio.subprocess.STDOUT, **_new_group()
             )
         except FileNotFoundError:
-            return AnalyzeJobResult(None, None, f"harbor CLI not found ({settings.harbor_bin!r}).")
+            return AnalyzeJobResult(None, None, f"harbor CLI not found ({_analyze_bin()!r}).")
         try:
             await asyncio.wait_for(proc.wait(), timeout=timeout_sec)
         except TimeoutError:
@@ -1237,6 +1335,7 @@ async def run_check(
     rubric_path: Path | None = None,
     agent_setup_timeout_sec: int = 0,
     agent_kwargs: dict[str, str] | None = None,
+    agent_timeout_sec: int = 0,
 ) -> CheckJobResult:
     """`harbor check` over one task directory: an evaluator agent reads the
     whole task and scores it against a rubric -- Harbor's built-in default
@@ -1254,7 +1353,7 @@ async def run_check(
     since this module doesn't know which agents self-install)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
-        settings.harbor_bin, "check", str(task_root),
+        _analyze_bin(), "check", str(task_root),
         "--agent", agent, "--model", model,
         "--jobs-dir", str(out_dir), "--job-name", job_name,
         "--quiet",
@@ -1263,8 +1362,9 @@ async def run_check(
         cmd += ["--rubric", str(rubric_path)]
     for key, value in (agent_kwargs or {}).items():
         cmd += ["--agent-kwarg", f"{key}={value}"]
-    if agent_setup_timeout_sec > 0:
-        cmd += ["--config", str(_write_agent_setup_timeout_config(out_dir, job_name, agent_setup_timeout_sec))]
+    if agent_setup_timeout_sec > 0 or agent_timeout_sec > 0:
+        cmd += ["--config", str(_write_agent_setup_timeout_config(
+            out_dir, job_name, agent_setup_timeout_sec, agent_timeout_sec))]
     env = host_env_for_subprocess({**_litellm_key_env(), "DOCKER_DEFAULT_PLATFORM": settings.docker_platform})
     cli_output_path = out_dir / f"{job_name}.cli.log"
     with open(cli_output_path, "wb") as cli_output:
@@ -1273,7 +1373,7 @@ async def run_check(
                 *cmd, cwd=out_dir, env=env, stdout=cli_output, stderr=asyncio.subprocess.STDOUT, **_new_group()
             )
         except FileNotFoundError:
-            return CheckJobResult(None, None, f"harbor CLI not found ({settings.harbor_bin!r}).")
+            return CheckJobResult(None, None, f"harbor CLI not found ({_analyze_bin()!r}).")
         try:
             await asyncio.wait_for(proc.wait(), timeout=timeout_sec)
         except TimeoutError:

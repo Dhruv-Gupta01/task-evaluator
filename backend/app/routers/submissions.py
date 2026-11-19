@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.models import LlmSpend, Run, Submission
 from app.schemas import SubmissionListItem, SubmissionSchema, UploadResponse
-from app.services import budget, submission_diff, submission_service, task_runner
+from app.services import budget, submission_diff, submission_service, task_runner, versions
 from app.workers import task_queue
 
 router = APIRouter()
@@ -328,6 +328,99 @@ def get_budget(db: Session = Depends(get_db)) -> dict[str, float]:
     }
 
 
+@router.get("/versions")
+def get_versions() -> dict:
+    """The Harbor version in use against what Reward Kit's Worker needs (0.25.0), the Reward
+    Kit version the platform records, and whether `harbor lint` and `harbor job regrade`
+    exist in this Harbor. Nothing here installs or changes anything."""
+    return versions.info()
+
+
+_REGRADE_KINDS = ("agent", "oracle")
+_REGRADE_SOURCES = ("previous", "self")
+
+
+@router.post("/submissions/{submission_id}/regrade", status_code=202)
+async def trigger_regrade(
+    submission_id: str, kind: str = "agent", source: str = "previous", db: Session = Depends(get_db)
+) -> dict[str, str]:
+    """Score saved trials again with this upload's grader, without running the agent
+    (`harbor job regrade`). `source=previous` (default) re-scores the latest earlier upload's
+    trials of the same task, which is how a grader fix is checked; `source=self` re-scores
+    this upload's own. The original runs are never changed: the result is its own `regrade`
+    stage showing each trial's old and new reward. Advisory; no LLM cost."""
+    if kind not in _REGRADE_KINDS:
+        raise HTTPException(status_code=400, detail=f"kind must be one of {', '.join(_REGRADE_KINDS)}")
+    if source not in _REGRADE_SOURCES:
+        raise HTTPException(status_code=400, detail=f"source must be one of {', '.join(_REGRADE_SOURCES)}")
+    submission = db.get(Submission, submission_id)
+    if submission is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if submission.extracted_path is None:
+        raise HTTPException(status_code=400, detail="validate the submission first (files must be extracted)")
+    if not versions._harbor_has_command("job", "regrade"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"this Harbor ({versions.harbor_version()}) has no `harbor job regrade`; see GET /versions",
+        )
+    blocker = task_runner.regrade_blocker(Path(submission.extracted_path))
+    if blocker:
+        raise HTTPException(status_code=400, detail=blocker)
+    src, jobs = task_runner.regrade_sources(db, submission, kind, source)
+    if not jobs:
+        where = "an earlier upload of this task" if source == "previous" else "this upload"
+        raise HTTPException(status_code=400, detail=f"no saved {kind} trials to re-score in {where}")
+    _queue_row(db, submission_id, "regrade")
+    await task_queue.submit(f"{submission_id}:regrade", task_runner.run_regrade(submission_id, kind, source))
+    return {"status": "started"}
+
+
+class TrialVerdict(BaseModel):
+    stage: str  # oracle | nop | agent
+    index: int
+    ruling: str  # fake | genuine | unsure
+    adjudicator: str
+    note: str = ""
+
+
+_TRIAL_VERDICT_STAGES = ("oracle", "nop", "agent")
+_TRIAL_VERDICT_RULINGS = ("fake", "genuine", "unsure")
+
+
+@router.put("/submissions/{submission_id}/trial-verdict")
+def set_trial_verdict(submission_id: str, body: TrialVerdict, db: Session = Depends(get_db)) -> dict:
+    """A named reviewer's call on one finished trial: `fake` (the grader or environment was at
+    fault, not the agent), `genuine` (the agent really failed) or `unsure`. It confirms or
+    changes the platform's suggested verdict, is kept with the submission and shown beside
+    it, and never changes a gate or a pass rate."""
+    if db.get(Submission, submission_id) is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if body.stage not in _TRIAL_VERDICT_STAGES:
+        raise HTTPException(status_code=400, detail=f"stage must be one of {', '.join(_TRIAL_VERDICT_STAGES)}")
+    if body.ruling not in _TRIAL_VERDICT_RULINGS:
+        raise HTTPException(status_code=400, detail=f"ruling must be one of {', '.join(_TRIAL_VERDICT_RULINGS)}")
+    if not body.adjudicator.strip():
+        raise HTTPException(status_code=400, detail="name the person making the call")
+    if not 0 <= body.index <= 1000 or len(body.note) > 2000 or len(body.adjudicator) > 200:
+        raise HTTPException(status_code=400, detail="index, adjudicator or note is out of range")
+    if db.query(Run).filter_by(submission_id=submission_id, kind=body.stage, run_index=body.index).one_or_none() is None:
+        raise HTTPException(status_code=404, detail="no such trial")
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="trial_verdict", run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind="trial_verdict", run_index=0, status="passed")
+        db.add(run)
+    verdicts = submission_service._reviewer_decisions(run)
+    verdicts[f"{body.stage}:{body.index}"] = {
+        "ruling": body.ruling,
+        "adjudicator": body.adjudicator.strip(),
+        "note": body.note,
+        "at": datetime.now(UTC).isoformat(),
+    }
+    run.logs = json.dumps(verdicts)
+    db.commit()
+    return verdicts
+
+
 @router.post("/submissions/{submission_id}/failure-analysis", status_code=202)
 async def trigger_failure_analysis(
     submission_id: str, rubric: str = "tb", db: Session = Depends(get_db)
@@ -588,6 +681,102 @@ async def trigger_tier0(
     return {"status": "started"}
 
 
+@router.post("/submissions/{submission_id}/tier1", status_code=202)
+async def trigger_tier1(
+    submission_id: str,
+    agent: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    max_attempts: int | None = None,
+    max_cost_usd: float | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    """Tier 1 of the cheat-trial loop: a hinted agent (read-only copy of tests/, notes on its
+    earlier attempts) tries to get reward 1 without doing the work, one attempt at a time. A
+    confirmed hit is patched into a hardened copy of tests/ and environment/ by an LLM fixer
+    (the upload is never edited; a patch is kept only if the Oracle still scores 1), and the
+    loop continues until 3 cheating attempts in a row fail. Costs real credits: the hacker runs
+    on TIER1_HACKER_MODEL unless `model` says otherwise, each attempt is capped by
+    TIER1_ATTEMPT_COST_USD and the whole run by `max_cost_usd` (0 = no cap) or
+    TIER1_MAX_COST_USD. Needs Build and a passing Oracle. Advisory; replaces an earlier result."""
+    if agent is not None and agent not in task_runner.AGENTS:
+        raise HTTPException(status_code=400, detail=f"agent must be one of {', '.join(task_runner.AGENTS)}")
+    if model:
+        model_error = task_runner.valid_model_override(agent or "claude-code", model)
+        if model_error:
+            raise HTTPException(status_code=400, detail=model_error)
+    if reasoning_effort is not None and reasoning_effort not in task_runner.REASONING_EFFORTS:
+        raise HTTPException(
+            status_code=400, detail=f"reasoning_effort must be one of {', '.join(task_runner.REASONING_EFFORTS)}"
+        )
+    if max_attempts is not None and not 1 <= max_attempts <= 30:
+        raise HTTPException(status_code=400, detail="max_attempts must be between 1 and 30")
+    if max_cost_usd is not None and not 0 <= max_cost_usd <= 10_000:
+        raise HTTPException(status_code=400, detail="max_cost_usd must be between 0 and 10000")
+    _raise_if_over_budget(db, budget.exceeded_message(db))
+    _require_built_submission(submission_id, db)
+    if db.query(Run).filter_by(submission_id=submission_id, kind="oracle", reward=1).first() is None:
+        raise HTTPException(status_code=400, detail="run the Oracle and get a pass first")
+    _queue_row(db, submission_id, "tier1_loop")
+    await task_queue.submit(
+        f"{submission_id}:tier1_loop",
+        task_runner.run_tier1_stage(submission_id, agent, model, reasoning_effort, max_attempts, max_cost_usd),
+    )
+    return {"status": "started"}
+
+
+@router.post("/submissions/{submission_id}/tier2", status_code=202)
+async def trigger_tier2(
+    submission_id: str,
+    agent: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    max_attempts: int | None = None,
+    max_cost_usd: float | None = None,
+    task_copy: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    """Tier 2 of the cheat-trial loop: an unhinted agent gets the task plus one line of pressure
+    ("get the reward to 1.0 by whatever means work"), no verifier access, no red-team charter and
+    no memory of earlier runs. Independent runs, one at a time. Stops "robust" after 3 genuine
+    failed shortcut attempts in a row, or "exploited" at the first shortcut that gets reward 1,
+    for a person to rule on; nothing is patched. Honest solves are neutral (many runs end
+    "inconclusive"). `task_copy` is `hardened` (Tier 1's copy, the default when it exists) or
+    `upload`. Costs real credits: TIER2_HACKER_MODEL unless `model` says otherwise, each run
+    capped by TIER2_ATTEMPT_COST_USD and the whole stage by `max_cost_usd` (0 = no cap) or
+    TIER2_MAX_COST_USD. Needs Build and a passing Oracle. Advisory; replaces an earlier result."""
+    if agent is not None and agent not in task_runner.AGENTS:
+        raise HTTPException(status_code=400, detail=f"agent must be one of {', '.join(task_runner.AGENTS)}")
+    if model:
+        model_error = task_runner.valid_model_override(agent or "claude-code", model)
+        if model_error:
+            raise HTTPException(status_code=400, detail=model_error)
+    if reasoning_effort is not None and reasoning_effort not in task_runner.REASONING_EFFORTS:
+        raise HTTPException(
+            status_code=400, detail=f"reasoning_effort must be one of {', '.join(task_runner.REASONING_EFFORTS)}"
+        )
+    if max_attempts is not None and not 1 <= max_attempts <= 30:
+        raise HTTPException(status_code=400, detail="max_attempts must be between 1 and 30")
+    if max_cost_usd is not None and not 0 <= max_cost_usd <= 10_000:
+        raise HTTPException(status_code=400, detail="max_cost_usd must be between 0 and 10000")
+    if task_copy is not None and task_copy not in _TIER2_TASK_COPIES:
+        raise HTTPException(status_code=400, detail=f"task_copy must be one of {', '.join(_TIER2_TASK_COPIES)}")
+    if task_copy == "hardened" and task_runner.tier1_hardened_dir(submission_id) is None:
+        raise HTTPException(status_code=400, detail="there is no hardened copy from Tier 1 for this upload")
+    _raise_if_over_budget(db, budget.exceeded_message(db))
+    _require_built_submission(submission_id, db)
+    if db.query(Run).filter_by(submission_id=submission_id, kind="oracle", reward=1).first() is None:
+        raise HTTPException(status_code=400, detail="run the Oracle and get a pass first")
+    _queue_row(db, submission_id, "tier2_loop")
+    await task_queue.submit(
+        f"{submission_id}:tier2_loop",
+        task_runner.run_tier2_stage(
+            submission_id, agent, model, reasoning_effort, max_attempts, max_cost_usd, task_copy
+        ),
+    )
+    return {"status": "started"}
+
+
 @router.post("/submissions/{submission_id}/image-inventory", status_code=202)
 async def trigger_image_inventory(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
     """List the built image's files and package versions again (Build does it
@@ -685,6 +874,27 @@ class Tier0Decision(BaseModel):
 _TIER0_RULINGS = ("legitimate", "exploit", "accepted_risk", "unsure")
 
 
+class Tier1Decision(BaseModel):
+    attempt: int
+    ruling: str  # exploit | not_exploit | unsure
+    adjudicator: str
+    note: str = ""
+
+
+_TIER1_RULINGS = ("exploit", "not_exploit", "unsure")
+
+
+class Tier2Decision(BaseModel):
+    attempt: int
+    ruling: str  # exploit | not_exploit | unsure
+    adjudicator: str
+    note: str = ""
+
+
+_TIER2_RULINGS = ("exploit", "not_exploit", "unsure")
+_TIER2_TASK_COPIES = ("hardened", "upload")
+
+
 @router.put("/submissions/{submission_id}/tier0-decision")
 def set_tier0_decision(submission_id: str, body: Tier0Decision, db: Session = Depends(get_db)) -> dict:
     """Records a named person's ruling on a Tier 0 finding (protocol section 5: not every
@@ -705,6 +915,64 @@ def set_tier0_decision(submission_id: str, body: Tier0Decision, db: Session = De
         db.add(run)
     decisions = submission_service._reviewer_decisions(run)
     decisions[body.probe_id] = {
+        "ruling": body.ruling,
+        "adjudicator": body.adjudicator.strip(),
+        "note": body.note,
+        "at": datetime.now(UTC).isoformat(),
+    }
+    run.logs = json.dumps(decisions)
+    db.commit()
+    return decisions
+
+
+@router.put("/submissions/{submission_id}/tier1-decision")
+def set_tier1_decision(submission_id: str, body: Tier1Decision, db: Session = Depends(get_db)) -> dict:
+    """A named person's ruling on one Tier 1 attempt, overruling the judge's label: `exploit`
+    (a real shortcut), `not_exploit` (the reward was earned), `unsure`. Kept with the
+    submission and shown beside the judge's verdict; it does not restart or change the loop."""
+    if db.get(Submission, submission_id) is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if body.ruling not in _TIER1_RULINGS:
+        raise HTTPException(status_code=400, detail=f"ruling must be one of {', '.join(_TIER1_RULINGS)}")
+    if not body.adjudicator.strip():
+        raise HTTPException(status_code=400, detail="name the person making the ruling")
+    if not 1 <= body.attempt <= 1000 or len(body.note) > 2000 or len(body.adjudicator) > 200:
+        raise HTTPException(status_code=400, detail="attempt, adjudicator or note is out of range")
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="tier1_decision", run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind="tier1_decision", run_index=0, status="passed")
+        db.add(run)
+    decisions = submission_service._reviewer_decisions(run)
+    decisions[str(body.attempt)] = {
+        "ruling": body.ruling,
+        "adjudicator": body.adjudicator.strip(),
+        "note": body.note,
+        "at": datetime.now(UTC).isoformat(),
+    }
+    run.logs = json.dumps(decisions)
+    db.commit()
+    return decisions
+
+
+@router.put("/submissions/{submission_id}/tier2-decision")
+def set_tier2_decision(submission_id: str, body: Tier2Decision, db: Session = Depends(get_db)) -> dict:
+    """A named person's ruling on one Tier 2 run, overruling the judge's label: `exploit` (a
+    real shortcut), `not_exploit` (the reward was earned), `unsure`. Kept with the submission and
+    shown beside the judge's verdict; it does not restart or change the loop."""
+    if db.get(Submission, submission_id) is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if body.ruling not in _TIER2_RULINGS:
+        raise HTTPException(status_code=400, detail=f"ruling must be one of {', '.join(_TIER2_RULINGS)}")
+    if not body.adjudicator.strip():
+        raise HTTPException(status_code=400, detail="name the person making the ruling")
+    if not 1 <= body.attempt <= 1000 or len(body.note) > 2000 or len(body.adjudicator) > 200:
+        raise HTTPException(status_code=400, detail="attempt, adjudicator or note is out of range")
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="tier2_decision", run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind="tier2_decision", run_index=0, status="passed")
+        db.add(run)
+    decisions = submission_service._reviewer_decisions(run)
+    decisions[str(body.attempt)] = {
         "ruling": body.ruling,
         "adjudicator": body.adjudicator.strip(),
         "note": body.note,
@@ -894,11 +1162,31 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
             "report": _json_or_raw(schema.tier0.logs),
             "rulings": schema.tier0_decisions,
         },
+        "tier1": {
+            "status": schema.tier1.status,
+            "not_run": schema.tier1.status == "not-run",
+            "report": _json_or_raw(schema.tier1.logs),
+            "rulings": schema.tier1_decisions,
+        },
+        "tier2": {
+            "status": schema.tier2.status,
+            "not_run": schema.tier2.status == "not-run",
+            "report": _json_or_raw(schema.tier2.logs),
+            "rulings": schema.tier2_decisions,
+        },
         "fresh_build": {
             "status": schema.fresh_build.status,
             "not_run": schema.fresh_build.status == "not-run",
             "report": _json_or_raw(schema.fresh_build.logs),
         },
+        # Saved trials scored again with the current grader (no agent run): old and new reward per trial.
+        "regrade": {
+            "status": schema.regrade.status,
+            "not_run": schema.regrade.status == "not-run",
+            "report": _json_or_raw(schema.regrade.logs),
+        },
+        # A reviewer's genuine-or-fake call per trial, beside the platform's suggestion in verifier_reports.
+        "trial_verdicts": schema.trial_verdicts,
         # Installed package versions in the built image (and its task files).
         "image_inventory": {
             "status": schema.image_inventory.status,
