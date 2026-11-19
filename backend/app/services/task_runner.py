@@ -626,7 +626,7 @@ async def _tier0_harbor_probe(submission: Submission, spec, probe, config) -> di
         copy_root = base / f"{probe.pid.lower()}-src"
         if copy_root.exists():
             shutil.rmtree(copy_root)
-        shutil.copytree(Path(submission.extracted_path), copy_root, symlinks=True)
+        shutil.copytree(spec.root, copy_root, symlinks=True)  # the copy under test: the upload or a patched copy
         sol = copy_root / "solution"
         if sol.exists():
             shutil.rmtree(sol)
@@ -747,7 +747,11 @@ async def run_tier0_stage(
         # that the replica agrees with Harbor; an earlier upload's show what a verifier
         # change did (LOOSENED = the task may have got easier).
         sub_dir = settings.storage_dir / "submissions"
-        items = [(b, k, "this upload") for b, k in tier0_replay.collect(sub_dir / submission_id, spec, limit=2)]
+        # On a patched copy (task_root) the upload's own rollouts were graded by the *old* verifier, so
+        # they are an earlier version's, not proof that the replica matches Harbor: a changed reward is
+        # LOOSENED or REGRESSION for a person to look at, never a false "harness_disagrees".
+        own_source = "this upload" if task_root is None else "earlier version (before the patch)"
+        items = [(b, k, own_source) for b, k in tier0_replay.collect(sub_dir / submission_id, spec, limit=2)]
         previous = _previous_upload(db, submission)
         if previous is not None:
             items += [(b, k, "earlier upload") for b, k in tier0_replay.collect(sub_dir / previous.id, spec, limit=2)]

@@ -196,3 +196,20 @@ def test_summary_reports_the_loop_and_a_skipped_tier0():
     text = "\n".join(ss.cheat_evidence_lines(_schema(tier0={"skipped": "shared verifier"}, cycle=cycle)))
     assert "skipped (shared verifier), so it is not evidence" in text
     assert "2 round(s), 2 patch(es) accepted by Tier 1 (the upload was never edited), ended: robust" in text
+
+
+def test_tier0_replay_of_an_older_version_is_not_blamed_on_the_harness(monkeypatch):
+    """After a patch, the upload's own stored rollouts were graded by the old verifier: a different
+    reward is LOOSENED/REGRESSION, not 'the replica disagrees with Harbor'."""
+    from types import SimpleNamespace as NS
+
+    from app.services.tier0 import docker_runner, replay, runner
+
+    monkeypatch.setattr(replay, "recorded_reward", lambda bundle: 1.0)
+    monkeypatch.setattr(docker_runner, "run_replay", lambda spec, bundle, platform=None: NS(reward=0.0, notes=[]))
+    bundle = NS(key="trial-1")
+    opts = runner.Options(platform=None, sanitize=True, repeats=1)
+    same = runner.run_replays(None, [(bundle, "agent", "this upload")], opts)
+    patched = runner.run_replays(None, [(bundle, "agent", "earlier version (before the patch)")], opts)
+    assert same[0]["verdict"] == "harness_disagrees"
+    assert patched[0]["verdict"] == "REGRESSION"
