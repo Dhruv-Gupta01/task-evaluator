@@ -76,6 +76,35 @@ def get_llm_client() -> LLMClient:
     raise ValueError(f"unknown LLM provider: {provider}")
 
 
+# Models whose API answers 400 "This model does not support the effort parameter" (confirmed live
+# for Sonnet 4.5). Everything newer takes it.
+_NO_EFFORT_PREFIXES = (
+    "claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-1", "claude-opus-4-0",
+    "claude-sonnet-4-0", "claude-sonnet-4-2025", "claude-opus-4-2025", "claude-3",
+)
+
+
+def supports_effort(model: str) -> bool:
+    return not model.startswith(_NO_EFFORT_PREFIXES)
+
+
+def get_anthropic_client(model: str, reasoning_effort: str | None = None) -> LLMClient:
+    """An Anthropic client for one named model, whatever LLM_PROVIDER says. Tier 1's judge and
+    fixer use it so their (cheap) model is set on its own, apart from the other judges."""
+    settings = get_settings()
+    from app.services.llm.anthropic_client import AnthropicClient
+
+    if not settings.anthropic_api_key:
+        raise ValueError("ANTHROPIC_API_KEY not set")
+    return AnthropicClient(
+        model=model,
+        api_key=settings.anthropic_api_key,
+        rate_limiter=TokenBucket(rpm=settings.llm_rpm, tpm=settings.llm_tpm),
+        reasoning_effort=(reasoning_effort or None) if supports_effort(model) else None,
+        max_output_tokens=settings.llm_max_output_tokens or None,
+    )
+
+
 def get_daily_quota() -> DailyQuota:
     settings = get_settings()
     return DailyQuota(

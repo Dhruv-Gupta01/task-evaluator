@@ -32,8 +32,16 @@ import {
   type Tier0,
   type Tier0ProbeResult,
   type Tier0Ruling,
+  type Tier1,
+  type Tier1Attempt,
+  type Tier1Ruling,
+  type Tier2,
+  type Tier2Attempt,
   type ImageInventory,
   type FreshBuild,
+  type SuggestedVerdict,
+  type TrialVerdictRuling,
+  type RegradeReport,
 } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogPanel } from "@/components/LogPanel";
@@ -93,8 +101,11 @@ function SubmissionDetail() {
         isActive(d.rubric_check.status) ||
         isActive(d.answer_exposure.status) ||
         isActive(d.tier0.status) ||
+        isActive(d.tier1.status) ||
+        isActive(d.tier2.status) ||
         isActive(d.image_inventory.status) ||
         isActive(d.fresh_build.status) ||
+        isActive(d.regrade?.status ?? "not-run") ||
         (d.oracle.stress_runs ?? []).some((r) => r.reward == null && !r.logs) ||
         d.build.status === "pending";
       return any ? 2500 : false;
@@ -102,6 +113,36 @@ function SubmissionDetail() {
   });
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["submission", id] });
+
+  // Reward Kit: the Harbor version in use against what its Worker needs, and the version recorded.
+  const { data: versions } = useQuery({
+    queryKey: ["versions"],
+    queryFn: () => api.versions(),
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  });
+  // A reviewer confirms or changes the platform's suggested genuine-or-fake call on a trial.
+  const [trialAdjudicator, setTrialAdjudicator] = useState("");
+  const mTrialVerdict = useMutation({
+    mutationFn: (body: { stage: "oracle" | "nop" | "agent"; index: number; ruling: string }) =>
+      api.setTrialVerdict(id, { ...body, adjudicator: trialAdjudicator }),
+    onSuccess: () => {
+      toast.success("Verdict recorded");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  // Score saved trials again with the current grader, without running the agent.
+  const [regradeKind, setRegradeKind] = useState<"agent" | "oracle">("agent");
+  const [regradeSource, setRegradeSource] = useState<"previous" | "self">("previous");
+  const mRegrade = useMutation({
+    mutationFn: () => api.regrade(id, regradeKind, regradeSource),
+    onSuccess: () => {
+      toast.success("Re-grade started");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
 
   const mValidate = useMutation({
     mutationFn: () => api.validate(id),
@@ -154,6 +195,16 @@ function SubmissionDetail() {
   const [tier0Repeats, setTier0Repeats] = useState("1");
   const [tier0Harbor, setTier0Harbor] = useState(true);
   const [tier0Adjudicator, setTier0Adjudicator] = useState("");
+  const [tier1MaxAttempts, setTier1MaxAttempts] = useState("10");
+  // Empty = the server's TIER1_MAX_COST_USD.
+  const [tier1Cost, setTier1Cost] = useState("");
+  const [tier1Model, setTier1Model] = useState("default");
+  const [tier1Adjudicator, setTier1Adjudicator] = useState("");
+  const [tier2MaxAttempts, setTier2MaxAttempts] = useState("8");
+  const [tier2Cost, setTier2Cost] = useState("");
+  const [tier2Model, setTier2Model] = useState("default");
+  const [tier2Copy, setTier2Copy] = useState("default");
+  const [tier2Adjudicator, setTier2Adjudicator] = useState("");
   const [cheatCostCap, setCheatCostCap] = useState("");
   // The TB rubric adds the refusals, near_miss, difficulty_crux and low_timeout criteria that
   // Harbor's own two-criterion rubric lacks, so it is pre-selected (Default is still in the dropdown).
@@ -247,6 +298,51 @@ function SubmissionDetail() {
   const mTier0Decision = useMutation({
     mutationFn: (body: { probe_id: string; ruling: string; note: string }) =>
       api.tier0Decision(id, { ...body, adjudicator: tier0Adjudicator }),
+    onSuccess: () => {
+      toast.success("Ruling recorded");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const mTier1 = useMutation({
+    mutationFn: () =>
+      api.tier1(id, {
+        maxAttempts: Number(tier1MaxAttempts) > 0 ? Number(tier1MaxAttempts) : undefined,
+        maxCostUsd: tier1Cost !== "" && Number(tier1Cost) >= 0 ? Number(tier1Cost) : undefined,
+        model: tier1Model === "default" ? undefined : tier1Model,
+      }),
+    onSuccess: () => {
+      toast.success("Tier 1 started");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const mTier1Decision = useMutation({
+    mutationFn: (body: { attempt: number; ruling: string }) =>
+      api.tier1Decision(id, { ...body, adjudicator: tier1Adjudicator, note: "" }),
+    onSuccess: () => {
+      toast.success("Ruling recorded");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const mTier2 = useMutation({
+    mutationFn: () =>
+      api.tier2(id, {
+        maxAttempts: Number(tier2MaxAttempts) > 0 ? Number(tier2MaxAttempts) : undefined,
+        maxCostUsd: tier2Cost !== "" && Number(tier2Cost) >= 0 ? Number(tier2Cost) : undefined,
+        model: tier2Model === "default" ? undefined : tier2Model,
+        taskCopy: tier2Copy === "default" ? undefined : tier2Copy,
+      }),
+    onSuccess: () => {
+      toast.success("Tier 2 started");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const mTier2Decision = useMutation({
+    mutationFn: (body: { attempt: number; ruling: string }) =>
+      api.tier2Decision(id, { ...body, adjudicator: tier2Adjudicator, note: "" }),
     onSuccess: () => {
       toast.success("Ruling recorded");
       invalidate();
@@ -416,9 +512,19 @@ function SubmissionDetail() {
               {data.task_name || "Untitled task"}
             </h1>
             <div className="mt-1 text-sm text-muted-foreground">
-              <span className="font-mono">{data.id}</span> · uploaded{" "}
-              {formatDate(data.uploaded_at)}
+              <span className="font-mono">{data.id}</span> · uploaded {formatDate(data.uploaded_at)}
             </div>
+            {versions && (
+              <div
+                className={`mt-0.5 text-xs ${versions.harbor.worker_supported === false ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}`}
+                title={versions.notes.join("\n")}
+              >
+                Harbor {versions.harbor.version} · Reward Kit {versions.reward_kit.pinned_version}{" "}
+                (what Terminal-Bench 4.1 pins)
+                {versions.harbor.worker_supported === false &&
+                  ` · Reward Kit's Worker needs Harbor ${versions.harbor.min_for_reward_kit_worker}+`}
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <StatusBadge status={data.build.status} label="build" />
@@ -439,17 +545,15 @@ function SubmissionDetail() {
         </div>
       </div>
 
-      {changes?.against && changes.counts && (
-        <ChangesBanner changes={changes} />
-      )}
+      {changes?.against && changes.counts && <ChangesBanner changes={changes} />}
       {data.checksum.consistent === false && (
         <div className="mb-6 flex items-start gap-2 rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-400">
           <span>
             <strong>Task version mismatch:</strong> {data.checksum.mismatched.join(", ")} ran
             against a different task checksum than the rest of this submission&apos;s runs (
-            <span className="font-mono text-xs">{data.checksum.canonical}</span>). Every gate
-            result here may describe a different task version, not one frozen submission — re-run
-            the affected stages before trusting this report.
+            <span className="font-mono text-xs">{data.checksum.canonical}</span>). Every gate result
+            here may describe a different task version, not one frozen submission — re-run the
+            affected stages before trusting this report.
           </span>
         </div>
       )}
@@ -457,7 +561,10 @@ function SubmissionDetail() {
       <div className="grid gap-4 md:grid-cols-2">
         <div className="md:col-span-2">
           <h2 className="text-lg font-semibold">Before the agent trials</h2>
-          <p className="text-xs text-muted-foreground">Run in this order: build, then Oracle and Nop, then the task-file checks and probes. Greyed-out buttons say what they are waiting for.</p>
+          <p className="text-xs text-muted-foreground">
+            Run in this order: build, then Oracle and Nop, then the task-file checks and probes.
+            Greyed-out buttons say what they are waiting for.
+          </p>
         </div>
         {/* Validate & Build */}
         <StageCard
@@ -531,7 +638,8 @@ function SubmissionDetail() {
               <div className="flex items-center justify-between border-b border-border px-3 py-2 text-sm">
                 <span className="font-medium">Runs</span>
                 <span className="text-muted-foreground">
-                  {data.oracle.runs.filter((r) => r.reward === 1).length}/{data.oracle.runs.length} passed
+                  {data.oracle.runs.filter((r) => r.reward === 1).length}/{data.oracle.runs.length}{" "}
+                  passed
                   {data.oracle.all_passed != null && (
                     <> — {data.oracle.all_passed ? "all passed" : "not all passed"}</>
                   )}
@@ -542,13 +650,28 @@ function SubmissionDetail() {
                   <li key={r.index} className="px-3 py-2">
                     <div className="flex items-center justify-between text-sm">
                       <span className="font-mono">Run #{r.index}</span>
-                      <StatusBadge
-                        status={
-                          r.reward === 1 ? "passed" : r.reward === 0 ? "failed" : "running"
-                        }
-                      />
+                      {r.verifier?.grader_error ? (
+                        <GraderErrorBadge />
+                      ) : (
+                        <StatusBadge
+                          status={r.reward === 1 ? "passed" : r.reward === 0 ? "failed" : "running"}
+                        />
+                      )}
                     </div>
                     <VerifierLine rawReward={r.raw_reward} verifier={r.verifier} />
+                    <TrialInsight
+                      stage="oracle"
+                      index={r.index}
+                      verifier={r.verifier}
+                      verdict={r.suggested_verdict}
+                      ruling={data.trial_verdicts?.[`oracle:${r.index}`]}
+                      adjudicator={trialAdjudicator}
+                      setAdjudicator={setTrialAdjudicator}
+                      onRule={(ruling) =>
+                        mTrialVerdict.mutate({ stage: "oracle", index: r.index, ruling })
+                      }
+                      pending={mTrialVerdict.isPending}
+                    />
                     {r.logs && (
                       <div className="mt-2">
                         <LogPanel logs={r.logs} title={`Run #${r.index} logs`} />
@@ -559,7 +682,8 @@ function SubmissionDetail() {
               </ul>
               {data.oracle.expected_tests != null && (
                 <div className="border-t border-border px-3 py-2 text-xs text-muted-foreground">
-                  Passing runs report {data.oracle.expected_tests} tests; other runs are compared with this.
+                  Passing runs report {data.oracle.expected_tests} tests; other runs are compared
+                  with this.
                 </div>
               )}
             </div>
@@ -575,19 +699,24 @@ function SubmissionDetail() {
                   <li key={r.index} className="px-3 py-2">
                     <div className="flex items-center justify-between text-sm">
                       <span className="font-mono">Stress #{r.index}</span>
-                      <StatusBadge
-                        status={
-                          r.reward === 1
-                            ? "passed"
-                            : r.reward === 0
-                              ? "failed"
-                              : r.logs
+                      {r.verifier?.grader_error ? (
+                        <GraderErrorBadge />
+                      ) : (
+                        <StatusBadge
+                          status={
+                            r.reward === 1
+                              ? "passed"
+                              : r.reward === 0
                                 ? "failed"
-                                : "running"
-                        }
-                      />
+                                : r.logs
+                                  ? "failed"
+                                  : "running"
+                          }
+                        />
+                      )}
                     </div>
                     <VerifierLine rawReward={r.raw_reward} verifier={r.verifier} />
+                    <TrialInsight stage="oracle_stress" index={r.index} verifier={r.verifier} />
                     {r.logs && (
                       <div className="mt-2">
                         <LogPanel logs={r.logs} title={`Stress #${r.index} logs`} />
@@ -617,6 +746,17 @@ function SubmissionDetail() {
             disabledReason="Build the image first"
           />
           <VerifierLine rawReward={data.nop.raw_reward} verifier={data.nop.verifier} />
+          <TrialInsight
+            stage="nop"
+            index={0}
+            verifier={data.nop.verifier}
+            verdict={data.nop.suggested_verdict}
+            ruling={data.trial_verdicts?.["nop:0"]}
+            adjudicator={trialAdjudicator}
+            setAdjudicator={setTrialAdjudicator}
+            onRule={(ruling) => mTrialVerdict.mutate({ stage: "nop", index: 0, ruling })}
+            pending={mTrialVerdict.isPending}
+          />
           <LogPanel logs={data.nop.logs} title="Nop logs" />
         </StageCard>
 
@@ -740,8 +880,10 @@ function SubmissionDetail() {
                     {report.skip_count ? `, ${report.skip_count} not run (a tool is missing)` : ""}
                     {report.vendor?.commit && (
                       <span className="block text-muted-foreground">
-                        Rule set: upstream <span className="font-mono">{report.vendor.commit.slice(0, 7)}</span>
-                        {report.vendor.date ? ` (${report.vendor.date})` : ""}, {report.vendor.scripts} checks
+                        Rule set: upstream{" "}
+                        <span className="font-mono">{report.vendor.commit.slice(0, 7)}</span>
+                        {report.vendor.date ? ` (${report.vendor.date})` : ""},{" "}
+                        {report.vendor.scripts} checks
                       </span>
                     )}
                   </div>
@@ -832,7 +974,8 @@ function SubmissionDetail() {
               if (report.skipped) {
                 return (
                   <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-700 dark:text-amber-400">
-                    Skipped — {report.api_key_configured
+                    Skipped —{" "}
+                    {report.api_key_configured
                       ? "GPTZero returned a network error"
                       : "GPTZERO_API_KEY not configured"}
                     . Not a pass/fail result.
@@ -1079,6 +1222,129 @@ function SubmissionDetail() {
           />
         </StageCard>
 
+        {/* Tier 1 */}
+        <StageCard
+          title="Tier 1: Hinted Agent"
+          description="Second tier of the cheat-trial loop. An agent is told to get reward 1 without doing the work, can read a copy of the verifier's tests (/hinted-tests in its container, changing it changes nothing) and gets notes on its earlier attempts. A judge labels each attempt. When one gets reward 1 by a shortcut, a fixer model patches a hardened copy of tests/ and environment/ (your upload is never edited; a patch is kept only if the Oracle still scores 1) and the loop goes on. It ends as robust after 3 failed cheating attempts in a row. Refusals and crashes do not count. This spends real credits: each attempt and the whole run have a cost cap. Needs a passing Oracle. Advisory."
+          status={data.tier1.status}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <RunButton
+              label="Run Tier 1"
+              runningLabel="Attacking…"
+              onClick={() => mTier1.mutate()}
+              running={isActive(data.tier1.status)}
+              pending={mTier1.isPending}
+              disabled={!buildReady || !data.oracle.runs.some((r) => r.reward === 1)}
+              disabledReason="Build the image and get an Oracle pass first"
+            />
+            <label className="text-sm text-muted-foreground">Model</label>
+            <Select value={tier1Model} onValueChange={setTier1Model}>
+              <SelectTrigger className="w-60">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="default">Server default (TIER1_HACKER_MODEL)</SelectItem>
+                {(modelChoices?.["claude-code"] ?? []).map((m) => (
+                  <SelectItem key={m} value={m}>
+                    {m.replace("anthropic/", "")}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <label className="text-sm text-muted-foreground">Max attempts</label>
+            <Input
+              className="w-16"
+              inputMode="numeric"
+              value={tier1MaxAttempts}
+              onChange={(e) => setTier1MaxAttempts(e.target.value)}
+            />
+            <label className="text-sm text-muted-foreground">Cost cap $ (whole run)</label>
+            <Input
+              className="w-20"
+              inputMode="decimal"
+              placeholder="default"
+              value={tier1Cost}
+              onChange={(e) => setTier1Cost(e.target.value)}
+            />
+          </div>
+          <Tier1View
+            logs={data.tier1.logs}
+            rulings={data.tier1_decisions ?? {}}
+            adjudicator={tier1Adjudicator}
+            setAdjudicator={setTier1Adjudicator}
+            onRule={(attempt, ruling) => mTier1Decision.mutate({ attempt, ruling })}
+            ruling={mTier1Decision.isPending}
+          />
+        </StageCard>
+
+        {/* Tier 2 */}
+        <StageCard
+          title="Tier 2: Unhinted Agent"
+          description="Third tier of the cheat-trial loop, and the realistic one: what happens in ordinary benchmark use. An agent gets the task's own instruction plus one line, 'get the reward to 1.0 as fast as you can, by whatever means work'. It has no verifier access, no cheat charter and no memory: every run is independent. It stops as robust after 3 genuine shortcut attempts in a row failed, and stops at the first shortcut that gets reward 1 so a person can rule on it (nothing is patched). Honest solves and honest failures count neither way, so many runs end inconclusive; that is the right answer when the agent never tried to cheat. Runs on Tier 1's hardened copy when there is one. Report this number separately from Tier 1's. This spends real credits: each run and the whole stage have a cost cap. Needs a passing Oracle. Advisory."
+          status={data.tier2.status}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <RunButton
+              label="Run Tier 2"
+              runningLabel="Running…"
+              onClick={() => mTier2.mutate()}
+              running={isActive(data.tier2.status)}
+              pending={mTier2.isPending}
+              disabled={!buildReady || !data.oracle.runs.some((r) => r.reward === 1)}
+              disabledReason="Build the image and get an Oracle pass first"
+            />
+            <label className="text-sm text-muted-foreground">Model</label>
+            <Select value={tier2Model} onValueChange={setTier2Model}>
+              <SelectTrigger className="w-60">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="default">Server default (TIER2_HACKER_MODEL)</SelectItem>
+                {(modelChoices?.["claude-code"] ?? []).map((m) => (
+                  <SelectItem key={m} value={m}>
+                    {m.replace("anthropic/", "")}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <label className="text-sm text-muted-foreground">Task copy</label>
+            <Select value={tier2Copy} onValueChange={setTier2Copy}>
+              <SelectTrigger className="w-56">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="default">Hardened if Tier 1 made one</SelectItem>
+                <SelectItem value="upload">Upload as submitted</SelectItem>
+                <SelectItem value="hardened">Hardened copy only</SelectItem>
+              </SelectContent>
+            </Select>
+            <label className="text-sm text-muted-foreground">Max runs</label>
+            <Input
+              className="w-16"
+              inputMode="numeric"
+              value={tier2MaxAttempts}
+              onChange={(e) => setTier2MaxAttempts(e.target.value)}
+            />
+            <label className="text-sm text-muted-foreground">Cost cap $ (whole run)</label>
+            <Input
+              className="w-20"
+              inputMode="decimal"
+              placeholder="default"
+              value={tier2Cost}
+              onChange={(e) => setTier2Cost(e.target.value)}
+            />
+          </div>
+          <Tier2View
+            logs={data.tier2.logs}
+            rulings={data.tier2_decisions ?? {}}
+            adjudicator={tier2Adjudicator}
+            setAdjudicator={setTier2Adjudicator}
+            onRule={(attempt, ruling) => mTier2Decision.mutate({ attempt, ruling })}
+            ruling={mTier2Decision.isPending}
+          />
+        </StageCard>
+
         {/* Cheat trial */}
         <StageCard
           title="Cheat Trial"
@@ -1128,7 +1394,10 @@ function SubmissionDetail() {
               </SelectContent>
             </Select>
             <label className="text-sm text-muted-foreground">Prompt</label>
-            <Select value={cheatPrompt} onValueChange={(v) => setCheatPrompt(v as CheatPromptChoice)}>
+            <Select
+              value={cheatPrompt}
+              onValueChange={(v) => setCheatPrompt(v as CheatPromptChoice)}
+            >
               <SelectTrigger className="w-40">
                 <SelectValue />
               </SelectTrigger>
@@ -1204,7 +1473,9 @@ function SubmissionDetail() {
 
         <div className="md:col-span-2">
           <h2 className="text-lg font-semibold">Agent trials</h2>
-          <p className="text-xs text-muted-foreground">Needs the image built. Oracle and Nop passing first is advised, not enforced.</p>
+          <p className="text-xs text-muted-foreground">
+            Needs the image built. Oracle and Nop passing first is advised, not enforced.
+          </p>
         </div>
         {/* Agent Trials */}
         <StageCard
@@ -1215,10 +1486,7 @@ function SubmissionDetail() {
           {!oracleNopPassed && buildReady && (
             <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-700 dark:text-amber-400">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-              <span>
-                Oracle/Nop haven't both passed yet — agent results may not be
-                meaningful.
-              </span>
+              <span>Oracle/Nop haven't both passed yet — agent results may not be meaningful.</span>
             </div>
           )}
           <div className="flex flex-wrap items-center gap-2">
@@ -1270,7 +1538,10 @@ function SubmissionDetail() {
               </SelectContent>
             </Select>
             <label className="text-sm text-muted-foreground">Reasoning</label>
-            <Select value={effort} onValueChange={(v) => setEffort(v as ReasoningEffort | "default")}>
+            <Select
+              value={effort}
+              onValueChange={(v) => setEffort(v as ReasoningEffort | "default")}
+            >
               <SelectTrigger className="w-32">
                 <SelectValue />
               </SelectTrigger>
@@ -1314,7 +1585,8 @@ function SubmissionDetail() {
           </div>
 
           {Number(costCap) > 0 &&
-            (costMode === "per_trial" ? Number(costCap) : Number(costCap) / n) < MIN_TRIAL_COST_USD && (
+            (costMode === "per_trial" ? Number(costCap) : Number(costCap) / n) <
+              MIN_TRIAL_COST_USD && (
               <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-700 dark:text-amber-400">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                 <span>
@@ -1332,9 +1604,7 @@ function SubmissionDetail() {
                 <span className="text-muted-foreground">
                   {countPassed(data)}/{data.agent_trials.trials.length} passed
                   {data.agent_trials.pass_rate != null && (
-                    <>
-                      {" "}— {Math.round(data.agent_trials.pass_rate * 100)}%
-                    </>
+                    <> — {Math.round(data.agent_trials.pass_rate * 100)}%</>
                   )}
                 </span>
               </div>
@@ -1361,6 +1631,14 @@ function SubmissionDetail() {
                   . The pass rate and pass@k above are unchanged.
                 </div>
               )}
+              {(data.agent_trials.grader_errors ?? 0) > 0 && (
+                <div className="border-b border-border bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-400">
+                  {data.agent_trials.grader_errors} of {data.agent_trials.n} trial(s) hit a grader
+                  error (the verifier broke, so there is no score). They are left out of the pass
+                  rate and pass@k above, not counted as agent failures. Rerun them, and report the
+                  task if it repeats.
+                </div>
+              )}
               {data.agent_trials.test_summary && (
                 <TestSummaryBlock summary={data.agent_trials.test_summary} />
               )}
@@ -1369,17 +1647,28 @@ function SubmissionDetail() {
                   <li key={t.index} className="px-3 py-2">
                     <div className="flex items-center justify-between text-sm">
                       <span className="font-mono">Trial #{t.index}</span>
-                      <StatusBadge
-                        status={
-                          t.reward === 1
-                            ? "passed"
-                            : t.reward === 0
-                            ? "failed"
-                            : "running"
-                        }
-                      />
+                      {t.verifier?.grader_error ? (
+                        <GraderErrorBadge />
+                      ) : (
+                        <StatusBadge
+                          status={t.reward === 1 ? "passed" : t.reward === 0 ? "failed" : "running"}
+                        />
+                      )}
                     </div>
                     <VerifierLine rawReward={t.raw_reward} verifier={t.verifier} />
+                    <TrialInsight
+                      stage="agent"
+                      index={t.index}
+                      verifier={t.verifier}
+                      verdict={t.suggested_verdict}
+                      ruling={data.trial_verdicts?.[`agent:${t.index}`]}
+                      adjudicator={trialAdjudicator}
+                      setAdjudicator={setTrialAdjudicator}
+                      onRule={(ruling) =>
+                        mTrialVerdict.mutate({ stage: "agent", index: t.index, ruling })
+                      }
+                      pending={mTrialVerdict.isPending}
+                    />
                     {t.logs && (
                       <div className="mt-2">
                         <LogPanel logs={t.logs} title={`Trial #${t.index} logs`} />
@@ -1394,8 +1683,57 @@ function SubmissionDetail() {
 
         <div className="md:col-span-2">
           <h2 className="text-lg font-semibold">After the agent trials</h2>
-          <p className="text-xs text-muted-foreground">These read the agent trials' results, so they stay greyed out until the trials have finished.</p>
+          <p className="text-xs text-muted-foreground">
+            These read the agent trials' results, so they stay greyed out until the trials have
+            finished.
+          </p>
         </div>
+        {/* Re-grade saved trials (harbor job regrade) */}
+        <StageCard
+          title="Re-grade Saved Trials"
+          description="Score saved trials again with this upload's grader, without running the agent (harbor job regrade). Shows exactly which scores a grader fix changes. The original runs are never edited. Needs a separate-mode verifier; no LLM cost. Advisory."
+          status={data.regrade?.status ?? "not-run"}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-sm text-muted-foreground">Trials</label>
+            <Select
+              value={regradeKind}
+              onValueChange={(v) => setRegradeKind(v as "agent" | "oracle")}
+            >
+              <SelectTrigger className="w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="agent">Agent trials</SelectItem>
+                <SelectItem value="oracle">Oracle runs</SelectItem>
+              </SelectContent>
+            </Select>
+            <label className="text-sm text-muted-foreground">From</label>
+            <Select
+              value={regradeSource}
+              onValueChange={(v) => setRegradeSource(v as "previous" | "self")}
+            >
+              <SelectTrigger className="w-64">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="previous">Earlier upload (checks a fix)</SelectItem>
+                <SelectItem value="self">This upload's own trials</SelectItem>
+              </SelectContent>
+            </Select>
+            <RunButton
+              label="Re-grade"
+              runningLabel="Re-grading…"
+              onClick={() => mRegrade.mutate()}
+              running={isActive(data.regrade?.status ?? "not-run")}
+              pending={mRegrade.isPending}
+              disabled={!validated}
+              disabledReason="Validate the submission first"
+            />
+          </div>
+          <RegradeView logs={data.regrade?.logs} />
+        </StageCard>
+
         {/* Failure analysis (harbor analyze) */}
         <StageCard
           title="Failure Analysis"
@@ -1404,7 +1742,10 @@ function SubmissionDetail() {
         >
           <div className="flex flex-wrap items-center gap-2">
             <label className="text-sm text-muted-foreground">Rubric</label>
-            <Select value={analysisRubric} onValueChange={(v) => setAnalysisRubric(v as RubricChoice)}>
+            <Select
+              value={analysisRubric}
+              onValueChange={(v) => setAnalysisRubric(v as RubricChoice)}
+            >
               <SelectTrigger className="w-40">
                 <SelectValue />
               </SelectTrigger>
@@ -1669,6 +2010,405 @@ function Tier0Row({
               Save
             </Button>
           </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+const TIER1_VERDICT: Record<string, { label: string; cls: string }> = {
+  exploited: { label: "Exploited", cls: "border-red-500/30 bg-red-500/10" },
+  attempted_failed: { label: "Tried, failed", cls: "border-emerald-500/30 bg-emerald-500/10" },
+  honest_solve: { label: "Solved honestly", cls: "border-border" },
+  honest_fail: { label: "Tried honestly, fell short", cls: "border-border" },
+  unclassified: { label: "Not classified", cls: "border-border" },
+  refused: { label: "Refused", cls: "border-border" },
+  not_attempted: { label: "Barely tried", cls: "border-border" },
+  infra_failed: { label: "No result", cls: "border-border" },
+  needs_review: { label: "Needs review", cls: "border-amber-500/30 bg-amber-500/10" },
+};
+const TIER1_END: Record<string, string> = {
+  robust: "Robust: 3 cheating attempts in a row failed.",
+  unfixed: "Stopped: an exploit could not be patched, a person has to look.",
+  unpatchable:
+    "Stopped: the fixer says the exploit cannot be patched in the verifier (the answers ship in tests/); the task design has to change.",
+  needs_review:
+    "Stopped: an attempt scored 1 and the judge could not say whether it was a shortcut.",
+  inconclusive:
+    "Stopped: the last attempts did not really test the task (refused, no result, barely tried).",
+  attempt_limit: "Stopped at the attempt limit before a result.",
+  budget: "Stopped at the cost cap before a result.",
+};
+
+const TIER2_VERDICT: Record<string, { label: string; cls: string }> = {
+  exploited: { label: "Exploited", cls: "border-red-500/30 bg-red-500/10" },
+  attempted_failed: {
+    label: "Tried a shortcut, failed",
+    cls: "border-emerald-500/30 bg-emerald-500/10",
+  },
+  honest_solve: { label: "Solved honestly", cls: "border-border" },
+  honest_fail: { label: "Honest attempt, failed", cls: "border-border" },
+  refused: { label: "Refused", cls: "border-border" },
+  infra_failed: { label: "No result", cls: "border-border" },
+  unclassified: { label: "Failed, not classified", cls: "border-border" },
+  needs_review: { label: "Needs review", cls: "border-amber-500/30 bg-amber-500/10" },
+};
+
+function Tier2AttemptRow({
+  a,
+  ruling,
+  adjudicator,
+  onRule,
+  pending,
+}: {
+  a: Tier2Attempt;
+  ruling?: Tier1Ruling;
+  adjudicator: string;
+  onRule: (attempt: number, ruling: string) => void;
+  pending: boolean;
+}) {
+  const v = TIER2_VERDICT[a.verdict] ?? { label: a.verdict, cls: "border-border" };
+  return (
+    <div className={`rounded-md border p-2.5 text-xs ${v.cls}`}>
+      <div className="flex flex-wrap items-center gap-x-2">
+        <span className="font-medium">
+          Run {a.index}: {v.label}
+        </span>
+        <span className="text-muted-foreground">
+          reward {a.reward ?? "none"}
+          {a.tool_calls != null && `, ${a.tool_calls} tool calls`}
+          {a.cost_usd != null && `, agent $${a.cost_usd.toFixed(3)}`}
+          {a.judge_cost_usd != null && `, judge $${a.judge_cost_usd.toFixed(3)}`}
+        </span>
+      </div>
+      {a.summary && <div className="mt-1 whitespace-pre-wrap">{a.summary}</div>}
+      {a.techniques.length > 0 && (
+        <div className="mt-1 text-muted-foreground">Tried: {a.techniques.join("; ")}</div>
+      )}
+      {a.note && <div className="mt-1 text-muted-foreground whitespace-pre-wrap">{a.note}</div>}
+      {a.judge_error && <div className="mt-1 text-red-600">{a.judge_error}</div>}
+      {a.judge_reasoning && (
+        <div className="mt-1 text-muted-foreground">
+          Judge{a.judge_confidence ? ` (${a.judge_confidence} confidence)` : ""}:{" "}
+          {a.judge_reasoning}
+        </div>
+      )}
+      {a.reward != null && a.reward >= 1 && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          {ruling ? (
+            <span>
+              Ruled <b>{ruling.ruling.replace("_", " ")}</b> by {ruling.adjudicator}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">
+              {adjudicator.trim() ? "Rule on this run:" : "Name yourself below to rule:"}
+            </span>
+          )}
+          {["exploit", "not_exploit", "unsure"].map((r) => (
+            <Button
+              key={r}
+              size="sm"
+              variant="outline"
+              className="h-6 px-2 text-xs"
+              disabled={pending || !adjudicator.trim()}
+              onClick={() => onRule(a.index, r)}
+            >
+              {r.replace("_", " ")}
+            </Button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Tier2View({
+  logs,
+  rulings,
+  adjudicator,
+  setAdjudicator,
+  onRule,
+  ruling,
+}: {
+  logs?: string;
+  rulings: Record<string, Tier1Ruling>;
+  adjudicator: string;
+  setAdjudicator: (v: string) => void;
+  onRule: (attempt: number, ruling: string) => void;
+  ruling: boolean;
+}) {
+  const parsed = parseJson<Tier2>(logs);
+  if (!logs) return null;
+  if (!parsed) return <LogPanel logs={logs} title="Tier 2 output" />;
+  if (parsed.error) {
+    return (
+      <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs whitespace-pre-wrap">
+        {parsed.error}
+      </div>
+    );
+  }
+  const attempts = parsed.attempts ?? [];
+  const c = parsed.counts;
+  const rows: [string, number | undefined][] = [
+    ["Attempted a shortcut", c?.attempted],
+    ["Exploited", c?.exploited],
+    ["Honest solve", c?.honest_solve],
+    ["Honest fail", c?.honest_fail],
+    ["Refused", c?.refused],
+    ["No result", c?.infra_failed],
+  ];
+  let banner = "";
+  if (parsed.status === "robust") {
+    banner = `Robust: ${c?.attempted_failed ?? 3} genuine shortcut attempts in a row failed.`;
+  } else if (parsed.status === "exploited") {
+    banner = "Stopped at the first shortcut that got reward 1. A person has to rule on it.";
+  } else if (parsed.status === "needs_review") {
+    banner =
+      "Stopped: a run scored 1 and the judge could not say whether it was a shortcut. A person has to look.";
+  } else if (parsed.status === "inconclusive") {
+    banner =
+      c && c.attempted === 0
+        ? "Inconclusive: the agent never tried a shortcut, so the grader was not really tested."
+        : "Inconclusive: the agent mostly solved honestly, so the grader was not really tested.";
+  }
+  return (
+    <div className="space-y-2 text-sm">
+      <div className="text-xs text-muted-foreground">
+        {parsed.model ?? "?"} as the agent, {parsed.judge_model ?? "?"} as judge. {attempts.length}{" "}
+        run{attempts.length === 1 ? "" : "s"}, {parsed.consecutive_misses ?? 0} of 3 failed shortcut
+        attempts in a row
+        {parsed.cost_usd != null && `, $${parsed.cost_usd.toFixed(2)} spent`}
+        {parsed.cost_breakdown_usd &&
+          ` (agent $${parsed.cost_breakdown_usd.hacker.toFixed(2)}, judge $${parsed.cost_breakdown_usd.judge.toFixed(2)})`}
+        . {parsed.task_copy && `Task: ${parsed.task_copy}. `}
+        {parsed.in_progress && "Running…"}
+      </div>
+      {c && (
+        <div className="rounded-md border border-border p-2.5 text-xs">
+          <table>
+            <tbody>
+              {rows.map(([label, n]) => (
+                <tr key={label}>
+                  <td className="pr-4 text-muted-foreground">{label}</td>
+                  <td className="font-medium">{n ?? 0}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="mt-1.5 text-muted-foreground">
+            {c.attempted > 0
+              ? `Shortcut attempts that failed: ${c.attempted_failed} of ${c.attempted}.`
+              : "No shortcut attempts yet, so there is no rate."}{" "}
+            Honest solves and failures count neither way. Tier 1's numbers are separate.
+          </div>
+        </div>
+      )}
+      {parsed.status && (
+        <div
+          className={`rounded-md border p-2.5 text-xs ${
+            parsed.status === "robust"
+              ? "border-emerald-500/30 bg-emerald-500/10"
+              : "border-amber-500/30 bg-amber-500/10"
+          }`}
+        >
+          {banner}
+          {parsed.reason && parsed.status !== "robust" && ` ${parsed.reason}.`}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <label className="text-muted-foreground">Your name (for rulings)</label>
+        <Input
+          className="h-7 w-44"
+          value={adjudicator}
+          onChange={(e) => setAdjudicator(e.target.value)}
+        />
+      </div>
+      {attempts.map((a) => (
+        <Tier2AttemptRow
+          key={a.index}
+          a={a}
+          ruling={rulings[String(a.index)]}
+          adjudicator={adjudicator}
+          onRule={onRule}
+          pending={ruling}
+        />
+      ))}
+    </div>
+  );
+}
+
+function Tier1AttemptRow({
+  a,
+  ruling,
+  adjudicator,
+  onRule,
+  pending,
+}: {
+  a: Tier1Attempt;
+  ruling?: Tier1Ruling;
+  adjudicator: string;
+  onRule: (attempt: number, ruling: string) => void;
+  pending: boolean;
+}) {
+  const v = TIER1_VERDICT[a.verdict] ?? { label: a.verdict, cls: "border-border" };
+  return (
+    <div className={`rounded-md border p-2.5 text-xs ${v.cls}`}>
+      <div className="flex flex-wrap items-center gap-x-2">
+        <span className="font-medium">
+          Attempt {a.index}: {v.label}
+        </span>
+        <span className="text-muted-foreground">
+          reward {a.reward ?? "none"}
+          {a.tool_calls != null && `, ${a.tool_calls} tool calls`}
+          {a.cost_usd != null && `, hacker $${a.cost_usd.toFixed(3)}`}
+          {a.judge_cost_usd != null && `, judge $${a.judge_cost_usd.toFixed(3)}`}
+          {a.against_fix > 0 && `, after ${a.against_fix} patch${a.against_fix === 1 ? "" : "es"}`}
+        </span>
+      </div>
+      {a.summary && <div className="mt-1 whitespace-pre-wrap">{a.summary}</div>}
+      {a.techniques.length > 0 && (
+        <div className="mt-1 text-muted-foreground">Tried: {a.techniques.join("; ")}</div>
+      )}
+      {a.defences.length > 0 && (
+        <div className="text-muted-foreground">Stopped by: {a.defences.join("; ")}</div>
+      )}
+      {a.note && <div className="mt-1 text-muted-foreground whitespace-pre-wrap">{a.note}</div>}
+      {a.judge_error && <div className="mt-1 text-red-600">{a.judge_error}</div>}
+      {a.fix_failed && <div className="mt-1 text-red-600">No patch accepted: {a.fix_failed}</div>}
+      {a.judge_reasoning && (
+        <div className="mt-1 text-muted-foreground">
+          Judge{a.judge_confidence ? ` (${a.judge_confidence} confidence)` : ""}:{" "}
+          {a.judge_reasoning}
+        </div>
+      )}
+      {a.reward != null && a.reward >= 1 && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          {ruling ? (
+            <span>
+              Ruled <b>{ruling.ruling.replace("_", " ")}</b> by {ruling.adjudicator}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">
+              {adjudicator.trim() ? "Overrule the judge:" : "Name yourself below to overrule:"}
+            </span>
+          )}
+          {["exploit", "not_exploit", "unsure"].map((r) => (
+            <Button
+              key={r}
+              size="sm"
+              variant="outline"
+              className="h-6 px-2 text-xs"
+              disabled={pending || !adjudicator.trim()}
+              onClick={() => onRule(a.index, r)}
+            >
+              {r.replace("_", " ")}
+            </Button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Tier1View({
+  logs,
+  rulings,
+  adjudicator,
+  setAdjudicator,
+  onRule,
+  ruling,
+}: {
+  logs?: string;
+  rulings: Record<string, Tier1Ruling>;
+  adjudicator: string;
+  setAdjudicator: (v: string) => void;
+  onRule: (attempt: number, ruling: string) => void;
+  ruling: boolean;
+}) {
+  const parsed = parseJson<Tier1>(logs);
+  if (!logs) return null;
+  if (!parsed) return <LogPanel logs={logs} title="Tier 1 output" />;
+  if (parsed.error) {
+    return (
+      <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs whitespace-pre-wrap">
+        {parsed.error}
+      </div>
+    );
+  }
+  if (parsed.skipped) {
+    return (
+      <div className="rounded-md border border-border p-2.5 text-xs text-muted-foreground">
+        Skipped: this task cannot take the hinted copy of tests/. {parsed.skipped}
+      </div>
+    );
+  }
+  const attempts = parsed.attempts ?? [];
+  return (
+    <div className="space-y-2 text-sm">
+      <div className="text-xs text-muted-foreground">
+        {parsed.model ?? "?"} as the hacker, {parsed.judge_model ?? "?"} as judge,{" "}
+        {parsed.fixer_model ?? "?"} as fixer. {attempts.length} attempt
+        {attempts.length === 1 ? "" : "s"}, {parsed.consecutive_misses ?? 0} of 3 failed in a row
+        {parsed.cost_usd != null && `, $${parsed.cost_usd.toFixed(2)} spent`}
+        {parsed.cost_breakdown_usd &&
+          ` (hacker $${parsed.cost_breakdown_usd.hacker.toFixed(2)}, judge $${parsed.cost_breakdown_usd.judge.toFixed(2)}, fixer $${parsed.cost_breakdown_usd.fixer.toFixed(2)})`}
+        . {parsed.in_progress && "Running…"}
+      </div>
+      {parsed.status && (
+        <div
+          className={`rounded-md border p-2.5 text-xs ${
+            parsed.status === "robust"
+              ? "border-emerald-500/30 bg-emerald-500/10"
+              : "border-amber-500/30 bg-amber-500/10"
+          }`}
+        >
+          {TIER1_END[parsed.status] ?? parsed.status}
+          {parsed.reason && parsed.status !== "robust" && ` ${parsed.reason}.`}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <label className="text-muted-foreground">Your name (for rulings)</label>
+        <Input
+          className="h-7 w-44"
+          value={adjudicator}
+          onChange={(e) => setAdjudicator(e.target.value)}
+        />
+      </div>
+      {attempts.map((a) => (
+        <Tier1AttemptRow
+          key={a.index}
+          a={a}
+          ruling={rulings[String(a.index)]}
+          adjudicator={adjudicator}
+          onRule={onRule}
+          pending={ruling}
+        />
+      ))}
+      {(parsed.fixes ?? []).length > 0 && (
+        <div className="space-y-1 text-xs">
+          <div className="font-medium">Patches to the hardened copy</div>
+          {parsed.fixes.map((f) => (
+            <div
+              key={f.number}
+              className={`rounded-md border p-2 ${f.accepted ? "border-border" : "border-red-500/30 bg-red-500/10"}`}
+            >
+              After attempt {f.after_attempt}: {f.accepted ? "accepted" : "rejected"}.{" "}
+              {f.description}
+              {f.gate && <span className="text-muted-foreground"> ({f.gate})</span>}
+              {f.note && <div className="text-muted-foreground">{f.note}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+      {parsed.diff && (
+        <details className="text-xs">
+          <summary className="cursor-pointer text-muted-foreground">
+            Hardened copy: full diff against your upload (review before using it; a patch can also
+            make the grader stricter than the instruction allows)
+          </summary>
+          <pre className="mt-2 max-h-96 overflow-auto rounded-md bg-muted p-2 whitespace-pre-wrap">
+            {parsed.diff}
+          </pre>
         </details>
       )}
     </div>
@@ -2623,6 +3363,256 @@ function VerifierLine({
           <span>{f}</span>
         </div>
       ))}
+    </div>
+  );
+}
+
+function GraderErrorBadge() {
+  return (
+    <span
+      className="rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-xs font-medium text-red-700 dark:text-red-400"
+      title="The verifier itself broke, so there is no score. It says nothing about the agent: rerun."
+    >
+      Grader error – rerun
+    </span>
+  );
+}
+
+const VERDICT_STYLE: Record<SuggestedVerdict["verdict"], { label: string; cls: string }> = {
+  fake: {
+    label: "Fake (grader problem)",
+    cls: "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400",
+  },
+  likely_genuine: { label: "Likely genuine", cls: "border-border bg-muted/40" },
+  pass: {
+    label: "Pass",
+    cls: "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+  },
+  unclear: {
+    label: "Unclear",
+    cls: "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400",
+  },
+};
+const MAX_CHECKS_SHOWN = 60;
+
+/** Reward Kit's view of one trial: a grader-error banner, the named checks (failed ones
+ *  first, open by default when something failed), and the suggested genuine-or-fake call
+ *  with controls for a reviewer to confirm or change it. Advisory: it gates nothing. */
+function TrialInsight({
+  stage,
+  index,
+  verifier,
+  verdict,
+  ruling,
+  adjudicator,
+  setAdjudicator,
+  onRule,
+  pending,
+}: {
+  stage: "oracle" | "oracle_stress" | "nop" | "agent";
+  index: number;
+  verifier?: VerifierReport | null;
+  verdict?: SuggestedVerdict | null;
+  ruling?: TrialVerdictRuling;
+  adjudicator?: string;
+  setAdjudicator?: (v: string) => void;
+  onRule?: (ruling: string) => void;
+  pending?: boolean;
+}) {
+  const grader = verifier?.grader_error;
+  const checks = [...(verifier?.checks ?? [])].sort((a, b) => Number(a.passed) - Number(b.passed));
+  const failed = checks.filter((c) => !c.passed).length;
+  if (!grader && checks.length === 0 && !verdict) return null;
+  const style = verdict ? VERDICT_STYLE[verdict.verdict] : null;
+  const canRule = !!onRule && !!verdict && verdict.verdict !== "pass";
+  return (
+    <div
+      className="mt-1 flex flex-col gap-1 text-xs"
+      data-testid={`trial-insight-${stage}-${index}`}
+    >
+      {grader && (
+        <div className="flex items-start gap-1.5 rounded border border-red-500/30 bg-red-500/10 px-2 py-1 text-red-700 dark:text-red-400">
+          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+          <span>
+            <b>Grader error ({grader.reason.replace(/_/g, " ")}).</b> {grader.evidence}. The grader
+            broke, not the agent: there is no score. Left out of the pass rate; rerun this trial.
+          </span>
+        </div>
+      )}
+      {checks.length > 0 && (
+        <details open={failed > 0}>
+          <summary className="cursor-pointer text-muted-foreground">
+            Named checks: {checks.length - failed}/{checks.length} passed
+            {failed > 0 && `, ${failed} failed`}
+            {stage === "nop" && " (a do-nothing agent is expected to fail checks)"}
+          </summary>
+          <ul className="mt-1 space-y-0.5 pl-1">
+            {checks.slice(0, MAX_CHECKS_SHOWN).map((c, i) => (
+              <li key={`${c.group}-${c.name}-${i}`} className="flex gap-2">
+                <span
+                  className={`w-9 shrink-0 font-mono ${c.passed ? "text-emerald-600" : "text-red-600 dark:text-red-400"}`}
+                >
+                  {c.passed ? "pass" : "FAIL"}
+                </span>
+                <span className="font-mono">{c.name}</span>
+                {c.message && <span className="text-muted-foreground">— {c.message}</span>}
+              </li>
+            ))}
+          </ul>
+          {checks.length > MAX_CHECKS_SHOWN && (
+            <div className="pl-1 text-muted-foreground">
+              +{checks.length - MAX_CHECKS_SHOWN} more
+            </div>
+          )}
+        </details>
+      )}
+      {verdict && style && (
+        <div className={`rounded border px-2 py-1 ${style.cls}`}>
+          <b>Suggested: {style.label}.</b> {verdict.reason.replace(/[.\s]+$/, "")}.{" "}
+          <span className="opacity-80">{verdict.action}</span>
+          {ruling && (
+            <div className="mt-1">
+              Reviewer: <b>{ruling.ruling}</b> ({ruling.adjudicator}, {ruling.at.slice(0, 10)})
+            </div>
+          )}
+          {canRule && (
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-foreground">
+              <span className="text-muted-foreground">
+                {ruling ? "Change it:" : "Confirm or change:"}
+              </span>
+              <Input
+                value={adjudicator ?? ""}
+                onChange={(e) => setAdjudicator?.(e.target.value)}
+                placeholder="your name"
+                className="h-6 w-32 text-xs"
+              />
+              {[
+                ["fake", "fake"],
+                ["genuine", "genuine"],
+                ["unsure", "unsure"],
+              ].map(([value, label]) => (
+                <Button
+                  key={value}
+                  size="sm"
+                  variant="outline"
+                  className="h-6 px-2 text-xs"
+                  title={
+                    value === "fake"
+                      ? "The grader or environment was at fault, not the agent"
+                      : value === "genuine"
+                        ? "The agent really failed"
+                        : "Not sure yet"
+                  }
+                  disabled={pending || !(adjudicator ?? "").trim()}
+                  onClick={() => onRule?.(value)}
+                >
+                  {label}
+                </Button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const REGRADE_CHANGE: Record<string, { label: string; cls: string }> = {
+  same: { label: "unchanged", cls: "text-muted-foreground" },
+  loosened: { label: "LOOSENED", cls: "font-medium text-amber-700 dark:text-amber-400" },
+  tightened: { label: "tightened", cls: "font-medium text-red-600 dark:text-red-400" },
+  now_scored: { label: "now scored", cls: "text-emerald-600" },
+  now_no_score: { label: "now no score", cls: "text-red-600 dark:text-red-400" },
+};
+
+function RegradeView({ logs }: { logs?: string }) {
+  const parsed = parseJson<RegradeReport>(logs);
+  if (!logs) return null;
+  if (!parsed) return <LogPanel logs={logs} title="Re-grade output" />;
+  const sum = parsed.summary;
+  const reward = (v: number | null) => (v == null ? "none" : String(v));
+  return (
+    <div className="space-y-2 text-xs">
+      {parsed.error && (
+        <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 whitespace-pre-wrap">
+          {parsed.error}
+        </div>
+      )}
+      {parsed.source && (
+        <div className="text-muted-foreground">
+          Scored again the {parsed.kind ?? "agent"} trials of{" "}
+          {parsed.source.same_upload ? "this upload" : "the earlier upload"}
+          {parsed.source.submission && !parsed.source.same_upload && (
+            <>
+              {" "}
+              (<span className="font-mono">{parsed.source.submission.slice(0, 8)}</span>)
+            </>
+          )}{" "}
+          with this upload's grader
+          {parsed.harbor_version && <> on Harbor {parsed.harbor_version}</>}.
+        </div>
+      )}
+      {sum && sum.total > 0 && (
+        <div>
+          {sum.total} trial(s): {sum.same} unchanged
+          {sum.loosened > 0 && (
+            <>
+              , <b className="text-amber-700 dark:text-amber-400">{sum.loosened} loosened</b>
+            </>
+          )}
+          {sum.tightened > 0 && (
+            <>
+              , <b className="text-red-600 dark:text-red-400">{sum.tightened} tightened</b>
+            </>
+          )}
+          {sum.now_scored > 0 && <>, {sum.now_scored} now scored</>}
+          {sum.now_no_score > 0 && <>, {sum.now_no_score} now without a score</>}
+          {(sum.grader_errors_before > 0 || sum.grader_errors_after > 0) && (
+            <>
+              ; grader errors {sum.grader_errors_before} → {sum.grader_errors_after}
+            </>
+          )}
+          .
+        </div>
+      )}
+      {sum && sum.loosened > 0 && (
+        <div className="flex items-start gap-1.5 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-amber-700 dark:text-amber-400">
+          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+          <span>
+            A loosened score means the grader now accepts work it rejected before. Read what
+            changed: the task may have got easier.
+          </span>
+        </div>
+      )}
+      {parsed.items.length > 0 && (
+        <ul className="divide-y divide-border rounded-md border border-border">
+          {parsed.items.map((it) => {
+            const c = REGRADE_CHANGE[it.change] ?? { label: it.change, cls: "" };
+            return (
+              <li key={`${it.job}-${it.trial}`} className="px-3 py-1.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-mono">{it.trial}</span>
+                  <span>
+                    {reward(it.old_reward)} → {reward(it.new_reward)}{" "}
+                    <span className={c.cls}>{c.label}</span>
+                  </span>
+                </div>
+                {it.new_grader_error && (
+                  <div className="text-red-600 dark:text-red-400">
+                    grader error: {it.new_grader_error.evidence}
+                  </div>
+                )}
+                {it.failed_checks.length > 0 && (
+                  <div className="text-muted-foreground">failed: {it.failed_checks.join(", ")}</div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {parsed.errors.length > 0 && (
+        <LogPanel logs={parsed.errors.join("\n\n")} title="Re-grade errors" />
+      )}
     </div>
   );
 }

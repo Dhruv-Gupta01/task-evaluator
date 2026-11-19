@@ -17,11 +17,39 @@ export interface CtrfSummary {
   skipped_names: string[];
 }
 
+// One named check from Reward Kit's reward-details.json.
+export interface VerifierCheck {
+  name: string;
+  group: string;
+  passed: boolean;
+  value: number | null;
+  message: string;
+}
+
+// A pre-filled genuine-or-fake call for a finished trial. `fake` = the grader (not the
+// agent) broke; `likely_genuine` = the agent's own work failed named checks. A reviewer
+// confirms or changes it (see TrialVerdictRuling); it never changes a gate or a pass rate.
+export interface SuggestedVerdict {
+  verdict: "fake" | "likely_genuine" | "pass" | "unclear";
+  reason: string;
+  action: string;
+}
+
 export interface VerifierReport {
   reward_raw: number | null;
   ctrf: CtrfSummary | null;
   details: { file: string; content: string } | null;
   flags: string[];
+  // Reward Kit's per-check results, when the task's grader writes reward-details.json.
+  checks?: VerifierCheck[] | null;
+  // The agent's own code failed while the grader ran it (a fair failure, not a grader fault).
+  worker_error?: boolean;
+  // The grader itself broke (Worker setup failed, or no usable reward file): no score, and it
+  // says nothing about the agent. Such trials are left out of pass rates; rerun them.
+  grader_error?: {
+    reason: "worker_setup_error" | "no_reward_file" | string;
+    evidence: string;
+  } | null;
   // Set when the agent refused the task instead of attempting it (5.0 J).
   refusal?: { kind: "provider_block" | "phrase"; evidence: string } | null;
   // How the trial ran (E.1/E.3/E.4/E.8): limits, time used, resources, users.
@@ -49,6 +77,7 @@ export interface StageResult {
   // Harbor's exact reward; `reward` is 1 only at >= 1.0, so 0.73 shows here.
   raw_reward?: number | null;
   verifier?: VerifierReport | null;
+  suggested_verdict?: SuggestedVerdict | null;
   logs?: string;
   task_checksum?: string | null;
 }
@@ -64,6 +93,7 @@ export interface TrialResult {
   reward: 0 | 1 | null;
   raw_reward?: number | null;
   verifier?: VerifierReport | null;
+  suggested_verdict?: SuggestedVerdict | null;
   logs?: string;
   task_checksum?: string | null;
 }
@@ -97,6 +127,9 @@ export interface AgentTrialsResult {
   // A refusal scores 0 like a failure. These count them; pass_rate stays as is.
   refusals: number;
   pass_rate_excluding_refusals: number | null;
+  // Trials where the grader itself broke (no score). Left out of pass_rate, pass_at_k and the
+  // refusal rate; rerun them.
+  grader_errors?: number;
   // Across the failing trials: which tests they failed and how close the best
   // one came. A single test failed by every failing trial is the typical
   // shape of an over-strict grader or an unstated rule (`notes`).
@@ -123,6 +156,9 @@ export interface OracleRunsResult {
   stress_note?: string | null;
   // Tests the passing runs reported; other runs' reports are compared with it.
   expected_tests?: number | null;
+  // Runs where the grader itself broke. The gate stays unpassed, but these say nothing about
+  // the solution: rerun them.
+  grader_errors?: number;
 }
 
 export interface SufficiencyResult {
@@ -345,6 +381,203 @@ export interface Tier0Ruling {
   adjudicator: string;
   note: string;
   at: string;
+}
+// Tier 1 (advisory): a hinted agent with a read-only copy of tests/ and notes on its earlier
+// attempts tries to get reward 1 without doing the work; a judge labels each attempt, an LLM
+// fixer patches a hardened copy after a hit, and the loop ends after 3 failed cheating attempts
+// in a row. "passed" = robust; "failed" = something needs a human.
+export interface Tier1Result {
+  status: StageStatus;
+  logs?: string;
+}
+export type Tier1Verdict =
+  | "exploited"
+  | "attempted_failed"
+  | "honest_solve"
+  | "honest_fail"
+  | "unclassified"
+  | "refused"
+  | "not_attempted"
+  | "infra_failed"
+  | "needs_review";
+export interface Tier1Attempt {
+  index: number;
+  verdict: Tier1Verdict;
+  reward: number | null;
+  tool_calls: number | null;
+  cost_usd: number | null;
+  judge_cost_usd?: number | null;
+  judge_error?: string | null;
+  summary: string;
+  techniques: string[];
+  defences: string[];
+  judge_reasoning?: string | null;
+  judge_confidence?: string | null;
+  trial_dir?: string | null;
+  note?: string | null;
+  against_fix: number;
+  fix_failed?: string;
+}
+export interface Tier1Fix {
+  number: number;
+  after_attempt: number;
+  accepted: boolean;
+  description: string;
+  edits: { file: string; find: string; replace: string }[];
+  gate?: string;
+  note?: string;
+}
+export interface TrialVerdictRuling {
+  ruling: "fake" | "genuine" | "unsure" | string;
+  adjudicator: string;
+  note: string;
+  at: string;
+}
+
+// Saved trials scored again with the current grader, no agent run. `logs` is JSON (RegradeReport).
+export interface RegradeResult {
+  status: StageStatus;
+  logs?: string;
+}
+export interface RegradeItem {
+  trial: string;
+  job: string;
+  old_reward: number | null;
+  new_reward: number | null;
+  change: "same" | "loosened" | "tightened" | "now_scored" | "now_no_score";
+  old_grader_error: boolean;
+  new_grader_error: { reason: string; evidence: string } | null;
+  failed_checks: string[];
+  flags: string[];
+}
+export interface RegradeReport {
+  kind?: "agent" | "oracle";
+  source?: { submission: string | null; same_upload: boolean };
+  items: RegradeItem[];
+  summary?: {
+    total: number;
+    same: number;
+    loosened: number;
+    tightened: number;
+    now_scored: number;
+    now_no_score: number;
+    grader_errors_before: number;
+    grader_errors_after: number;
+  };
+  errors: string[];
+  error?: string;
+  harbor_version?: string;
+}
+
+export interface VersionInfo {
+  harbor: {
+    version: string;
+    tested_with: string;
+    min_for_reward_kit_worker: string;
+    worker_supported: boolean | null;
+    lint_available: boolean;
+    regrade_available: boolean;
+  };
+  reward_kit: { pinned_version: string };
+  notes: string[];
+}
+
+export interface Tier1Ruling {
+  ruling: "exploit" | "not_exploit" | "unsure" | string;
+  adjudicator: string;
+  note: string;
+  at: string;
+}
+export interface Tier1 {
+  agent?: string;
+  model?: string;
+  judge_model?: string;
+  fixer_model?: string;
+  limits?: { max_attempts: number; max_fixes: number; max_cost_usd: number };
+  status?:
+    | "robust"
+    | "unfixed"
+    | "needs_review"
+    | "unpatchable"
+    | "inconclusive"
+    | "attempt_limit"
+    | "budget"
+    | null;
+  reason?: string | null;
+  in_progress?: boolean;
+  attempts: Tier1Attempt[];
+  fixes: Tier1Fix[];
+  consecutive_misses?: number;
+  cost_usd?: number;
+  cost_breakdown_usd?: { hacker: number; judge: number; fixer: number };
+  diff?: string;
+  skipped?: string;
+  error?: string;
+}
+// Tier 2 (advisory): an unhinted agent (the task plus one line of pressure, no verifier access,
+// no cheat charter, no memory) run repeatedly and independently. Stops "robust" after 3 genuine
+// failed shortcut attempts in a row, or "exploited" at the first shortcut that gets reward 1.
+// Honest solves and failures are neutral, so many runs end "inconclusive". "passed" = robust.
+// Keep these numbers apart from Tier 1's: hinted and unhinted are never combined.
+export interface Tier2Result {
+  status: StageStatus;
+  logs?: string;
+}
+export type Tier2Verdict =
+  | "exploited"
+  | "attempted_failed"
+  | "honest_solve"
+  | "honest_fail"
+  | "refused"
+  | "infra_failed"
+  | "unclassified"
+  | "needs_review";
+export interface Tier2Attempt {
+  index: number;
+  verdict: Tier2Verdict;
+  reward: number | null;
+  tool_calls: number | null;
+  cost_usd: number | null;
+  judge_cost_usd?: number | null;
+  judge_error?: string | null;
+  judge_label?: string | null;
+  summary: string;
+  techniques: string[];
+  judge_reasoning?: string | null;
+  judge_confidence?: string | null;
+  trial_dir?: string | null;
+  note?: string | null;
+}
+export interface Tier2Counts {
+  runs: number;
+  attempted: number;
+  exploited: number;
+  attempted_failed: number;
+  honest_solve: number;
+  honest_fail: number;
+  refused: number;
+  infra_failed: number;
+  unclassified: number;
+  needs_review: number;
+  held_rate: number | null;
+}
+export interface Tier2 {
+  agent?: string;
+  model?: string;
+  judge_model?: string;
+  task_copy?: string;
+  pressure_line?: string;
+  limits?: { max_attempts: number; max_cost_usd: number };
+  status?: "robust" | "exploited" | "needs_review" | "inconclusive" | null;
+  reason?: string | null;
+  in_progress?: boolean;
+  attempts: Tier2Attempt[];
+  counts?: Tier2Counts;
+  consecutive_misses?: number;
+  cost_usd?: number;
+  cost_breakdown_usd?: { hacker: number; judge: number };
+  skipped?: string;
+  error?: string;
 }
 export interface Tier0 {
   task: string | null;
@@ -629,6 +862,13 @@ export interface Submission {
   answer_exposure: AnswerExposureResult;
   tier0: Tier0Result;
   tier0_decisions?: Record<string, Tier0Ruling>;
+  tier1: Tier1Result;
+  tier1_decisions?: Record<string, Tier1Ruling>;
+  tier2: Tier2Result;
+  tier2_decisions?: Record<string, Tier1Ruling>;
+  // A reviewer's genuine-or-fake call per trial, key "<stage>:<index>" (oracle | nop | agent).
+  trial_verdicts?: Record<string, TrialVerdictRuling>;
+  regrade?: RegradeResult;
   image_inventory: ImageInventoryResult;
   fresh_build: FreshBuildResult;
   checksum: ChecksumInfo;
@@ -656,13 +896,11 @@ async function handle<T>(res: Response): Promise<T> {
 }
 
 export const api = {
-  getAgentModels: () =>
-    fetch(`${API_BASE_URL}/agents`).then(handle<Record<string, string>>),
+  getAgentModels: () => fetch(`${API_BASE_URL}/agents`).then(handle<Record<string, string>>),
   // Per agent, the models a single run can pick (the .env model first).
   getAgentModelChoices: () =>
     fetch(`${API_BASE_URL}/agent-models`).then(handle<Record<string, string[]>>),
-  listSubmissions: () =>
-    fetch(`${API_BASE_URL}/submissions`).then(handle<SubmissionListItem[]>),
+  listSubmissions: () => fetch(`${API_BASE_URL}/submissions`).then(handle<SubmissionListItem[]>),
   getSubmission: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}`).then(handle<Submission>),
   uploadSubmission: (file: File) => {
@@ -673,9 +911,7 @@ export const api = {
     );
   },
   validate: (id: string) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/validate`, { method: "POST" }).then(
-      handle<unknown>,
-    ),
+    fetch(`${API_BASE_URL}/submissions/${id}/validate`, { method: "POST" }).then(handle<unknown>),
   // Always appends to any earlier oracle runs on this submission. stress runs
   // them under CPU load; those are kept apart and never count for the gate.
   oracle: (id: string, n: number, stress = false) =>
@@ -683,9 +919,7 @@ export const api = {
       method: "POST",
     }).then(handle<unknown>),
   nop: (id: string) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/nop`, { method: "POST" }).then(
-      handle<unknown>,
-    ),
+    fetch(`${API_BASE_URL}/submissions/${id}/nop`, { method: "POST" }).then(handle<unknown>),
   // reasoningEffort / agent undefined = the server's defaults
   // (AGENT_REASONING_EFFORT, HARBOR_AGENT).
   // maxCost undefined = AGENT_RUN_BUDGET_USD from .env; costMode says whether
@@ -769,6 +1003,48 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(handle<unknown>),
+  tier1: (id: string, opts: { maxAttempts?: number; maxCostUsd?: number; model?: string } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.maxAttempts) q.set("max_attempts", String(opts.maxAttempts));
+    if (opts.maxCostUsd !== undefined) q.set("max_cost_usd", String(opts.maxCostUsd));
+    if (opts.model) q.set("model", opts.model);
+    const qs = q.toString();
+    return fetch(`${API_BASE_URL}/submissions/${id}/tier1${qs ? `?${qs}` : ""}`, {
+      method: "POST",
+    }).then(handle<unknown>);
+  },
+  tier1Decision: (
+    id: string,
+    body: { attempt: number; ruling: string; adjudicator: string; note: string },
+  ) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/tier1-decision`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(handle<unknown>),
+  tier2: (
+    id: string,
+    opts: { maxAttempts?: number; maxCostUsd?: number; model?: string; taskCopy?: string } = {},
+  ) => {
+    const q = new URLSearchParams();
+    if (opts.maxAttempts) q.set("max_attempts", String(opts.maxAttempts));
+    if (opts.maxCostUsd !== undefined) q.set("max_cost_usd", String(opts.maxCostUsd));
+    if (opts.model) q.set("model", opts.model);
+    if (opts.taskCopy) q.set("task_copy", opts.taskCopy);
+    const qs = q.toString();
+    return fetch(`${API_BASE_URL}/submissions/${id}/tier2${qs ? `?${qs}` : ""}`, {
+      method: "POST",
+    }).then(handle<unknown>);
+  },
+  tier2Decision: (
+    id: string,
+    body: { attempt: number; ruling: string; adjudicator: string; note: string },
+  ) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/tier2-decision`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(handle<unknown>),
   answerExposure: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/answer-exposure`, { method: "POST" }).then(
       handle<unknown>,
@@ -781,6 +1057,32 @@ export const api = {
     fetch(`${API_BASE_URL}/submissions/${id}/fresh-build`, { method: "POST" }).then(
       handle<unknown>,
     ),
+  // Score saved trials again with this upload's grader, no agent run. `previous` (default)
+  // re-scores the latest earlier upload's trials, which is how a grader fix is checked.
+  regrade: (
+    id: string,
+    kind: "agent" | "oracle" = "agent",
+    source: "previous" | "self" = "previous",
+  ) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/regrade?kind=${kind}&source=${source}`, {
+      method: "POST",
+    }).then(handle<unknown>),
+  setTrialVerdict: (
+    id: string,
+    body: {
+      stage: "oracle" | "nop" | "agent";
+      index: number;
+      ruling: string;
+      adjudicator: string;
+      note?: string;
+    },
+  ) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/trial-verdict`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(handle<Record<string, TrialVerdictRuling>>),
+  versions: () => fetch(`${API_BASE_URL}/versions`).then(handle<VersionInfo>),
   changes: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/changes`).then(handle<SubmissionChanges>),
   setReviewerDecision: (id: string, body: { key: string } & ReviewerDecision) =>
