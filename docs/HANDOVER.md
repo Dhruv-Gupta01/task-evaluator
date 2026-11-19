@@ -55,7 +55,7 @@ Files: backend/storage/submissions/{id}/ (zip, extracted task, logs, Harbor outp
 - **Data**: one `Submission` row per upload, and one `Run` row per stage result, keyed by
   `(submission, kind, run_index)`. Agent trials and cheat trials get one row per trial.
   `schemas.py` and the types in `src/lib/api.ts` are kept in sync by hand.
-- **Harbor** (`uv tool install harbor==0.23.0`, the tested version) is Terminal-Bench's own test
+- **Harbor** (`uv tool install harbor==0.26.0`, the tested version) is Terminal-Bench's own test
   harness. The platform shells out to `harbor run` for Oracle, Nop and Agent Trials, and to
   `harbor analyze` and `harbor check` for Failure Analysis and Rubric Check.
 - **Vendored upstream code** (`backend/vendor/`): Terminal-Bench's 29 `check-*.sh` scripts, its

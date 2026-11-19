@@ -26,7 +26,7 @@ works, every feature, the configuration, costs and the known issues. This README
 - **Python 3.13** and [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
   (`pyproject.toml` allows 3.11+, but only 3.13 has been tested)
 - **[Harbor](https://github.com/laude-institute/harbor)** CLI — runs the Oracle, Nop and Agent
-  Trials stages with the same harness as the real grading pipeline: `uv tool install harbor==0.23.0` (the version this was tested with)
+  Trials stages with the same harness as the real grading pipeline: `uv tool install harbor==0.26.0` (the version this was tested with)
 - **dockerfile-pin** for the TB `check-image-digests` check: from `backend/`, run
   `uv run python scripts/install_dockerfile_pin.py` once (the same v1.5.0 upstream CI uses, sha256-checked, put in
   `backend/.tools/bin/`). Without it that check shows as not run.
