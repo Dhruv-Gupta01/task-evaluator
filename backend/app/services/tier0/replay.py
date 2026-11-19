@@ -23,6 +23,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.services.harborignore import TaskIgnore
+
 MANIFEST = "manifest.json"
 SKIP_PREFIXES = ("/logs",)
 
@@ -153,7 +155,8 @@ def verifier_fingerprint(spec) -> str:
     """
     h = hashlib.sha256()
     tests = spec.root / "tests"
-    for path in sorted(p for p in tests.rglob("*") if p.is_file()):
+    ignore = TaskIgnore(spec.root)  # excluded files are not part of the verifier
+    for path in sorted(p for p in tests.rglob("*") if p.is_file() and not ignore.is_excluded(p)):
         h.update(str(path.relative_to(tests)).encode())
         h.update(b"\0")
         h.update(path.read_bytes())

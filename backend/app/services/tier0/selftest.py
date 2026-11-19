@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from app.services import harborignore
+
 from . import mutants, probes
 from .taskspec import TaskSpec
 
@@ -71,7 +73,7 @@ def run(spec: TaskSpec | None = None) -> list[str]:
             staging = Path(tempfile.mkdtemp(prefix="tier0-selftest-"))
             try:
                 copy = staging / "tests"
-                shutil.copytree(spec.root / "tests", copy, symlinks=True)
+                harborignore.copy_tests(spec.root, copy)
                 mutants.get(mid).apply(copy)
             except (AssertionError, SyntaxError, OSError) as exc:
                 errors.append(f"{mid}: {exc}")
@@ -81,7 +83,7 @@ def run(spec: TaskSpec | None = None) -> list[str]:
             staging = Path(tempfile.mkdtemp(prefix="tier0-selftest-"))
             try:
                 copy = staging / "tests"
-                shutil.copytree(spec.root / "tests", copy, symlinks=True)
+                harborignore.copy_tests(spec.root, copy)
                 m.apply(copy)
             except AssertionError as exc:
                 errors.append(str(exc))
