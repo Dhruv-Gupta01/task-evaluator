@@ -13,6 +13,7 @@ else, because plain pytest graders are still allowed. Reward Kit being
 absent says nothing about the task being wrong."""
 
 import ast
+import json
 import re
 import subprocess
 import tomllib
@@ -265,8 +266,59 @@ def check_reward_kit(task_root: Path, report) -> None:
         )
 
 
+_LINT_MAX_FINDINGS = 25
+_LINT_MAX_EXTRAS = 15
+# Reported by the agent-user check (agent_runs_as_root), which says more about it than Harbor does.
+_LINT_COVERED_ELSEWHERE = {"root-agent"}
+
+
+def _run_lint(task_root: Path, extra: list[str]) -> tuple[list[dict] | None, str]:
+    """`harbor lint --json` on a task. The task path goes first: --select and --extend-select take
+    several values, so a path after them is read as one more rule name and the command fails.
+    Returns (findings, "") or (None, why it could not run)."""
+    cmd = [get_settings().harbor_bin, "lint", f"{task_root}/", "--json", *extra]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"{type(exc).__name__}"
+    try:
+        data = json.loads(out.stdout or "")
+    except ValueError:
+        data = None
+    if isinstance(data, list):
+        return data, ""
+    return None, ((out.stdout or "") + (out.stderr or "")).strip()[:600]
+
+
+def _lint_where(finding: dict, task_root: Path) -> str:
+    path = str(finding.get("path") or "")
+    try:
+        path = str(Path(path).resolve().relative_to(task_root.resolve()))
+    except (ValueError, OSError):
+        pass
+    line = finding.get("line")
+    return f"{path}:{line}" if path and line else path
+
+
+def _author_ignored(task_root: Path) -> set[str]:
+    """Rules the task's own [metadata.harbor.lint] ignore list switches off."""
+    try:
+        data = tomllib.loads((task_root / "task.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return set()
+    lint = (((data.get("metadata") or {}).get("harbor") or {}).get("lint")) or {}
+    ignored = lint.get("ignore") if isinstance(lint, dict) else None
+    return {str(x) for x in ignored} if isinstance(ignored, list) else set()
+
+
 def check_harbor_lint(task_root: Path, report) -> None:
-    """Harbor's own task linter (Harbor 0.25 and newer): settings, files and verifier setup."""
+    """Harbor's own task linter (Harbor 0.25 and newer), one finding per line.
+
+    Two runs: Harbor's default rules with the task's own `[metadata.harbor.lint]` settings
+    (warn: these are what Harbor itself calls a problem), then `--extend-select ALL`, whose extra
+    findings are Harbor's stricter rules and anything the author chose to ignore (info, labelled
+    as such). Any selection given on the command line overrides the author's `ignore`, so the
+    author's settings only hold in the first run. `root-agent` is left to the agent-user check."""
     if not versions._harbor_has_command("lint"):
         report.add(
             "harbor_lint",
@@ -275,19 +327,32 @@ def check_harbor_lint(task_root: Path, report) -> None:
             f"{versions.HARBOR_MIN_FOR_WORKER} or newer), so Harbor's own task check was not run.",
         )
         return
-    try:
-        out = subprocess.run(
-            [get_settings().harbor_bin, "lint", f"{task_root}/"], capture_output=True, text=True, timeout=180
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        report.add("harbor_lint", "info", f"`harbor lint` could not run: {type(exc).__name__}")
+    base, why = _run_lint(task_root, [])
+    if base is None:
+        report.add("harbor_lint", "info", f"`harbor lint` could not run: {why or 'no output'}")
         return
-    text = ((out.stdout or "") + (out.stderr or "")).strip()
-    if out.returncode == 0:
-        report.add("harbor_lint", "info", "`harbor lint` found no problems.")
-    else:
-        report.add(
-            "harbor_lint",
-            "warn",
-            "`harbor lint` reported problems (or this Harbor version takes other arguments):\n" + text[:1500],
+    strict, _ = _run_lint(task_root, ["--extend-select", "ALL"])
+    for f in base[:_LINT_MAX_FINDINGS]:
+        where = _lint_where(f, task_root)
+        report.add("harbor_lint", "warn", f"[{f.get('rule')}] {where + ': ' if where else ''}{f.get('message')}")
+    if len(base) > _LINT_MAX_FINDINGS:
+        report.add("harbor_lint", "warn", f"... and {len(base) - _LINT_MAX_FINDINGS} more `harbor lint` finding(s)")
+    seen = {(f.get("rule"), f.get("path"), f.get("message")) for f in base}
+    ignored = _author_ignored(task_root)
+    extras = [
+        f for f in (strict or [])
+        if (f.get("rule"), f.get("path"), f.get("message")) not in seen and f.get("rule") not in _LINT_COVERED_ELSEWHERE
+    ]
+    for f in extras[:_LINT_MAX_EXTRAS]:
+        where = _lint_where(f, task_root)
+        why_extra = (
+            "the task's own lint settings ignore this rule"
+            if f.get("rule") in ignored
+            else "a stricter Harbor rule, not in its default set"
         )
+        report.add("harbor_lint", "info", f"[{f.get('rule')}] {where + ': ' if where else ''}{f.get('message')} ({why_extra})")
+    if len(extras) > _LINT_MAX_EXTRAS:
+        report.add("harbor_lint", "info", f"... and {len(extras) - _LINT_MAX_EXTRAS} more stricter `harbor lint` finding(s)")
+    if not base and not extras:
+        note = "" if strict is not None else " (the stricter run could not be done)"
+        report.add("harbor_lint", "info", f"`harbor lint` found no problems{note}.")
