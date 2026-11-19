@@ -329,6 +329,23 @@ function SubmissionDetail() {
     },
     onError: (e: Error) => toast.error(e.message),
   });
+  const [allTiersCost, setAllTiersCost] = useState("");
+  const mAllTiers = useMutation({
+    mutationFn: () =>
+      api.allTiers(id, {
+        repeats: Number(tier0Repeats),
+        maxCostUsd:
+          allTiersCost !== "" && Number(allTiersCost) >= 0 ? Number(allTiersCost) : undefined,
+      }),
+    onSuccess: () => {
+      toast.success("Tier 0, 1 and 2 started, one after another");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const tiersRunning =
+    !!data &&
+    (isActive(data.tier0.status) || isActive(data.tier1.status) || isActive(data.tier2.status));
   const mTier2 = useMutation({
     mutationFn: () =>
       api.tier2(id, {
@@ -1186,6 +1203,46 @@ function SubmissionDetail() {
           </div>
           <VariantProbeView logs={data.weak_probe.logs} />
         </StageCard>
+
+        {/* All tiers */}
+        <section className="rounded-lg border border-border p-4">
+          <h3 className="font-semibold">Run all tiers</h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Tier 0 (static probes), then Tier 1 (hinted agent, patches a hardened copy), then Tier 2
+            (unhinted agent, run on that hardened copy). One after another; each tier keeps its own
+            result below. Tiers 1 and 2 cost real credits. Tier 0 is not run again on the hardened
+            copy. Needs Build and a passing Oracle.
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <Button
+              disabled={
+                !validated || data.oracle.status !== "passed" || mAllTiers.isPending || tiersRunning
+              }
+              onClick={() => {
+                if (
+                  window.confirm(
+                    "Run Tier 0, Tier 1 and Tier 2 now? Tiers 1 and 2 spend real LLM credits.",
+                  )
+                )
+                  mAllTiers.mutate();
+              }}
+            >
+              {tiersRunning ? "Running tiers…" : "Run all tiers"}
+            </Button>
+            <label className="text-sm text-muted-foreground">Cost cap $ per tier (1 and 2)</label>
+            <Input
+              className="w-24"
+              placeholder="default"
+              value={allTiersCost}
+              onChange={(e) => setAllTiersCost(e.target.value)}
+            />
+            {data.oracle.status !== "passed" && (
+              <span className="text-xs text-muted-foreground">
+                Run the Oracle and get a pass first.
+              </span>
+            )}
+          </div>
+        </section>
 
         {/* Tier 0 */}
         <StageCard

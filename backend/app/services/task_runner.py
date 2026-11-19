@@ -2921,6 +2921,34 @@ def tier1_hardened_dir(submission_id: str) -> Path | None:
     return path if (path / "task.toml").is_file() else None
 
 
+async def run_all_tiers(
+    submission_id: str,
+    repeats: int = 1,
+    model: str | None = None,
+    max_attempts: int | None = None,
+    max_cost_usd: float | None = None,
+) -> None:
+    """Tier 0, then Tier 1, then Tier 2, one after another (never two Harbor jobs at once).
+    Each tier is the same stage the single buttons run and keeps its own row, result and
+    cost cap (`max_cost_usd` applies to Tier 1 and to Tier 2 separately, not to the three
+    together). Tier 2 takes Tier 1's hardened copy when Tier 1 made one (its default), so it
+    tests the patched task. Tier 0 always runs on the upload and is not run again on the
+    hardened copy. A tier that fails or errors does not stop the next one: each is evidence,
+    not a gate. The caller has already marked the three rows pending."""
+    steps = (
+        ("tier0", lambda: run_tier0_stage(submission_id, repeats, True)),
+        ("tier1", lambda: run_tier1_stage(submission_id, None, model, None, max_attempts, max_cost_usd)),
+        ("tier2", lambda: run_tier2_stage(submission_id, None, model, None, max_attempts, max_cost_usd, None)),
+    )
+    for name, step in steps:
+        try:
+            await step()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - one tier's crash must not hide the others
+            traceback.print_exc()  # each stage records its own errors; this only guards the chain
+
+
 async def run_tier2_stage(
     submission_id: str,
     agent: str | None = None,

@@ -1075,6 +1075,21 @@ export const api = {
     fetch(`${API_BASE_URL}/submissions/${id}/tier0?repeats=${repeats}&harbor=${harbor}`, {
       method: "POST",
     }).then(handle<unknown>),
+  // Tier 0, then 1, then 2 as one job. maxCostUsd caps Tier 1 and Tier 2 each, not the three together.
+  allTiers: (
+    id: string,
+    opts: { repeats?: number; maxAttempts?: number; maxCostUsd?: number; model?: string } = {},
+  ) => {
+    const q = new URLSearchParams();
+    if (opts.repeats) q.set("repeats", String(opts.repeats));
+    if (opts.maxAttempts) q.set("max_attempts", String(opts.maxAttempts));
+    if (opts.maxCostUsd !== undefined) q.set("max_cost_usd", String(opts.maxCostUsd));
+    if (opts.model) q.set("model", opts.model);
+    const qs = q.toString();
+    return fetch(`${API_BASE_URL}/submissions/${id}/tiers${qs ? `?${qs}` : ""}`, {
+      method: "POST",
+    }).then(handle<unknown>);
+  },
   tier0Decision: (
     id: string,
     body: { probe_id: string; ruling: string; adjudicator: string; note: string },
