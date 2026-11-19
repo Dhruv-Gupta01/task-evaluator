@@ -20,7 +20,7 @@ REWARDKIT_VERSION = "0.2.4"
 # First Harbor release with Reward Kit's Worker (2026-10-25).
 HARBOR_MIN_FOR_WORKER = "0.25.0"
 # The version the rest of the platform (network policy, agent options) was tested with.
-HARBOR_TESTED = "0.23.0"
+HARBOR_TESTED = "0.26.0"
 
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 

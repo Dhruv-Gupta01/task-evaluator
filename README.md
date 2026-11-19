@@ -26,7 +26,7 @@ works, every feature, the configuration, costs and the known issues. This README
 - **Python 3.13** and [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
   (`pyproject.toml` allows 3.11+, but only 3.13 has been tested)
 - **[Harbor](https://github.com/laude-institute/harbor)** CLI — runs the Oracle, Nop and Agent
-  Trials stages with the same harness as the real grading pipeline: `uv tool install harbor==0.23.0` (the version this was tested with)
+  Trials stages with the same harness as the real grading pipeline: `uv tool install harbor==0.26.0` (the version this was tested with)
 - **Node.js** and [`bun`](https://bun.sh) (this repo is bun-lockfile-managed; `npm` will also
   work off `package-lock.json` if you don't have bun, but bun is what's actually been tested)
 - API keys: an OpenAI key covers the judge stages, Failure Analysis and the Codex agent, and an
