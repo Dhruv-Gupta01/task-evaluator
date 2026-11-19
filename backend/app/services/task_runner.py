@@ -1278,6 +1278,7 @@ def _regrade_item(job: Path, source_dir: Path | None, outcome: "harbor_runner.Tr
     """One saved trial's reward before and after the regrade."""
     old_reward = None
     old_grader_error = False
+    old_ctrf = verifier_report._read_ctrf(source_dir / "verifier" / "ctrf.json") if source_dir is not None else None
     if source_dir is not None and (source_dir / "result.json").is_file():
         try:
             old = json.loads((source_dir / "result.json").read_text())
@@ -1297,9 +1298,17 @@ def _regrade_item(job: Path, source_dir: Path | None, outcome: "harbor_runner.Tr
         change = "loosened"
     else:
         change = "tightened"
+    new_ctrf = report.get("ctrf")
+    # 15.32: tests the saved run reported that the regraded run no longer does (None = unknown).
+    tests_missing = None
+    if old_ctrf and new_ctrf and old_ctrf.get("names") and new_ctrf.get("names"):
+        tests_missing = sorted(set(old_ctrf["names"]) - set(new_ctrf["names"]))[:20]
     return {
         "trial": source_dir.name if source_dir else "(unknown)",
         "job": job.name,
+        "old_tests": old_ctrf.get("tests") if old_ctrf else None,
+        "new_tests": new_ctrf.get("tests") if new_ctrf else None,
+        "tests_missing": tests_missing,
         "old_reward": old_reward,
         "new_reward": new_reward,
         "change": change,

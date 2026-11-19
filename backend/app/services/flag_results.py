@@ -12,7 +12,7 @@ from app.services.flag_rules import Finding, RuleResult
 JSON_KINDS = {
     "static_checks", "tb_static_checks", "answer_exposure", "rubric_check", "failure_analysis",
     "cheat_trial", "edge_cases", "variant_probe", "weak_probe", "image_inventory", "fresh_build",
-    "probes", "flags", "ai_detection", "evidence_runs",
+    "probes", "flags", "ai_detection", "evidence_runs", "regrade",
 }
 HARBOR_KINDS = ("oracle", "oracle_stress", "nop", "agent", "cheat_trial")
 
@@ -328,6 +328,50 @@ def rule_cheat_coverage(runs, ctx=None) -> RuleResult:
     return RuleResult([], note)
 
 
+def _regrade_items(runs) -> tuple[dict | None, list[dict]]:
+    """The latest regrade row's JSON and its items (saved trials re-scored by `harbor job regrade`)."""
+    run = next(iter(_of(runs, "regrade")), None)  # one row per submission (run_index 0)
+    data = _json(run.logs) if run else None
+    return data, list((data or {}).get("items") or [])
+
+
+def rule_score_rose(runs, ctx=None) -> RuleResult:
+    """15.29 (E8): a saved trial scored higher after the verifier changed (`loosened`)."""
+    data, items = _regrade_items(runs)
+    if data is None:
+        return RuleResult([], "no regrade run yet")
+    if not items:
+        return RuleResult([], "regrade produced no items" + (" (it errored)" if data.get("error") else ""))
+    rose = [i for i in items if i.get("change") == "loosened"]
+    evidence = [f"{i.get('trial')}: reward {i.get('old_reward')} -> {i.get('new_reward')}" for i in rose]
+    detail = (
+        "A saved trial scored higher under the changed verifier. Either the change loosened the grader or it "
+        "fixed an over-strict one: a person must say which before the new version is trusted."
+    )
+    return RuleResult([Finding("15.29", detail, evidence[:10])] if rose else [], f"{len(items)} regraded, {len(rose)} rose")
+
+
+def rule_tests_disappeared(runs, ctx=None) -> RuleResult:
+    """15.32 (E8): tests a saved run reported are missing from the regraded run."""
+    data, items = _regrade_items(runs)
+    if data is None:
+        return RuleResult([], "no regrade run yet")
+    known = [i for i in items if i.get("tests_missing") is not None]
+    if not known:
+        return RuleResult([], f"{len(items)} regraded, no per-test names to compare")
+    gone = [i for i in known if i["tests_missing"]]
+    evidence = [
+        f"{i.get('trial')}: {len(i['tests_missing'])} test(s) no longer reported ({i.get('old_tests')} -> {i.get('new_tests')}): "
+        + ", ".join(i["tests_missing"][:5])
+        for i in gone
+    ]
+    detail = (
+        "Tests that the earlier run reported are not in the regraded run. Removed tests can hide a failure "
+        "the earlier version caught; confirm each removal was intended."
+    )
+    return RuleResult([Finding("15.32", detail, evidence[:10])] if gone else [], f"{len(known)} compared, {len(gone)} lost tests")
+
+
 RESULT_RULES = {
     "15.1": rule_fail_open,
     "15.3": rule_hostile,
@@ -342,7 +386,9 @@ RESULT_RULES = {
     "15.20": rule_no_arm64,
     "15.27": rule_timeout_headroom,
     "15.28": rule_documentation_gap,
+    "15.29": rule_score_rose,
     "15.31": rule_timeout_under_load,
+    "15.32": rule_tests_disappeared,
     "15.33": rule_positive_control,
     "15.36": rule_cheap_model,
     "15.37": rule_null_ladder,

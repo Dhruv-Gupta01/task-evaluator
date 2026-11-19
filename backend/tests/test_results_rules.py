@@ -172,3 +172,64 @@ def test_case_count_quiet_when_the_verifier_noticed():
         {"name": "remove tests/fixtures", "kind": "data_removal", "verdict": "held", "reward": 0.0, "tests": 0},
     ], expected=131)]
     assert fired("15.8", noticed) == [] and fired("15.1", noticed) == []
+
+
+# 15.29 / 15.32: wired to the regrade row (`POST /regrade`, kind "regrade")
+def _regrade(items, **extra):
+    return run("regrade", logs={"items": items, "summary": {}, **extra})
+
+
+def test_score_rose_fires_on_a_loosened_trial():
+    items = [{"trial": "t1", "old_reward": 0.0, "new_reward": 1.0, "change": "loosened"},
+             {"trial": "t2", "old_reward": 1.0, "new_reward": 1.0, "change": "same"}]
+    findings = fired("15.29", [_regrade(items)])
+    assert len(findings) == 1 and findings[0].evidence == ["t1: reward 0.0 -> 1.0"]
+
+
+def test_score_rose_quiet_when_nothing_loosened_or_not_run():
+    tightened = [{"trial": "t1", "old_reward": 1.0, "new_reward": 0.0, "change": "tightened"}]
+    assert fired("15.29", [_regrade(tightened)]) == []
+    result = fres.RESULT_RULES["15.29"]([])
+    assert result.findings == [] and result.note == "no regrade run yet"
+    assert fired("15.29", [_regrade([], error="boom")]) == []
+
+
+def test_tests_disappeared_fires_only_with_names_to_compare():
+    lost = {"trial": "t1", "old_tests": 9, "new_tests": 7, "tests_missing": ["test_a", "test_b"], "change": "same"}
+    kept = {"trial": "t2", "old_tests": 9, "new_tests": 9, "tests_missing": [], "change": "same"}
+    unknown = {"trial": "t3", "old_tests": None, "new_tests": None, "tests_missing": None, "change": "same"}
+    findings = fired("15.32", [_regrade([lost, kept, unknown])])
+    assert len(findings) == 1 and len(findings[0].evidence) == 1 and "test_a, test_b" in findings[0].evidence[0]
+    assert fired("15.32", [_regrade([kept])]) == []
+    only_unknown = fres.RESULT_RULES["15.32"]([_regrade([unknown])])
+    assert only_unknown.findings == [] and "no per-test names" in only_unknown.note
+
+
+def test_regrade_item_records_tests_the_new_run_dropped(tmp_path):
+    from types import SimpleNamespace as NS
+
+    from app.services import task_runner
+
+    def ctrf(folder, names):
+        (folder / "verifier").mkdir(parents=True)
+        tests = [{"name": n, "status": "passed"} for n in names]
+        (folder / "verifier" / "ctrf.json").write_text(json.dumps(
+            {"results": {"summary": {"tests": len(tests), "passed": len(tests)}, "tests": tests}}))
+
+    old = tmp_path / "old"
+    ctrf(old, ["test_a", "test_b", "test_c"])
+    (old / "result.json").write_text(json.dumps({"verifier_result": {"rewards": {"reward": 0.0}}}))
+    from app.services import verifier_report
+
+    new_report = {"ctrf": verifier_report._read_ctrf(_write_ctrf(tmp_path / "new", ["test_a", "test_c"])), "checks": []}
+    item = task_runner._regrade_item(tmp_path / "job", old, NS(reward=1.0, report=new_report))
+    assert item["change"] == "loosened" and item["tests_missing"] == ["test_b"]
+    assert (item["old_tests"], item["new_tests"]) == (3, 2)
+
+
+def _write_ctrf(folder, names):
+    folder.mkdir(parents=True)
+    tests = [{"name": n, "status": "passed"} for n in names]
+    path = folder / "ctrf.json"
+    path.write_text(json.dumps({"results": {"summary": {"tests": len(tests), "passed": len(tests)}, "tests": tests}}))
+    return path

@@ -33,6 +33,9 @@ DETAIL_FILES = (
 )
 
 
+MAX_ALL_NAMES = 2000
+
+
 def _short(name: object) -> str:
     return str(name)[:MAX_NAME_CHARS]
 
@@ -56,6 +59,8 @@ def _read_ctrf(path: Path) -> dict | None:
         "other": int(summary.get("other") or 0) + int(summary.get("pending") or 0),
         "failed_names": failed_names[:MAX_NAMES],
         "skipped_names": skipped_names[:MAX_NAMES],
+        # Every test name, so a regrade can tell which tests a verifier change dropped (15.32).
+        "names": sorted(set(names))[:MAX_ALL_NAMES],
         # 15.6 (S7): parametrized cases that ctrf reports under one name cannot be told apart
         "duplicate_names": sorted({n for n in names if names.count(n) > 1})[:MAX_NAMES],
     }

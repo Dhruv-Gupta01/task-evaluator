@@ -250,7 +250,10 @@ def test_framework_keeps_rulings_across_reruns(tmp_path, db):
     canary = next(f for f in rec["flags"] if f["rule"] == "15.14")
     assert canary["severity"] == fr.BLOCKER and canary["status"] == "open"
     assert rec["counts"]["open_blockers"] == 1
-    assert sum(r["ran"] for r in rec["rules"]) == len(fr.STATIC_RULES) + 17  # static + result rules
+    # static + result rules: every catalogued rule has an evaluator
+    from app.services import flag_results
+
+    assert sum(r["ran"] for r in rec["rules"]) == len(fr.STATIC_RULES) + len(flag_results.RESULT_RULES) == len(fr.RULES)
 
     flag = db.get(Flag, canary["id"])
     with pytest.raises(ValueError):
