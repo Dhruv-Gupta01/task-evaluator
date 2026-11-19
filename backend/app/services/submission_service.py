@@ -980,6 +980,14 @@ def run_limits(submission: Submission, schema: SubmissionSchema) -> dict:
             f"AGENT_TIMEOUT_SEC={settings.agent_timeout_sec:g}s overrides the task's own "
             f"timeout_sec={config.agent.timeout_sec:g}s"
         )
+    network = settings.harbor_network_mode or "the task's own setting"
+    if settings.harbor_network_mode == "public":
+        warnings.append(
+            "trials ran with open internet (HARBOR_NETWORK_MODE=public): an agent could fetch an answer online with "
+            + ("curl or similar; its built-in web search and fetch tools were switched off"
+               if settings.agent_disable_web_search
+               else "its web tools or curl; AGENT_DISABLE_WEB_SEARCH is off")
+        )
     harbor = versions.info()["harbor"]
     if harbor["worker_supported"] is False:
         warnings.append(
@@ -995,6 +1003,8 @@ def run_limits(submission: Submission, schema: SubmissionSchema) -> dict:
         "cpus": config.environment.cpus,
         "memory_mb": config.environment.memory_mb,
         "docker_platform": settings.docker_platform,
+        "network_mode": network,
+        "web_search_disabled": settings.agent_disable_web_search,
         "latest_recorded_trial": recorded,
         "warnings": warnings,
     }

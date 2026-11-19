@@ -137,6 +137,11 @@ class Settings(BaseSettings):
     codex_bake_into_image: bool = True
     codex_version: str = ""  # pin the Codex CLI; empty installs the latest each trial
     codex_web_search: str = ""  # disabled | cached | live; empty = Codex default
+    # Turns off the agent's built-in web search and fetch tools (Claude Code: WebSearch and WebFetch;
+    # Codex: web_search=disabled) for agent trials, tier runs and the cheat trial. On an open network
+    # an agent could otherwise look the answer up online. It does not stop `curl` in the container:
+    # only a restricted network does that (HARBOR_NETWORK_MODE). An explicit CODEX_WEB_SEARCH wins.
+    agent_disable_web_search: bool = True
     # "Failure analysis" stage: `harbor analyze` reads each finished trial's
     # trajectory and grades it (reward hacking, task specification). It runs a
     # small evaluator agent, so pick a cheap model. terminus-2 drives the

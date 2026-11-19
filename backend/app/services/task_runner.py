@@ -192,6 +192,11 @@ def _tb_cheat_prompt_text() -> str:
     return text
 
 
+# Agents with built-in web tools Harbor can switch off (`disable_web_search`, verified on Harbor
+# 0.25.0 and 0.26.0). Terminus-2 has none: it only reaches the web through the container's network.
+WEB_SEARCH_AGENTS = ("claude-code", "codex")
+
+
 def _agent_kwargs(agent: str, reasoning_effort: str | None = None) -> dict[str, str]:
     """Options for `harbor run --agent-kwarg`. Harbor >= 0.23 rejects options
     an agent doesn't declare, so each agent only gets the ones it knows.
@@ -209,6 +214,10 @@ def _agent_kwargs(agent: str, reasoning_effort: str | None = None) -> dict[str, 
             kwargs["version"] = settings.codex_version
         if settings.codex_web_search:
             kwargs["web_search"] = settings.codex_web_search
+    if settings.agent_disable_web_search and agent in WEB_SEARCH_AGENTS:
+        # Codex: an explicit CODEX_WEB_SEARCH is the operator's choice, and Harbor would override it.
+        if not (agent == "codex" and settings.codex_web_search):
+            kwargs["disable_web_search"] = "true"
     return kwargs
 
 

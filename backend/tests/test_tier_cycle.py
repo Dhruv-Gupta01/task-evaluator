@@ -213,3 +213,25 @@ def test_tier0_replay_of_an_older_version_is_not_blamed_on_the_harness(monkeypat
     patched = runner.run_replays(None, [(bundle, "agent", "earlier version (before the patch)")], opts)
     assert same[0]["verdict"] == "harness_disagrees"
     assert patched[0]["verdict"] == "REGRESSION"
+
+
+# Item 2: the agent's built-in web tools are switched off by default
+def test_agent_kwargs_switch_off_web_search(monkeypatch):
+    s = task_runner.settings
+    monkeypatch.setattr(s, "agent_disable_web_search", True)
+    monkeypatch.setattr(s, "codex_web_search", "")
+    assert task_runner._agent_kwargs("claude-code")["disable_web_search"] == "true"
+    assert task_runner._agent_kwargs("codex")["disable_web_search"] == "true"
+    # Terminus-2 has no built-in web tools to switch off, and Harbor rejects options an agent lacks
+    assert "disable_web_search" not in task_runner._agent_kwargs("terminus-2")
+
+
+def test_agent_kwargs_respect_an_explicit_codex_choice_and_the_off_switch(monkeypatch):
+    s = task_runner.settings
+    monkeypatch.setattr(s, "agent_disable_web_search", True)
+    monkeypatch.setattr(s, "codex_web_search", "live")
+    kw = task_runner._agent_kwargs("codex")
+    assert kw["web_search"] == "live" and "disable_web_search" not in kw
+    assert task_runner._agent_kwargs("claude-code")["disable_web_search"] == "true"
+    monkeypatch.setattr(s, "agent_disable_web_search", False)
+    assert "disable_web_search" not in task_runner._agent_kwargs("claude-code")
