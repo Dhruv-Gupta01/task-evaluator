@@ -325,10 +325,11 @@ def check_tool_parity(task_root: Path, report) -> None:
     if not verifier.is_file():
         return
     agent_pkgs, verifier_pkgs = _packages(task_root / "environment" / "Dockerfile"), _packages(verifier)
-    tests_text = "\n".join(c for _, c in _text_files(task_root / "tests"))
+    # tests/Dockerfile builds the verifier image, so it naming a tool (python3.13 -m venv) is not the tests using it
+    tests_text = "\n".join(c for rel, c in _text_files(task_root / "tests") if Path(str(rel)).name != "Dockerfile")
     lacking = sorted(
         p for p in agent_pkgs - verifier_pkgs
-        if len(p) > 2 and re.search(rf"(?<![\w-]){re.escape(p)}(?![\w-])", tests_text)
+        if len(p) > 2 and re.search(rf"(?<![\w-]){re.escape(p)}(?![\w-]|\.\d)", tests_text)  # python3.13 is not python3
     )
     if lacking:
         report.add(
