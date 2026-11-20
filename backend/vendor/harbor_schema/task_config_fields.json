@@ -1,5 +1,5 @@
 {
- "harbor": "0.23.0",
+ "harbor": "0.26.0",
  "model": "harbor.models.task.config.TaskConfig",
  "fields": [
   "schema_version",

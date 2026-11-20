@@ -107,6 +107,11 @@ def info() -> dict:
             "set HARBOR_ANALYZE_BIN to a Harbor 0.26+ binary for Failure Analysis, the Cheat Trial's hacking "
             "check and Rubric Check."
         )
+    if version and at_least(version, HARBOR_TESTED) is not None and version != HARBOR_TESTED:
+        notes.append(
+            f"Harbor {version} is not the version the platform was tested with ({HARBOR_TESTED}). Install it with "
+            f"`uv tool install harbor=={HARBOR_TESTED}` or point HARBOR_BIN at one."
+        )
     if not _harbor_has_command("lint"):
         notes.append(f"`harbor lint` is not available in Harbor {version} (it needs {HARBOR_MIN_FOR_WORKER}+).")
     return {

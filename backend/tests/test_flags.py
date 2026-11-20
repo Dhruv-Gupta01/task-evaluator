@@ -3,6 +3,7 @@ Every rule has a fixture it must fire on and one it must not fire on."""
 
 import json
 import os
+import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -285,6 +286,16 @@ def test_framework_finds_canary_reuse_across_submissions(tmp_path, db):
 
 
 def _harbor_python() -> Path | None:
+    from app.config import get_settings
+
+    # the Harbor the platform is configured to run (HARBOR_BIN), found through the shebang of its launcher
+    exe = shutil.which(get_settings().harbor_bin) or get_settings().harbor_bin
+    try:
+        first = Path(exe).resolve().read_text(errors="ignore").splitlines()[0]
+        if first.startswith("#!") and Path(first[2:].split()[0]).exists():
+            return Path(first[2:].split()[0])
+    except (OSError, IndexError, UnicodeDecodeError):
+        pass
     try:
         tool_dir = subprocess.run(["uv", "tool", "dir"], capture_output=True, text=True, timeout=30).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):

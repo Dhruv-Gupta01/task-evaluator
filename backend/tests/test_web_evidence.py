@@ -159,3 +159,14 @@ def test_tier1_attempts_keep_their_web_use(tmp_path):
     hooks = loop.Hooks(run_attempt, classify, propose, lambda *a: None, lambda *a: None)
     result = asyncio.run(loop.run(tmp_path, tmp_path, hooks, loop.Limits(max_attempts=1)))
     assert result["attempts"][0]["web_use"] == WEB
+
+
+def test_versions_warns_when_harbor_is_not_the_tested_version(monkeypatch):
+    from app.services import versions
+
+    monkeypatch.setattr(versions, "harbor_version", lambda: "0.25.0")
+    notes = " | ".join(versions.info()["notes"])
+    assert "Harbor 0.25.0 is not the version the platform was tested with (0.26.0)" in notes
+    assert "uv tool install harbor==0.26.0" in notes
+    monkeypatch.setattr(versions, "harbor_version", lambda: versions.HARBOR_TESTED)
+    assert not any("not the version the platform was tested with" in n for n in versions.info()["notes"])
