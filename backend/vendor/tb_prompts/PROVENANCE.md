@@ -21,8 +21,7 @@ and returns plain pass/fail, so the platform marks a failed warning-level
 criterion as a non-blocking warning itself (`vendor_info.rubric_summary`). The 2026-10-15 refresh brought in upstream
 #1518: a 36th criterion, `effective_instruction_length` (a nonblocking
 warning), and `instruction_concision` no longer fails on length alone.
-Upstream's newer `regrade-analysis.txt` and `task-proposal.md` are not
-vendored (nothing here uses them).
+Upstream's newer `regrade-analysis.txt` is not vendored (nothing here uses it).
 
 - `trial-analysis.toml` -- 6-criterion rubric for `harbor analyze -r`
   (`task_specification`, `reward_hacking`, `difficulty_crux`, `near_miss`,
@@ -45,3 +44,5 @@ vendored (nothing here uses them).
 
 To update: re-clone the upstream repo, diff `docs/prompts/*` against this
 directory, and update the commit hash above.
+
+- `task-guidelines.md` -- upstream `docs/task-guidelines.md` (read at upstream HEAD `504c312`, 2026-11-20; `task-proposal.md` is byte-identical there). `generators.proposal_prompt` puts it where `task-proposal.md` has `{{task_guidelines}}`, as upstream's `scripts/checks/rubric_review.py` does.

@@ -22,7 +22,11 @@ def test_idea_review_uses_the_vendored_proposal_prompt():
     client = FakeClient("Verdict: promising.")
     out = asyncio.run(generators.idea_review("Recover a ledger from a corrupted WAL archive.", client))
     assert out["review"] == "Verdict: promising."
-    assert client.seen[0].content == generators.PROPOSAL_PROMPT.read_text(encoding="utf-8")
+    system = client.seen[0].content
+    assert generators.GUIDELINES_PLACEHOLDER not in system
+    assert generators.GUIDELINES.read_text(encoding="utf-8").strip() in system
+    assert system.startswith("# About Terminal Bench")
+    assert client.seen[1].content.endswith("Recover a ledger from a corrupted WAL archive.")
 
 
 def test_rubric_keeps_only_verbatim_evidence():

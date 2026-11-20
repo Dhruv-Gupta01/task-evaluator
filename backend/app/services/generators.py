@@ -17,6 +17,15 @@ from app.services.llm.base import Message
 from app.services.llm.factory import get_llm_client
 
 PROPOSAL_PROMPT = Path(__file__).resolve().parents[2] / "vendor" / "tb_prompts" / "task-proposal.md"
+GUIDELINES = PROPOSAL_PROMPT.with_name("task-guidelines.md")
+GUIDELINES_PLACEHOLDER = "{{task_guidelines}}"
+
+
+def proposal_prompt() -> str:
+    """The proposal prompt with Terminal-Bench's task guidelines put where it says
+    {{task_guidelines}}, as upstream's own rubric_review.py does."""
+    text = PROPOSAL_PROMPT.read_text(encoding="utf-8")
+    return text.replace(GUIDELINES_PLACEHOLDER, GUIDELINES.read_text(encoding="utf-8").strip())
 DRAFT_LINE = "Draft, needs review."
 MAX_TRAJECTORY_CHARS = 40_000
 
@@ -31,9 +40,8 @@ def _json(text: str) -> dict:
 
 async def idea_review(idea: str, client=None) -> dict:
     client = client or get_llm_client()
-    prompt = PROPOSAL_PROMPT.read_text(encoding="utf-8")
     resp = await client.complete(
-        [Message(role="system", content=prompt), Message(role="user", content=f"Task idea:\n\n{idea.strip()}")],
+        [Message(role="system", content=proposal_prompt()), Message(role="user", content=f"Task idea:\n\n{idea.strip()}")],
         tools=[],
     )
     return {"review": resp.text.strip(), "prompt": "vendor/tb_prompts/task-proposal.md (bdf6034)", "model": client.model}
