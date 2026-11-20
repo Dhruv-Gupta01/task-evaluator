@@ -2774,6 +2774,19 @@ async def run_cheat_trial(
         db.close()
 
 
+def _tier_effort_meta(agent: str, hacker_model: str | None, requested: str | None) -> dict:
+    """What the tier logs say about reasoning effort: the setting asked for and the one really sent.
+    A model such as Haiku 4.5 takes no effort setting, so Claude Code is launched without one."""
+    name = (hacker_model or _agent_model(agent)).split("/", 1)[-1]
+    if llm_factory.supports_effort(name):
+        return {"reasoning_effort": requested, "reasoning_effort_requested": requested}
+    return {
+        "reasoning_effort": None,
+        "reasoning_effort_requested": requested,
+        "reasoning_effort_note": f"{name} takes no effort setting, so none was sent",
+    }
+
+
 async def run_tier1_stage(
     submission_id: str,
     agent: str | None = None,
@@ -2839,7 +2852,7 @@ async def run_tier1_stage(
             "model": hacker_model or _agent_model(agent),
             "judge_model": settings.tier1_judge_model,
             "fixer_model": settings.tier1_fixer_model,
-            "reasoning_effort": reasoning_effort or settings.tier1_reasoning_effort,
+            **_tier_effort_meta(agent, hacker_model, reasoning_effort or settings.tier1_reasoning_effort),
             "attempt_timeout_sec": settings.tier1_attempt_timeout_sec,
             "attempt_cost_usd": settings.tier1_attempt_cost_usd,
         }
@@ -3281,7 +3294,7 @@ async def run_tier2_stage(
             "agent": agent,
             "model": hacker_model or _agent_model(agent),
             "judge_model": settings.tier2_judge_model,
-            "reasoning_effort": reasoning_effort or settings.tier2_reasoning_effort,
+            **_tier_effort_meta(agent, hacker_model, reasoning_effort or settings.tier2_reasoning_effort),
             "attempt_timeout_sec": settings.tier2_attempt_timeout_sec,
             "attempt_cost_usd": settings.tier2_attempt_cost_usd,
             "task_copy": copy_used,
