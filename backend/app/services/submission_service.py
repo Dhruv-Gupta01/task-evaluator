@@ -603,6 +603,7 @@ def to_schema(submission: Submission) -> SubmissionSchema:
     return SubmissionSchema(
         id=submission.id,
         task_name=submission.task_name,
+        files_ready=submission.extracted_path is not None,
         uploaded_at=submission.uploaded_at,
         build=BuildResult(
             status=submission.build_status,  # type: ignore[arg-type]

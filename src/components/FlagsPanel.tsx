@@ -59,11 +59,14 @@ export function FlagsSection({
   group,
   banner,
   showVersion = false,
+  filesReady = true,
 }: {
   id: string;
   group: FlagGroup;
   banner?: ReactNode;
   showVersion?: boolean;
+  // false until the zip is unpacked (Validate & Build); the check needs the task files
+  filesReady?: boolean;
 }) {
   const qc = useQueryClient();
   const [name, setName] = useState(savedName);
@@ -115,7 +118,11 @@ export function FlagsSection({
               saveName(e.target.value);
             }}
           />
-          <Button onClick={() => run.mutate()} disabled={run.isPending}>
+          <Button
+            onClick={() => run.mutate()}
+            disabled={run.isPending || !filesReady}
+            title={filesReady ? undefined : "Click Validate & Build first: the checks need the unpacked task files"}
+          >
             {run.isPending ? "Checking…" : data?.last_run ? "Run again" : "Run checks"}
           </Button>
         </div>

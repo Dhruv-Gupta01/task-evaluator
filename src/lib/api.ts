@@ -997,6 +997,8 @@ export type AgentChoice = (typeof AGENT_CHOICES)[number]["value"];
 export interface Submission {
   id: string;
   task_name: string;
+  // the zip has been unpacked, so file-based stages work
+  files_ready: boolean;
   uploaded_at: string;
   build: BuildResult;
   oracle: OracleRunsResult;

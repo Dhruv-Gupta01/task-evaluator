@@ -526,7 +526,8 @@ function SubmissionDetail() {
   }
 
   const buildReady = data.build.status === "passed";
-  const validated = data.build.status !== "not-run";
+  // the zip is unpacked once Validate & Build has started; "not-run" alone was wrong while a build is pending
+  const validated = data.files_ready;
   const agentDone =
     data.agent_trials.status === "passed" || data.agent_trials.status === "failed";
   const oracleNopPassed =
@@ -600,6 +601,7 @@ function SubmissionDetail() {
         id={id}
         group="changes"
         showVersion
+        filesReady={validated}
         banner={
           changes?.against && changes.counts ? (
             <div className="mb-3">
@@ -608,14 +610,18 @@ function SubmissionDetail() {
           ) : undefined
         }
       />
-      <PostFixPanel id={id} buildReady={data.build.status === "passed"} />
 
+      {!validated && (
+        <div className="mb-4 rounded-md border border-border bg-muted/40 p-3 text-sm">
+          Start with <strong>Validate &amp; Build</strong> in step 1. Until the zip is unpacked, the
+          checks and most buttons below are greyed out.
+        </div>
+      )}
       <div className="grid gap-4 md:grid-cols-2">
         <div className="md:col-span-2">
-          <h2 className="text-lg font-semibold">Before the agent trials</h2>
+          <h2 className="text-lg font-semibold">1. Unpack and check the files</h2>
           <p className="text-xs text-muted-foreground">
-            Run in this order: build, then Oracle and Nop, then the task-file checks and probes.
-            Greyed-out buttons say what they are waiting for.
+            Click Validate & Build first. The checks in this step only need the unpacked files: no agent runs and no cost.
           </p>
         </div>
         {/* Validate & Build */}
@@ -635,6 +641,325 @@ function SubmissionDetail() {
           <LogPanel logs={data.build.logs} title="Build logs" />
         </StageCard>
 
+        {/* Static Checks */}
+        <StageCard
+          title="Static Checks"
+          description="Advisory, LLM-free mechanical checks over instruction.md/test.sh/Dockerfile/zip layout — word counts, formatting, hygiene. Not a pass/fail gate."
+          status={data.static_checks.status}
+        >
+          <RunButton
+            label="Run Static Checks"
+            runningLabel="Checking…"
+            onClick={() => mStaticChecks.mutate()}
+            running={
+              data.static_checks.status === "running" || data.static_checks.status === "pending"
+            }
+            pending={mStaticChecks.isPending}
+            disabled={!validated}
+            disabledReason="Validate the submission first"
+          />
+          {data.static_checks.logs &&
+            (() => {
+              let report: StaticCheckReport | null = null;
+              try {
+                report = JSON.parse(data.static_checks.logs) as StaticCheckReport;
+              } catch {
+                report = null;
+              }
+              if (!report) return null;
+              return (
+                <>
+                  <div
+                    className={`rounded-md border p-2.5 text-xs ${
+                      report.fail_count === 0
+                        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                        : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
+                    }`}
+                  >
+                    {report.fail_count} fail, {report.warn_count} warn, {report.results.length}{" "}
+                    checks total
+                  </div>
+                  <LogPanel logs={report.text} title="Static check findings" />
+                </>
+              );
+            })()}
+          <FlagsSection id={id} group="static" filesReady={validated} />
+        </StageCard>
+
+        {/* TB Static Checks */}
+        <StageCard
+          title="TB Static Checks"
+          description="Advisory — Terminal-Bench's own official static checks (vendor/tb_checks/), a different rule set from the platform's own Static Checks above. Not a pass/fail gate."
+          status={data.tb_static_checks.status}
+        >
+          <RunButton
+            label="Run TB Static Checks"
+            runningLabel="Checking…"
+            onClick={() => mTbStaticChecks.mutate()}
+            running={
+              data.tb_static_checks.status === "running" ||
+              data.tb_static_checks.status === "pending"
+            }
+            pending={mTbStaticChecks.isPending}
+            disabled={!validated}
+            disabledReason="Validate the submission first"
+          />
+          {data.tb_static_checks.logs &&
+            (() => {
+              let report: TbStaticCheckReport | null = null;
+              try {
+                report = JSON.parse(data.tb_static_checks.logs) as TbStaticCheckReport;
+              } catch {
+                report = null;
+              }
+              if (!report) return null;
+              return (
+                <>
+                  <div
+                    className={`rounded-md border p-2.5 text-xs ${
+                      report.fail_count > 0
+                        ? "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
+                        : report.skip_count
+                          ? "border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-300"
+                          : "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                    }`}
+                  >
+                    {report.script_count != null &&
+                      `${report.ran_count ?? report.pass_count + report.fail_count} of ${report.script_count} checks ran: `}
+                    {report.pass_count} pass, {report.fail_count} fail
+                    {report.skip_count
+                      ? `, ${report.skip_count} not run (a tool is missing), so this is not a complete pass`
+                      : ""}
+                    {report.vendor?.commit && (
+                      <span className="block text-muted-foreground">
+                        Rule set: upstream{" "}
+                        <span className="font-mono">{report.vendor.commit.slice(0, 7)}</span>
+                        {report.vendor.date ? ` (${report.vendor.date})` : ""},{" "}
+                        {report.vendor.scripts} checks
+                      </span>
+                    )}
+                  </div>
+                  <VendorReminder info={report.vendor} />
+                  <LogPanel logs={report.text} title="TB check findings" />
+                </>
+              );
+            })()}
+        </StageCard>
+
+        {/* Leakage Scan */}
+        <StageCard
+          title="Leakage Scan"
+          description="Advisory only — flags unedited LLM chat artifacts (disclaimers, unfilled placeholders). Not a pass/fail gate."
+          status={data.leakage_scan.status}
+        >
+          <RunButton
+            label="Run Leakage Scan"
+            runningLabel="Scanning…"
+            onClick={() => mLeakageScan.mutate()}
+            running={
+              data.leakage_scan.status === "running" || data.leakage_scan.status === "pending"
+            }
+            pending={mLeakageScan.isPending}
+            disabled={!validated}
+            disabledReason="Validate the submission first"
+          />
+          {data.leakage_scan.passed != null && (
+            <div
+              className={`rounded-md border p-2.5 text-xs ${
+                data.leakage_scan.passed
+                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                  : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+              }`}
+            >
+              {data.leakage_scan.passed
+                ? "Clean — no leakage artifacts found."
+                : "Artifacts found — worth a human look, not proof of misconduct."}
+            </div>
+          )}
+          <LogPanel logs={data.leakage_scan.logs} title="Leakage scan findings" />
+        </StageCard>
+
+        {/* Answer exposure */}
+        <StageCard
+          title="Answer Exposure"
+          description="Can the agent find the answer in the files it is given? Looks at environment/, instruction.md and the built image's file list for answer-like names, a .git folder, exact copies of solution/ or tests/ files, and values the tests check for. Noisy by design (a test input is supposed to be visible), so read each finding. Advisory; no LLM, no Docker."
+          status={data.answer_exposure.status}
+        >
+          <RunButton
+            label="Run Answer-Exposure Scan"
+            runningLabel="Scanning…"
+            onClick={() => mAnswerExposure.mutate()}
+            running={isActive(data.answer_exposure.status)}
+            pending={mAnswerExposure.isPending}
+            disabled={!validated}
+            disabledReason="Validate the submission first"
+          />
+          <AnswerExposureView logs={data.answer_exposure.logs} />
+        </StageCard>
+
+        {/* AI Detection */}
+        <StageCard
+          title="AI Detection"
+          description="Advisory — Terminal-Bench's three AI-usage detection layers side by side, never merged into one score. The button runs Layer 3, the real GPTZero API against instruction.md and solution/solve.sh (needs GPTZERO_API_KEY; a graceful no-op without it). Layer 2 comes from the Rubric Check below (TB rubric), so run that to fill it in."
+          status={data.ai_detection.status}
+          wide
+        >
+          <RunButton
+            label="Run AI Detection"
+            runningLabel="Checking…"
+            onClick={() => mAiDetection.mutate()}
+            running={
+              data.ai_detection.status === "running" || data.ai_detection.status === "pending"
+            }
+            pending={mAiDetection.isPending}
+            disabled={!validated}
+            disabledReason="Validate the submission first"
+          />
+          {data.ai_detection.logs &&
+            (() => {
+              let report: AiDetectionReport | null = null;
+              try {
+                report = JSON.parse(data.ai_detection.logs) as AiDetectionReport;
+              } catch {
+                report = null;
+              }
+              if (!report) return null;
+              if (report.skipped) {
+                return (
+                  <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-700 dark:text-amber-400">
+                    Skipped —{" "}
+                    {report.api_key_configured
+                      ? "GPTZero returned a network error"
+                      : "GPTZERO_API_KEY not configured"}
+                    . Not a pass/fail result.
+                  </div>
+                );
+              }
+              return (
+                <>
+                  {report.error && (
+                    <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs whitespace-pre-wrap max-h-48 overflow-y-auto">
+                      {report.error}
+                    </div>
+                  )}
+                  {report.passed != null && (
+                    <div
+                      className={`rounded-md border p-2.5 text-xs ${
+                        report.passed
+                          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                          : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
+                      }`}
+                    >
+                      {report.passed
+                        ? "Below the AI-generated threshold."
+                        : "Flagged — at or above the 70% AI-generated threshold."}
+                    </div>
+                  )}
+                  <LogPanel logs={report.output ?? undefined} title="GPTZero output" />
+                </>
+              );
+            })()}
+          <AiLayersOverview rubricCheck={data.rubric_check} aiDetection={data.ai_detection} />
+        </StageCard>
+
+        {/* Instruction Sufficiency */}
+        <StageCard
+          title="Instruction Sufficiency"
+          description="LLM judge: is instruction.md + environment/ enough to pass the hidden tests?"
+          status={data.sufficiency.status}
+        >
+          <div className="flex items-center gap-2">
+            <label className="text-sm text-muted-foreground">Judge runs</label>
+            <Select value={sufficiencyRuns} onValueChange={setSufficiencyRuns}>
+              <SelectTrigger className="w-20">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {["1", "2", "3"].map((r) => (
+                  <SelectItem key={r} value={r}>
+                    {r}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <span className="text-xs text-muted-foreground">
+              more runs cost more; the majority decides and disagreement is shown
+            </span>
+          </div>
+          <RunButton
+            label="Run Sufficiency Check"
+            runningLabel="Checking…"
+            onClick={() => mSufficiency.mutate()}
+            running={data.sufficiency.status === "running" || data.sufficiency.status === "pending"}
+            pending={mSufficiency.isPending}
+            disabled={!validated}
+            disabledReason="Validate the submission first"
+          />
+          {data.sufficiency.passed != null && (
+            <div
+              className={`rounded-md border p-2.5 text-xs ${
+                data.sufficiency.passed
+                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                  : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
+              }`}
+            >
+              {data.sufficiency.passed
+                ? "Sufficient — no gaps found."
+                : "Insufficient — see gaps below."}
+            </div>
+          )}
+          <LogPanel logs={data.sufficiency.logs} title="Sufficiency verdict" />
+        </StageCard>
+
+        {/* Edge cases */}
+        <StageCard
+          title="Edge-Case Coverage"
+          description="One model call lists the edge cases an expert would handle, from the instruction alone; a second checks each against the hidden tests. An uncovered case is a question for a reviewer, not a verdict. Advisory; no Docker needed."
+          status={data.edge_cases.status}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <RunButton
+              label="Run Edge-Case Check"
+              runningLabel="Checking…"
+              onClick={() => mEdgeCases.mutate({ probe: false, probeCovered: false })}
+              running={isActive(data.edge_cases.status)}
+              pending={mEdgeCases.isPending}
+              disabled={!validated}
+              disabledReason="Validate the submission first"
+            />
+            <RunButton
+              label="Check + run through the grader"
+              runningLabel="Checking…"
+              onClick={() => mEdgeCases.mutate({ probe: true, probeCovered })}
+              running={isActive(data.edge_cases.status)}
+              pending={mEdgeCases.isPending}
+              disabled={!buildReady || !data.oracle.runs.some((r) => r.reward === 1)}
+              disabledReason="Build the image and get an Oracle pass first"
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            The second button also breaks the Oracle&apos;s answer on every uncovered case and runs
+            it through the real verifier: scoring 1 confirms the case is untested. Each case is a
+            full Oracle run, so a long list takes a while.
+          </p>
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={probeCovered}
+              onChange={(e) => setProbeCovered(e.target.checked)}
+            />
+            Also probe the cases marked covered (checks the judge&apos;s &quot;covered&quot;
+            verdicts; about doubles the run time)
+          </label>
+          <EdgeCasesView logs={data.edge_cases.logs} />
+        </StageCard>
+
+        <div className="md:col-span-2">
+          <h2 className="text-lg font-semibold">2. Run the task</h2>
+          <p className="text-xs text-muted-foreground">
+            Needs the build. The Oracle must pass three times in a row and Nop must score 0.
+          </p>
+        </div>
         {/* Oracle */}
         <StageCard
           title="Run Oracle"
@@ -922,319 +1247,12 @@ function SubmissionDetail() {
           <FreshBuildView logs={data.fresh_build.logs} />
         </StageCard>
 
-        {/* Static Checks */}
-        <StageCard
-          title="Static Checks"
-          description="Advisory, LLM-free mechanical checks over instruction.md/test.sh/Dockerfile/zip layout — word counts, formatting, hygiene. Not a pass/fail gate."
-          status={data.static_checks.status}
-        >
-          <RunButton
-            label="Run Static Checks"
-            runningLabel="Checking…"
-            onClick={() => mStaticChecks.mutate()}
-            running={
-              data.static_checks.status === "running" || data.static_checks.status === "pending"
-            }
-            pending={mStaticChecks.isPending}
-            disabled={!validated}
-            disabledReason="Validate the submission first"
-          />
-          {data.static_checks.logs &&
-            (() => {
-              let report: StaticCheckReport | null = null;
-              try {
-                report = JSON.parse(data.static_checks.logs) as StaticCheckReport;
-              } catch {
-                report = null;
-              }
-              if (!report) return null;
-              return (
-                <>
-                  <div
-                    className={`rounded-md border p-2.5 text-xs ${
-                      report.fail_count === 0
-                        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                        : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
-                    }`}
-                  >
-                    {report.fail_count} fail, {report.warn_count} warn, {report.results.length}{" "}
-                    checks total
-                  </div>
-                  <LogPanel logs={report.text} title="Static check findings" />
-                </>
-              );
-            })()}
-          <FlagsSection id={id} group="static" />
-        </StageCard>
-
-        {/* TB Static Checks */}
-        <StageCard
-          title="TB Static Checks"
-          description="Advisory — Terminal-Bench's own official static checks (vendor/tb_checks/), a different rule set from the platform's own Static Checks above. Not a pass/fail gate."
-          status={data.tb_static_checks.status}
-        >
-          <RunButton
-            label="Run TB Static Checks"
-            runningLabel="Checking…"
-            onClick={() => mTbStaticChecks.mutate()}
-            running={
-              data.tb_static_checks.status === "running" ||
-              data.tb_static_checks.status === "pending"
-            }
-            pending={mTbStaticChecks.isPending}
-            disabled={!validated}
-            disabledReason="Validate the submission first"
-          />
-          {data.tb_static_checks.logs &&
-            (() => {
-              let report: TbStaticCheckReport | null = null;
-              try {
-                report = JSON.parse(data.tb_static_checks.logs) as TbStaticCheckReport;
-              } catch {
-                report = null;
-              }
-              if (!report) return null;
-              return (
-                <>
-                  <div
-                    className={`rounded-md border p-2.5 text-xs ${
-                      report.fail_count > 0
-                        ? "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
-                        : report.skip_count
-                          ? "border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-300"
-                          : "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                    }`}
-                  >
-                    {report.script_count != null &&
-                      `${report.ran_count ?? report.pass_count + report.fail_count} of ${report.script_count} checks ran: `}
-                    {report.pass_count} pass, {report.fail_count} fail
-                    {report.skip_count
-                      ? `, ${report.skip_count} not run (a tool is missing), so this is not a complete pass`
-                      : ""}
-                    {report.vendor?.commit && (
-                      <span className="block text-muted-foreground">
-                        Rule set: upstream{" "}
-                        <span className="font-mono">{report.vendor.commit.slice(0, 7)}</span>
-                        {report.vendor.date ? ` (${report.vendor.date})` : ""},{" "}
-                        {report.vendor.scripts} checks
-                      </span>
-                    )}
-                  </div>
-                  <VendorReminder info={report.vendor} />
-                  <LogPanel logs={report.text} title="TB check findings" />
-                </>
-              );
-            })()}
-        </StageCard>
-
-        {/* Leakage Scan */}
-        <StageCard
-          title="Leakage Scan"
-          description="Advisory only — flags unedited LLM chat artifacts (disclaimers, unfilled placeholders). Not a pass/fail gate."
-          status={data.leakage_scan.status}
-        >
-          <RunButton
-            label="Run Leakage Scan"
-            runningLabel="Scanning…"
-            onClick={() => mLeakageScan.mutate()}
-            running={
-              data.leakage_scan.status === "running" || data.leakage_scan.status === "pending"
-            }
-            pending={mLeakageScan.isPending}
-            disabled={!validated}
-            disabledReason="Validate the submission first"
-          />
-          {data.leakage_scan.passed != null && (
-            <div
-              className={`rounded-md border p-2.5 text-xs ${
-                data.leakage_scan.passed
-                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                  : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400"
-              }`}
-            >
-              {data.leakage_scan.passed
-                ? "Clean — no leakage artifacts found."
-                : "Artifacts found — worth a human look, not proof of misconduct."}
-            </div>
-          )}
-          <LogPanel logs={data.leakage_scan.logs} title="Leakage scan findings" />
-        </StageCard>
-
-        {/* Answer exposure */}
-        <StageCard
-          title="Answer Exposure"
-          description="Can the agent find the answer in the files it is given? Looks at environment/, instruction.md and the built image's file list for answer-like names, a .git folder, exact copies of solution/ or tests/ files, and values the tests check for. Noisy by design (a test input is supposed to be visible), so read each finding. Advisory; no LLM, no Docker."
-          status={data.answer_exposure.status}
-        >
-          <RunButton
-            label="Run Answer-Exposure Scan"
-            runningLabel="Scanning…"
-            onClick={() => mAnswerExposure.mutate()}
-            running={isActive(data.answer_exposure.status)}
-            pending={mAnswerExposure.isPending}
-            disabled={!validated}
-            disabledReason="Validate the submission first"
-          />
-          <AnswerExposureView logs={data.answer_exposure.logs} />
-        </StageCard>
-
-        {/* AI Detection */}
-        <StageCard
-          title="AI Detection"
-          description="Advisory — Terminal-Bench's three AI-usage detection layers side by side, never merged into one score. The button runs Layer 3, the real GPTZero API against instruction.md and solution/solve.sh (needs GPTZERO_API_KEY; a graceful no-op without it). Layer 2 comes from the Rubric Check below (TB rubric), so run that to fill it in."
-          status={data.ai_detection.status}
-          wide
-        >
-          <RunButton
-            label="Run AI Detection"
-            runningLabel="Checking…"
-            onClick={() => mAiDetection.mutate()}
-            running={
-              data.ai_detection.status === "running" || data.ai_detection.status === "pending"
-            }
-            pending={mAiDetection.isPending}
-            disabled={!validated}
-            disabledReason="Validate the submission first"
-          />
-          {data.ai_detection.logs &&
-            (() => {
-              let report: AiDetectionReport | null = null;
-              try {
-                report = JSON.parse(data.ai_detection.logs) as AiDetectionReport;
-              } catch {
-                report = null;
-              }
-              if (!report) return null;
-              if (report.skipped) {
-                return (
-                  <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-700 dark:text-amber-400">
-                    Skipped —{" "}
-                    {report.api_key_configured
-                      ? "GPTZero returned a network error"
-                      : "GPTZERO_API_KEY not configured"}
-                    . Not a pass/fail result.
-                  </div>
-                );
-              }
-              return (
-                <>
-                  {report.error && (
-                    <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs whitespace-pre-wrap max-h-48 overflow-y-auto">
-                      {report.error}
-                    </div>
-                  )}
-                  {report.passed != null && (
-                    <div
-                      className={`rounded-md border p-2.5 text-xs ${
-                        report.passed
-                          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                          : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
-                      }`}
-                    >
-                      {report.passed
-                        ? "Below the AI-generated threshold."
-                        : "Flagged — at or above the 70% AI-generated threshold."}
-                    </div>
-                  )}
-                  <LogPanel logs={report.output ?? undefined} title="GPTZero output" />
-                </>
-              );
-            })()}
-          <AiLayersOverview rubricCheck={data.rubric_check} aiDetection={data.ai_detection} />
-        </StageCard>
-
-        {/* Instruction Sufficiency */}
-        <StageCard
-          title="Instruction Sufficiency"
-          description="LLM judge: is instruction.md + environment/ enough to pass the hidden tests?"
-          status={data.sufficiency.status}
-        >
-          <div className="flex items-center gap-2">
-            <label className="text-sm text-muted-foreground">Judge runs</label>
-            <Select value={sufficiencyRuns} onValueChange={setSufficiencyRuns}>
-              <SelectTrigger className="w-20">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {["1", "2", "3"].map((r) => (
-                  <SelectItem key={r} value={r}>
-                    {r}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <span className="text-xs text-muted-foreground">
-              more runs cost more; the majority decides and disagreement is shown
-            </span>
-          </div>
-          <RunButton
-            label="Run Sufficiency Check"
-            runningLabel="Checking…"
-            onClick={() => mSufficiency.mutate()}
-            running={data.sufficiency.status === "running" || data.sufficiency.status === "pending"}
-            pending={mSufficiency.isPending}
-            disabled={!validated}
-            disabledReason="Validate the submission first"
-          />
-          {data.sufficiency.passed != null && (
-            <div
-              className={`rounded-md border p-2.5 text-xs ${
-                data.sufficiency.passed
-                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                  : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
-              }`}
-            >
-              {data.sufficiency.passed
-                ? "Sufficient — no gaps found."
-                : "Insufficient — see gaps below."}
-            </div>
-          )}
-          <LogPanel logs={data.sufficiency.logs} title="Sufficiency verdict" />
-        </StageCard>
-
-        {/* Edge cases */}
-        <StageCard
-          title="Edge-Case Coverage"
-          description="One model call lists the edge cases an expert would handle, from the instruction alone; a second checks each against the hidden tests. An uncovered case is a question for a reviewer, not a verdict. Advisory; no Docker needed."
-          status={data.edge_cases.status}
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <RunButton
-              label="Run Edge-Case Check"
-              runningLabel="Checking…"
-              onClick={() => mEdgeCases.mutate({ probe: false, probeCovered: false })}
-              running={isActive(data.edge_cases.status)}
-              pending={mEdgeCases.isPending}
-              disabled={!validated}
-              disabledReason="Validate the submission first"
-            />
-            <RunButton
-              label="Check + run through the grader"
-              runningLabel="Checking…"
-              onClick={() => mEdgeCases.mutate({ probe: true, probeCovered })}
-              running={isActive(data.edge_cases.status)}
-              pending={mEdgeCases.isPending}
-              disabled={!buildReady || !data.oracle.runs.some((r) => r.reward === 1)}
-              disabledReason="Build the image and get an Oracle pass first"
-            />
-          </div>
+        <div className="md:col-span-2">
+          <h2 className="text-lg font-semibold">3. Probe the grader</h2>
           <p className="text-xs text-muted-foreground">
-            The second button also breaks the Oracle&apos;s answer on every uncovered case and runs
-            it through the real verifier: scoring 1 confirms the case is untested. Each case is a
-            full Oracle run, so a long list takes a while.
+            Needs a passing Oracle. Tier 1 and Tier 2 cost credits.
           </p>
-          <label className="flex items-center gap-2 text-xs text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={probeCovered}
-              onChange={(e) => setProbeCovered(e.target.checked)}
-            />
-            Also probe the cases marked covered (checks the judge&apos;s &quot;covered&quot;
-            verdicts; about doubles the run time)
-          </label>
-          <EdgeCasesView logs={data.edge_cases.logs} />
-        </StageCard>
-
+        </div>
         {/* Rubric check (harbor check) */}
         <StageCard
           title="Rubric Check"
@@ -1995,8 +2013,14 @@ function SubmissionDetail() {
           )}
         </StageCard>
       </div>
+      <PostFixPanel
+        id={id}
+        buildReady={data.build.status === "passed"}
+        filesReady={data.files_ready}
+        hasTrials={agentDone}
+      />
       <div className="mt-6">
-        <FlagsSection id={id} group="results" />
+        <FlagsSection id={id} group="results" filesReady={validated} />
       </div>
     </PageShell>
   );

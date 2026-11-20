@@ -35,7 +35,19 @@ function parse<T>(text: string | null | undefined): T | null {
 
 // Post-fix stages: Oracle/Nop probes and repeated Oracle (batch 4), evidence sets (batch 6),
 // agent rubric and deliverable (batch 8). Run Flag checks afterwards to turn results into Flags.
-export function PostFixPanel({ id, buildReady }: { id: string; buildReady: boolean }) {
+export function PostFixPanel({
+  id,
+  buildReady,
+  filesReady,
+  hasTrials,
+}: {
+  id: string;
+  buildReady: boolean;
+  // the zip is unpacked (Validate & Build was started)
+  filesReady: boolean;
+  // at least one agent trial has finished
+  hasTrials: boolean;
+}) {
   const qc = useQueryClient();
   const [repeat, setRepeat] = useState(50);
   const [cap, setCap] = useState(10);
@@ -82,6 +94,7 @@ export function PostFixPanel({ id, buildReady }: { id: string; buildReady: boole
   }>(data?.agent_rubric?.logs);
   const deliverableLogs = parse<{ markdown?: string }>(data?.deliverable?.logs);
   const waiting = !buildReady;
+  const waitingFor = "Build the image first (Validate & Build)";
 
   return (
     <section className="mb-6 rounded-lg border border-border p-4 text-sm">
@@ -103,6 +116,7 @@ export function PostFixPanel({ id, buildReady }: { id: string; buildReady: boole
             size="sm"
             variant="outline"
             disabled={waiting || probes.isPending}
+            title={waiting ? waitingFor : undefined}
             onClick={() => probes.mutate(kinds)}
           >
             {label}
@@ -121,6 +135,7 @@ export function PostFixPanel({ id, buildReady }: { id: string; buildReady: boole
           size="sm"
           variant="outline"
           disabled={waiting || oracle.isPending}
+          title={waiting ? waitingFor : undefined}
           onClick={() => oracle.mutate()}
         >
           Run
@@ -164,6 +179,7 @@ export function PostFixPanel({ id, buildReady }: { id: string; buildReady: boole
           size="sm"
           variant="outline"
           disabled={waiting || evidence.isPending}
+          title={waiting ? waitingFor : undefined}
           onClick={() => evidence.mutate("standard")}
         >
           Standard set (2 pairs x 3)
@@ -172,6 +188,7 @@ export function PostFixPanel({ id, buildReady }: { id: string; buildReady: boole
           size="sm"
           variant="outline"
           disabled={waiting || evidence.isPending}
+          title={waiting ? waitingFor : undefined}
           onClick={() => evidence.mutate("cheap")}
         >
           Cheap model (x 2)
@@ -192,7 +209,8 @@ export function PostFixPanel({ id, buildReady }: { id: string; buildReady: boole
         <Button
           size="sm"
           variant="outline"
-          disabled={rubric.isPending}
+          disabled={rubric.isPending || !hasTrials}
+          title={hasTrials ? undefined : "Run the agent trials first: the rubric is written from their transcripts"}
           onClick={() => rubric.mutate()}
         >
           {rubric.isPending ? "Writing…" : "Agent rubric"}
@@ -200,7 +218,8 @@ export function PostFixPanel({ id, buildReady }: { id: string; buildReady: boole
         <Button
           size="sm"
           variant="outline"
-          disabled={deliverable.isPending}
+          disabled={deliverable.isPending || !filesReady}
+          title={filesReady ? undefined : "Click Validate & Build first"}
           onClick={() => deliverable.mutate()}
         >
           {deliverable.isPending ? "Writing…" : "Task deliverable"}
