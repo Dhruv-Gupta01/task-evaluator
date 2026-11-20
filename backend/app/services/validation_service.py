@@ -67,14 +67,23 @@ def validate_zip(zip_path: Path, extract_dir: Path) -> ValidationResult:
             ok=False, errors=[f"invalid task.toml config values: {e}"], task_root=task_root
         )
 
-    # Per the v2.0 schema, [metadata].name shouldn't be present (it's a
-    # forbidden field, flagged by the static checks) — when it's absent,
-    # return None rather than falling back to task_root.name, which is just
-    # the literal extraction-directory folder name ("extracted"). task_runner
-    # only overwrites Submission.task_name when this is truthy, so None
-    # preserves the real name already derived from the uploaded filename.
-    task_name = data.get("metadata", {}).get("name")
+    # The submission's name is the task's own `[task] name` (the part after the "terminal-bench/"
+    # prefix), not the zip's file name: versioning, the earlier-upload comparison, Tier 0's
+    # per-task probes and the canary comparison all match uploads of "the same task" by it, and a
+    # renamed zip used to silently break them. [metadata].name is a forbidden field in the v2.0
+    # schema and is ignored. With no `[task] name` this returns None, and task_runner then keeps the
+    # name already derived from the uploaded file name.
+    task_name = _task_slug(data)
 
     return ValidationResult(
         ok=True, errors=[], task_root=task_root, config=config, task_name=task_name
     )
+
+
+def _task_slug(data: dict) -> str | None:
+    """`[task] name` without its org prefix ("terminal-bench/collab-editor-desync" -> "collab-editor-desync")."""
+    name = (data.get("task") or {}).get("name")
+    if not isinstance(name, str):
+        return None
+    slug = name.strip().rsplit("/", 1)[-1].strip()
+    return slug or None

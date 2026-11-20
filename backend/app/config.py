@@ -152,6 +152,8 @@ class Settings(BaseSettings):
     analyze_agent: str = "terminus-2"
     analyze_model: str = "openai/gpt-6-luna"
     analyze_timeout_sec: int = 3600
+    # Per trial: one hung evaluator costs this much, not the whole analyze_timeout_sec.
+    analyze_trial_timeout_sec: int = 900
     # Reasoning effort for the analysis agent. Empty = pass nothing, so the evaluator
     # model runs at its own default (not at AGENT_REASONING_EFFORT, which is for trials).
     analyze_reasoning_effort: str = ""
