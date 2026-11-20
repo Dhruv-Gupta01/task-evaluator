@@ -26,6 +26,8 @@ def test_idea_review_uses_the_vendored_proposal_prompt():
     assert generators.GUIDELINES_PLACEHOLDER not in system
     assert generators.GUIDELINES.read_text(encoding="utf-8").strip() in system
     assert system.startswith("# About Terminal Bench")
+    assert "# Existing Terminal Bench tasks" in system and "- atrx-vep-crispr (" in system
+    assert system.index("# Existing Terminal Bench tasks") < system.index("# Task proposal to evaluate")
     assert client.seen[1].content.endswith("Recover a ledger from a corrupted WAL archive.")
 
 

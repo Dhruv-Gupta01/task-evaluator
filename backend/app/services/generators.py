@@ -19,13 +19,19 @@ from app.services.llm.factory import get_llm_client
 PROPOSAL_PROMPT = Path(__file__).resolve().parents[2] / "vendor" / "tb_prompts" / "task-proposal.md"
 GUIDELINES = PROPOSAL_PROMPT.with_name("task-guidelines.md")
 GUIDELINES_PLACEHOLDER = "{{task_guidelines}}"
+EXISTING_TASKS = PROPOSAL_PROMPT.with_name("existing-tasks.md")
 
 
 def proposal_prompt() -> str:
     """The proposal prompt with Terminal-Bench's task guidelines put where it says
     {{task_guidelines}}, as upstream's own rubric_review.py does."""
     text = PROPOSAL_PROMPT.read_text(encoding="utf-8")
-    return text.replace(GUIDELINES_PLACEHOLDER, GUIDELINES.read_text(encoding="utf-8").strip())
+    text = text.replace(GUIDELINES_PLACEHOLDER, GUIDELINES.read_text(encoding="utf-8").strip())
+    # the guidelines promise "a complete list of accepted TB tasks ... at the end of this document";
+    # upstream's file has none, so the vendored list goes before the proposal itself
+    marker = "# Task proposal to evaluate"
+    listing = EXISTING_TASKS.read_text(encoding="utf-8").strip()
+    return text.replace(marker, listing + "\n\n" + marker, 1) if marker in text else text + "\n\n" + listing
 DRAFT_LINE = "Draft, needs review."
 MAX_TRAJECTORY_CHARS = 40_000
 

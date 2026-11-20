@@ -46,3 +46,4 @@ To update: re-clone the upstream repo, diff `docs/prompts/*` against this
 directory, and update the commit hash above.
 
 - `task-guidelines.md` -- upstream `docs/task-guidelines.md` (read at upstream HEAD `504c312`, 2026-11-20; `task-proposal.md` is byte-identical there). `generators.proposal_prompt` puts it where `task-proposal.md` has `{{task_guidelines}}`, as upstream's `scripts/checks/rubric_review.py` does.
+- `existing-tasks.md` -- one line per folder under upstream `tasks/` (66 tasks at `504c312`, 2026-11-19): name, category / subcategory from `task.toml`, first sentence of `instruction.md`. Built once by a throwaway script, not a shipped one; refresh by regenerating it from upstream. `generators.proposal_prompt` puts it before `# Task proposal to evaluate`.
