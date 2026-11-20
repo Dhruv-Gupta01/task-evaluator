@@ -22,6 +22,8 @@ PRICES_PER_M: dict[str, tuple[float, float, float, float]] = {
     # Haiku 5.5: $0.10 / $0.50 per M for prompts up to 100K tokens ($0.50 / $2.50 beyond, not
     # modelled). Cache rates assumed to follow the other models (read 0.1x, 5-minute write 1.25x).
     "claude-haiku-5-5": (0.10, 0.01, 0.50, 0.125),
+    # Haiku 4.5: $1 / $5 per M, cache read 0.1x, 5-minute cache write 1.25x (matches LiteLLM's cost map).
+    "claude-haiku-4-5": (1.00, 0.10, 5.00, 1.25),
     # Sonnet 4.5 (retires 2026-11-30): $3 / $15 per M, cache read 0.1x, 5-minute cache write 1.25x.
     "claude-sonnet-4-5": (3.0, 0.30, 15.0, 3.75),
     # Sonnet 4.6 (Harbor's own default model for check/analyze): $3 / $15 per M, cache read 0.1x, 5-minute write 1.25x.
