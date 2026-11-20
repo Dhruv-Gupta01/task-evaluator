@@ -113,6 +113,25 @@ Files: backend/storage/submissions/{id}/ (zip, extracted task, logs, Harbor outp
   rate limit, DNS, Docker) is retried once, sequentially. The original failure stays in the log. A
   trial with reward 0, or a retry that shows infrastructure noise again, is never retried.
 
+### Post-fix additions (branch `harbor-5.0-post-fixes-harbor-more-checks`)
+
+- **Tier cycle ("Run all tiers")**: Tier 0 (static probes), Tier 1 (hinted agent plus fixer) and
+  Tier 2 (unhinted agent) repeat on the patched task until a round needs no patch (default 3
+  rounds). Tier 1 is the only tier that edits the task; the upload is never changed and a person
+  reviews the diff. Honest solves and refusals are labelled as such and never count as the grader
+  holding. Costs real credits.
+- **Regrade**: re-scores saved trials with the latest grader (`harbor job regrade`), without a new
+  agent run. Flags 15.29 and 15.32 read its result.
+- **Solution variants**: the reviewer lists correct alternative solutions (`$SOLUTION` values); each
+  runs as an Oracle trial. A rejected one raises Flag 15.38, and Tier 1's patch check re-runs them.
+- **`.harborignore`**: a Static Check, and the Tier 0 and Tier 1 copies honour the same rules Harbor
+  does, so attackers only see what the real verifier gets.
+- **Web use**: each trial's web tool calls, fetches, installs and hosts are counted from its
+  trajectory and shown in the evidence. Agents run with an open network and web tools on.
+- **Harbor 0.26.0** is the tested version everywhere; `GET /versions` warns about any other.
+- **Tier logs and cost**: tier logs record the reasoning effort actually sent (none for Haiku 4.5),
+  and Haiku 4.5 spend is priced and counted against the budget.
+
 ### Terminal-Bench 5.0 additions (branch `harbor-5.0`)
 
 All advisory, no new buttons; each extends an existing stage.
@@ -205,9 +224,9 @@ image per submission. Clean up with `docker image prune -a` and by deleting old 
 
 ### Flags
 
-The Flags panel at the top of a submission runs the Item 15 rules that only read the task
-files (14 of 37 so far; the rest need probes, runs or saved results and come with later
-batches). A Blocker stays open until a named person accepts or disputes it with a reason.
+The Flags panel at the top of a submission runs all 38 Item 15 rules: the ones that only read
+the task files, and the ones that read probe results, saved runs, regrades and solution
+variants. A Blocker stays open until a named person accepts or disputes it with a reason.
 Rulings are kept when the checks run again, and the whole record goes into the evidence file.
 
 ## 7. Known issues and limits
