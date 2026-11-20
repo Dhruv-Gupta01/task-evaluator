@@ -65,8 +65,9 @@ export function FlagsPanel({ id }: { id: string }) {
         <div>
           <h2 className="text-lg font-semibold">Flags</h2>
           <p className="text-xs text-muted-foreground">
-            Rules that read the task files (no Docker, no LLM). A Blocker needs a ruling from a
-            named person before the task is trusted; the platform never edits the task.
+            Rules that read the task files and the results of stages you already ran (no Docker, no
+            LLM). Run them after the other stages for the full picture. A Blocker needs a ruling
+            from a named person before the task is trusted; the platform never edits the task.
           </p>
         </div>
         <div className="flex items-center gap-2">
