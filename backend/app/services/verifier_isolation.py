@@ -18,6 +18,7 @@ from app.services.hygiene_checks import _listed, _own_files, _text_files
 
 _AGENT_DIRS = ("/app", "/workspace", "/home", "/tmp", "/root", "/srv", "/data", "/opt/app")
 _DROP_RE = re.compile(r"\b(?:setpriv|runuser|gosu|s6-setuidgid|setuidgid|chpst)\b|\bsu\s+-?\w|\bsudo\s+-u\b|--userspec")
+_DROP_CONST_RE = re.compile(r"\b(?:RUNUSER|SETPRIV|GOSU|SUDO)\b")  # the same tools held in an upper-case constant
 _PY_DROP_RE = re.compile(r"\b(?:user|group|preexec_fn)\s*=|setpriv|runuser|gosu|\"su\"|'su'|sudo")
 
 
@@ -84,10 +85,27 @@ def _code_lines(text: str):
 
 
 def _agent_names(text: str, dirs: tuple[str, ...]) -> set[str]:
-    """Variables a test file binds to an agent-writable path, e.g. MIGRATE = Path("/app/migrate.py")."""
+    """Variables a test file binds to an agent-writable path, e.g. MIGRATE = Path("/app/migrate.py"),
+    and (two passes) variables built from one, e.g. sources = sorted((APP / "src").glob("*.cc"))."""
     alt = "|".join(re.escape(d) for d in dirs)
     pattern = re.compile(rf"^\s*([A-Za-z_]\w*)\s*(?::[^=\n]+)?=[^\n]*[\"'](?:{alt})(?:/|[\"'])", re.M)
-    return set(pattern.findall(text))
+    names = set(pattern.findall(text))
+    assign = re.compile(r"^\s*([A-Za-z_]\w*)\s*(?::[^=\n]+)?=([^=\n][^\n]*)$", re.M)
+    for _ in range(2):
+        for name, rhs in assign.findall(text):
+            if name in names or re.search(r"\.read_(?:text|bytes)\(|json\.loads?\(|\bopen\(", rhs):
+                continue
+            if any(re.search(rf"\b{re.escape(n)}\b", rhs) for n in names):
+                names.add(name)
+    return names
+
+
+def _constants(text: str) -> dict[str, str]:
+    """NAME = "literal" (or Path("literal")) assignments, so a call through SAGE or RUNUSER can be read."""
+    found = {}
+    for name, value in re.findall(r"^\s*([A-Za-z_]\w*)\s*(?::[^=\n]+)?=\s*(?:Path\()?[rbfu]*[\"']([^\"'\n]+)[\"']\)?\s*$", text, re.M):
+        found.setdefault(name, value)
+    return found
 
 
 def _mentions_agent(snippet: str, dirs: tuple[str, ...], names: set[str]) -> bool:
@@ -237,6 +255,16 @@ _INTERPRETERS = {
     "java", "dotnet", "php", "Rscript", "julia", "deno", "bun", "lua",
 }
 # Building or installing what is in a directory: the directory's own files decide what runs.
+# Compilers and provers: they read the sources they are given, and compiling Lean or Coq runs the author's
+# tactics and macros, so handing them an agent file runs agent code. Running the result is covered by `-o`.
+_COMPILERS = {
+    "gcc", "g++", "cc", "c++", "clang", "clang++", "rustc", "javac", "ghc", "coqc", "lean", "ocamlfind",
+    "ocamlopt", "ocamlc", "tsc", "swiftc", "nvcc", "kotlinc", "scalac", "zig", "sage", "gfortran", "nim", "dmd",
+}
+# Lean and Coq elaborate whatever file they are given, and the file a test hands them is usually the
+# submission (copied into a scratch project, so the path cannot be followed); a call in a file that
+# already names an agent path is counted.
+_PROVER_RE = re.compile(r"^(?:lake\s+(?:env\s+lean|build)|lean|coqc)\b")
 _BUILD_TOOLS = {"make", "cmake", "npm", "yarn", "pnpm", "cargo", "go", "lake", "mvn", "gradle", "uv"}
 
 
@@ -256,7 +284,7 @@ _WRAPPERS = {
 
 def _starts_command(word: str, dirs: tuple[str, ...]) -> bool:
     base = word.rsplit("/", 1)[-1].rstrip("0123456789.")
-    return base in _INTERPRETERS or base in _BUILD_TOOLS or base in ("pip", "pip3") or any(
+    return base in _INTERPRETERS or base in _BUILD_TOOLS or base in _COMPILERS or base in ("pip", "pip3") or any(
         word.startswith(d + "/") for d in dirs
     )
 
@@ -265,7 +293,7 @@ def _command_runs_agent(words: list[str], cwd: str | None, dirs: tuple[str, ...]
     """Whether one command (already split into words, flags kept) executes agent-written code."""
     if not words:
         return False
-    if words[0] in _WRAPPERS or ("=" in words[0] and not words[0].startswith("-")):
+    if words[0].rsplit("/", 1)[-1] in _WRAPPERS or ("=" in words[0] and not words[0].startswith("-")):
         return any(
             _command_runs_agent(words[i:], cwd, dirs) for i in range(1, len(words)) if _starts_command(words[i], dirs)
         )
@@ -273,6 +301,13 @@ def _command_runs_agent(words: list[str], cwd: str | None, dirs: tuple[str, ...]
     rest = [w for w in words[1:] if not w.startswith("-")]
     if any(words[0].startswith(d + "/") for d in dirs):
         return True
+    if head == "lake" and "env" in words[1:]:
+        return _command_runs_agent(words[words.index("env") + 1:], cwd, dirs)
+    if head in _COMPILERS:
+        # what it reads, not where it writes: the word after -o is the output
+        out_word = words[words.index("-o") + 1] if "-o" in words[1:-1] else None
+        inputs = [w for w in rest if w != out_word]
+        return any(_is_agent_path(w, cwd, dirs) for w in inputs) or (bool(cwd) and cwd.rstrip("/") in dirs and bool(inputs))
     if head in _INTERPRETERS or words[0] in _INTERPRETERS:
         if "-c" in words[1:]:
             return False  # inline code; what it runs cannot be told from here
@@ -328,20 +363,104 @@ def _list_tokens(call: str) -> list[str] | None:
     return out
 
 
-def _py_call_runs_agent(call: str, names: set[str], dirs: tuple[str, ...]) -> bool:
-    cwd_match = re.search(r"cwd\s*=\s*([^,)]+)", call)
+def _list_assignments(text: str) -> dict[str, str]:
+    """NAME = [ ... ] (a command written as a list and passed by name), as a call-like "([ ... ])" text."""
+    found = {}
+    for m in re.finditer(r"^\s*([A-Za-z_]\w*)\s*(?::[^=\n]+)?=\s*\[", text, re.M):
+        depth, out = 1, ""
+        for ch in text[m.end():m.end() + 3000]:
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+                if depth == 0:
+                    break
+            out += ch
+        found.setdefault(m.group(1), "([" + out + "])")
+    return found
+
+
+def _launcher_name(token: str) -> str:
+    """SAGE -> sage, RUNUSER -> runuser: an upper-case constant named after the tool it holds."""
+    low = token.lower()
+    return low if re.fullmatch(r"[A-Z][A-Z0-9_]*", token) and (low in _INTERPRETERS or low in _COMPILERS or low in _WRAPPERS) else token
+
+
+def _balanced_arg(call: str, key: str) -> str | None:
+    """The text of keyword argument `key=` in a call, up to the comma or bracket that ends it."""
+    m = re.search(rf"\b{key}\s*=\s*", call)
+    if not m:
+        return None
+    depth, out = 0, ""
+    for ch in call[m.end():]:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+        elif ch == "," and depth == 0:
+            break
+        out += ch
+    return out.strip()
+
+
+def _unwrap(value: str) -> str:
+    """str(X), os.fspath(X), Path(X) -> X."""
+    while True:
+        inner = re.fullmatch(r"(?:str|os\.fspath|Path|PurePath)\((.*)\)", value.strip())
+        if not inner:
+            return value.strip()
+        value = inner.group(1)
+
+
+def _names_in(snippet: str, names: set[str]) -> bool:
+    return any(re.search(rf"\b{re.escape(n)}\b", snippet) for n in names)
+
+
+def _py_call_runs_agent(
+    call: str, names: set[str], dirs: tuple[str, ...], consts: dict[str, str] | None = None,
+    lists: dict[str, str] | None = None,
+) -> bool:
+    consts = consts or {}
+    first = re.match(r"[^(]*\(\s*([A-Za-z_]\w*)\s*[,)]", call)
+    if first and lists and first.group(1) in lists and "([" not in call.split(",")[0]:
+        call = call.replace(first.group(1), lists[first.group(1)], 1)
     cwd = None
-    if cwd_match:
-        value = cwd_match.group(1).strip()
-        cwd = dirs[0] if value in names or _is_agent_path(value.strip("\"'"), None, dirs) else value.strip("\"'")
+    raw_cwd = _balanced_arg(call, "cwd")
+    if raw_cwd is not None:
+        value = _unwrap(raw_cwd)
+        value = consts.get(value, value)
+        cwd = dirs[0] if _names_in(value, names) or _is_agent_path(value.strip("\"'"), None, dirs) else value.strip("\"'")
     tokens = _list_tokens(call)
     if tokens is None:
         command = re.search(r"\(\s*[rbfu]*[\"']([^\"']+)[\"']", call)
         return bool(command) and _sh_runs_agent(command.group(1), cwd, dirs)
-    words = ["/app/__agent__" if tok in names else tok for tok in tokens]
+    words = []
+    for tok in tokens:
+        tok = _unwrap(tok.lstrip("*"))
+        tok = _launcher_name(consts.get(tok, tok))
+        words.append("/app/__agent__" if _names_in(tok, names) else tok)
     if words and words[0] in ("sys.executable",):
         words[0] = "python3"
-    return _command_runs_agent(words, cwd, dirs)
+    runs = _command_runs_agent(words, cwd, dirs)
+    if runs and "-o" in words[:-1]:
+        # a compiler wrote an artifact from agent sources: running that artifact later runs agent code
+        target = words[words.index("-o") + 1]
+        if re.fullmatch(r"[A-Za-z_]\w*", target):
+            names.add(target)
+    return runs
+
+
+def _runner_helpers(text: str) -> set[str]:
+    """Functions in a test file that pass their first parameter on to subprocess (def _run(cmd, **kw)),
+    so a call like _run(["bun", "run", "x"], cwd=project) is read like a subprocess call."""
+    found = set()
+    for m in re.finditer(r"^def\s+(\w+)\(\s*(\w+)", text, re.M):
+        body = text[m.end(): m.end() + 1500].split("\ndef ", 1)[0]
+        if re.search(rf"{_SUBPROCESS_RE.pattern}\s*{re.escape(m.group(2))}\b", body):
+            found.add(m.group(1))
+    return found
 
 
 def _agent_runs(t: _Task) -> list[tuple[str, bool, str]]:
@@ -350,9 +469,15 @@ def _agent_runs(t: _Task) -> list[tuple[str, bool, str]]:
     dirs = t.agent_dirs
     for rel, text in t.tests_py:
         names = _agent_names(text, dirs)
-        for line, call in _calls(text, _SUBPROCESS_RE):
-            if _py_call_runs_agent(call, names, dirs):
-                runs.append((f"{rel}:{line}", bool(_PY_DROP_RE.search(call)), call))
+        consts = _constants(text)
+        lists = _list_assignments(text)
+        helpers = _runner_helpers(text)
+        openers = re.compile(_SUBPROCESS_RE.pattern + (r"|\b(?:" + "|".join(map(re.escape, helpers)) + r")\(" if helpers else ""))
+        for line, call in _calls(text, openers):
+            if _py_call_runs_agent(call, names, dirs, consts, lists) or (
+                names and _PROVER_RE.search(" ".join((_list_tokens(call) or [])[:4]).replace(",", " "))
+            ):
+                runs.append((f"{rel}:{line}", bool(_PY_DROP_RE.search(call) or _DROP_CONST_RE.search(call)), call))
     cwd = t.workdir
     for i, line in _shell_lines(t.test_sh):
         if line.lstrip().startswith("#"):
@@ -364,6 +489,19 @@ def _agent_runs(t: _Task) -> list[tuple[str, bool, str]]:
     return runs
 
 
+def _worker_runs(t: _Task) -> list[str]:
+    """Where the grader runs submitted code through Reward Kit's `Worker` (an isolated child process
+    that cannot reach the reward or /tests), as file:line. A Worker exists to run agent code, so each
+    use counts as one."""
+    found = []
+    for rel, text in t.tests_py:
+        if not re.search(r"rewardkit", text, re.I):
+            continue
+        for line, _ in _calls(text, re.compile(r"\bWorker\(")):
+            found.append(f"{rel}:{line}")
+    return found
+
+
 _LOCKS_TESTS_RE = re.compile(
     r"chmod\s+(?:-R\s+)?(?:0?7[05]0|go-\w+|o-\w+|og-\w+|go=|o=)\S*\s+[^\n]*/tests\b"
     r"|os\.chmod\([^)]*/tests[^)]*0o7[05]0|\.chmod\(0o7[05]0\)"
@@ -372,8 +510,17 @@ _LOCKS_TESTS_RE = re.compile(
 
 def check_agent_code_privileges(t: _Task, report) -> None:
     runs = _agent_runs(t)
+    workers = _worker_runs(t)
+    if workers:
+        report.add(
+            "verifier_runs_agent_code_in_worker", "info",
+            f"The grader runs submitted code through a Reward Kit Worker ({_listed(workers)}): an isolated child "
+            "process with its own unprivileged user, kept away from the reward and /tests. This is the safe pattern "
+            "(whether it covers every place agent code runs needs a human).",
+        )
     if not runs:
-        report.add("verifier_runs_agent_code", "info", "No place found where the verifier runs agent-written code.")
+        if not workers:
+            report.add("verifier_runs_agent_code", "info", "No place found where the verifier runs agent-written code.")
         return
     undropped = [w for w, dropped, _ in runs if not dropped]
     if undropped and _is_root(t.verifier_user):
