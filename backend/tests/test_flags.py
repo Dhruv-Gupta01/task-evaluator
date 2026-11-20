@@ -325,3 +325,17 @@ def test_vendored_harbor_fields_match_the_installed_harbor():
 def test_15_15_misspelled_anonymous_author(tmp_path):
     assert [f.key for f in fired(make_task(tmp_path / "a", github="annonymous"), "15.15")] == ["author"]
     assert fired(make_task(tmp_path / "b", github="RajeshA76"), "15.15") == []
+
+
+def test_every_rule_has_one_group_and_the_groups_split_as_planned():
+    from app.services import flag_rules
+
+    groups = {r.id: r.group for r in flag_rules.RULES.values()}
+    assert set(groups.values()) == {"static", "changes", "results"}
+    assert {k for k, v in groups.items() if v == "changes"} == {"15.18", "15.25", "15.26", "15.30", "15.34"}
+    # a static rule that reads a stored Rubric Check result belongs with the results
+    assert groups["15.17"] == "results"
+    assert groups["15.23"] == "static" and groups["15.24"] == "static"
+    # probes and saved runs are results
+    assert groups["15.1"] == groups["15.29"] == groups["15.38"] == "results"
+    assert sum(1 for v in groups.values() if v == "static") == 12

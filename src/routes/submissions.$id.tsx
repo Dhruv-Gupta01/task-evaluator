@@ -49,7 +49,7 @@ import {
 } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogPanel } from "@/components/LogPanel";
-import { FlagsPanel } from "@/components/FlagsPanel";
+import { FlagsSection } from "@/components/FlagsPanel";
 import { PostFixPanel } from "@/components/PostFixPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -584,7 +584,6 @@ function SubmissionDetail() {
         </div>
       </div>
 
-      {changes?.against && changes.counts && <ChangesBanner changes={changes} />}
       {data.checksum.consistent === false && (
         <div className="mb-6 flex items-start gap-2 rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-400">
           <span>
@@ -597,7 +596,18 @@ function SubmissionDetail() {
         </div>
       )}
 
-      <FlagsPanel id={id} />
+      <FlagsSection
+        id={id}
+        group="changes"
+        showVersion
+        banner={
+          changes?.against && changes.counts ? (
+            <div className="mb-3">
+              <ChangesBanner changes={changes} />
+            </div>
+          ) : undefined
+        }
+      />
       <PostFixPanel id={id} buildReady={data.build.status === "passed"} />
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -954,6 +964,7 @@ function SubmissionDetail() {
                 </>
               );
             })()}
+          <FlagsSection id={id} group="static" />
         </StageCard>
 
         {/* TB Static Checks */}
@@ -1983,6 +1994,9 @@ function SubmissionDetail() {
             </div>
           )}
         </StageCard>
+      </div>
+      <div className="mt-6">
+        <FlagsSection id={id} group="results" />
       </div>
     </PageShell>
   );

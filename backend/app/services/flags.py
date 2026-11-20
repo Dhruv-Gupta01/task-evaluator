@@ -185,7 +185,7 @@ def record(db: Session, submission_id: str) -> dict:
         "rules": [
             {
                 "id": r.id, "check": r.check, "title": r.title, "severity": r.severity, "method": r.method,
-                "batch": r.batch, "ran": r.id in notes, "note": notes.get(r.id),
+                "batch": r.batch, "group": r.group, "ran": r.id in notes, "note": notes.get(r.id),
             }
             for r in flag_rules.RULES.values()
         ],

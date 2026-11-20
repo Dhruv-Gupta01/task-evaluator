@@ -31,6 +31,26 @@ class Rule:
     method: str  # static | probe | result
     batch: int
 
+    @property
+    def group(self) -> str:
+        return group_of(self.id, self.method)
+
+
+# Where the UI shows a rule: "static" (reads only this upload's files, shown with Static Checks),
+# "changes" (compares with an earlier upload or other tasks, shown with the Changes banner) or
+# "results" (reads what other stages saved, shown at the bottom of the page).
+CHANGES_RULES = frozenset({"15.18", "15.25", "15.26", "15.30", "15.34"})
+# 15.17 is a static rule by method, but it reads a stored Rubric Check result
+RESULT_READING_RULES = frozenset({"15.17"})
+
+
+def group_of(rule_id: str, method: str) -> str:
+    if rule_id in CHANGES_RULES:
+        return "changes"
+    if method == "static" and rule_id not in RESULT_READING_RULES:
+        return "static"
+    return "results"
+
 
 RULES: dict[str, Rule] = {
     r.id: r

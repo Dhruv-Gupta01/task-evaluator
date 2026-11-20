@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api, type FlagItem, type FlagRecord, type FlagStatus } from "@/lib/api";
@@ -31,7 +31,40 @@ const STATUS_STYLE: Record<FlagStatus, string> = {
   disputed: "bg-blue-500/15 text-blue-700 dark:text-blue-400",
 };
 
-export function FlagsPanel({ id }: { id: string }) {
+export type FlagGroup = "static" | "changes" | "results";
+
+const GROUP_TEXT: Record<FlagGroup, { title: string; blurb: string }> = {
+  static: {
+    title: "Rules that need a ruling (task files)",
+    blurb:
+      "Static rules that read only this upload's files. A Blocker needs a ruling from a named person before the task is trusted; the platform never edits the task.",
+  },
+  changes: {
+    title: "Version and locked-item rules",
+    blurb:
+      "Rules that compare this upload with an earlier upload of the same task (or with other tasks' canaries). A Blocker needs a named approver.",
+  },
+  results: {
+    title: "Results review",
+    blurb:
+      "Rules that read what the stages above saved: probes, runs, regrades, trials, cheat evidence. Run the stages first, then run these for the full picture. A Blocker needs a ruling from a named person.",
+  },
+};
+
+// One group of the 38 Item 15 rules. The three groups sit in different places on the page
+// (Static Checks card, Changes panel, bottom of the page) but share one record and one
+// "run" call, which is free: no Docker, no LLM.
+export function FlagsSection({
+  id,
+  group,
+  banner,
+  showVersion = false,
+}: {
+  id: string;
+  group: FlagGroup;
+  banner?: ReactNode;
+  showVersion?: boolean;
+}) {
   const qc = useQueryClient();
   const [name, setName] = useState(savedName);
   const { data } = useQuery({ queryKey: ["flags", id], queryFn: () => api.flags(id) });
@@ -47,28 +80,30 @@ export function FlagsPanel({ id }: { id: string }) {
     mutationFn: (kind: "agent" | "oracle") => api.regrade(id, kind, "previous"),
     onSuccess: () => {
       toast.success(
-        "Re-grade started. See the Re-grade card; run the Flag checks again when it finishes.",
+        "Re-grade started. See the Re-grade card; run the checks again when it finishes.",
       );
       qc.invalidateQueries({ queryKey: ["submission", id] });
     },
     onError: (e: Error) => toast.error(e.message),
   });
 
-  const live = data?.flags.filter((f) => f.present) ?? [];
-  const gone = data?.flags.filter((f) => !f.present) ?? [];
-  const c = data?.counts;
-  const ran = data?.rules.filter((r) => r.ran).length ?? 0;
+  const groupOf = new Map(data?.rules.map((r) => [r.id, r.group]) ?? []);
+  const mine = data?.flags.filter((f) => groupOf.get(f.rule) === group) ?? [];
+  const live = mine.filter((f) => f.present);
+  const gone = mine.filter((f) => !f.present);
+  const rules = data?.rules.filter((r) => r.group === group) ?? [];
+  const ran = rules.filter((r) => r.ran).length;
+  const openBlockers = live.filter((f) => f.severity === "blocker" && f.status === "open").length;
+  const openAdvisories = live.filter((f) => f.severity !== "blocker" && f.status === "open").length;
+  const text = GROUP_TEXT[group];
 
   return (
     <section className="mb-6 rounded-lg border border-border p-4">
+      {banner}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold">Flags</h2>
-          <p className="text-xs text-muted-foreground">
-            Rules that read the task files and the results of stages you already ran (no Docker, no
-            LLM). Run them after the other stages for the full picture. A Blocker needs a ruling
-            from a named person before the task is trusted; the platform never edits the task.
-          </p>
+          <h2 className="text-lg font-semibold">{text.title}</h2>
+          <p className="text-xs text-muted-foreground">{text.blurb}</p>
         </div>
         <div className="flex items-center gap-2">
           <Input
@@ -81,28 +116,28 @@ export function FlagsPanel({ id }: { id: string }) {
             }}
           />
           <Button onClick={() => run.mutate()} disabled={run.isPending}>
-            {run.isPending ? "Checking…" : data?.last_run ? "Run again" : "Run Flag checks"}
+            {run.isPending ? "Checking…" : data?.last_run ? "Run again" : "Run checks"}
           </Button>
         </div>
       </div>
 
-      {data?.last_run && c && (
+      {data?.last_run && (
         <div
           className={`mt-3 rounded-md border p-2.5 text-xs ${
-            c.open_blockers
+            openBlockers
               ? "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
               : "border-border bg-muted/40"
           }`}
         >
-          {c.open_blockers} open Blocker{c.open_blockers === 1 ? "" : "s"}, {c.open_advisories} open
-          advisor{c.open_advisories === 1 ? "y" : "ies"}, {c.accepted} accepted, {c.disputed}{" "}
-          disputed
-          {c.no_longer_found ? `, ${c.no_longer_found} no longer found` : ""} · {ran} of{" "}
-          {data.rules.length} rules ran · last run {new Date(data.last_run).toLocaleString()}
+          {openBlockers} open Blocker{openBlockers === 1 ? "" : "s"}, {openAdvisories} open advisor
+          {openAdvisories === 1 ? "y" : "ies"}, {live.filter((f) => f.status === "accepted").length}{" "}
+          accepted, {live.filter((f) => f.status === "disputed").length} disputed
+          {gone.length ? `, ${gone.length} no longer found` : ""} · {ran} of {rules.length} rules
+          ran · last run {new Date(data.last_run).toLocaleString()}
         </div>
       )}
 
-      {data?.version && (
+      {showVersion && data?.version && (
         <div className="mt-2 rounded-md border border-border bg-muted/40 p-2.5 text-xs">
           Version against the earlier upload {data.version.against.slice(0, 8)}:{" "}
           {data.version.old_version ?? "none"} → {data.version.new_version ?? "none"}, declared{" "}
@@ -153,14 +188,14 @@ export function FlagsPanel({ id }: { id: string }) {
         )}
       </div>
 
-      {data && data.rules.length > 0 && (
+      {rules.length > 0 && (
         <details className="mt-3 text-xs">
           <summary className="cursor-pointer text-muted-foreground">
-            All {data.rules.length} rules and what each looked at
+            The {rules.length} rules here and what each looked at
           </summary>
           <table className="mt-2 w-full text-left">
             <tbody>
-              {data.rules.map((r) => (
+              {rules.map((r) => (
                 <tr key={r.id} className="border-t border-border align-top">
                   <td className="py-1 pr-2 font-mono">{r.id}</td>
                   <td className="py-1 pr-2 font-mono">{r.check}</td>
@@ -171,7 +206,7 @@ export function FlagsPanel({ id }: { id: string }) {
                     )}
                   </td>
                   <td className="py-1 text-muted-foreground">
-                    {r.ran ? r.note : `${r.method} rule, comes with batch ${r.batch}`}
+                    {r.ran ? r.note : "not run yet: click Run checks"}
                   </td>
                 </tr>
               ))}

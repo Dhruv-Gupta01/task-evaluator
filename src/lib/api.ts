@@ -886,6 +886,8 @@ export interface FlagRuleInfo {
   severity: "blocker" | "advisory";
   method: "static" | "probe" | "result";
   batch: number;
+  // where the UI shows it: Static Checks, the Changes panel, or the results review at the bottom
+  group: "static" | "changes" | "results";
   ran: boolean;
   note: string | null;
 }
