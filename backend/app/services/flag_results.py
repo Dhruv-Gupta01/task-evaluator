@@ -7,6 +7,7 @@ import math
 import re
 
 from app.config import get_settings
+from app.services import solution_variants
 from app.services.flag_rules import Finding, RuleResult
 
 JSON_KINDS = {
@@ -353,6 +354,24 @@ def rule_cheat_coverage(runs, ctx=None) -> RuleResult:
                                "That is not evidence the trap held; run a tier with a provider that does not refuse.", [note])], note)
 
 
+def rule_alternative_rejected(runs, ctx=None) -> RuleResult:
+    """15.38: a solution the author says is correct (a `SOLUTION` value the reviewer listed) scored below 1 in some
+    run, so the grader is too strict, or flaky. Needs the Solution variants stage; a wrong answer is not an oracle."""
+    groups = solution_variants.grouped(runs)
+    if not groups:
+        return RuleResult([], "no solution variants run yet")
+    evidence = []
+    for value, rs in groups.items():
+        done = [r for r in rs if r.status not in ("pending", "running")]
+        if any(r.reward != 1 for r in done):
+            evidence.append(f"{solution_variants.ENV}={value}: rewards {solution_variants.rewards_text(done)}")
+    detail = (
+        "A solution listed as correct scored below 1. Either the grader accepts only the author's first way of writing "
+        "the answer, or it is flaky: a person has to say which before the task is trusted."
+    )
+    return RuleResult([Finding("15.38", detail, evidence[:10])] if evidence else [], f"{len(groups)} solution(s) checked, {len(evidence)} rejected")
+
+
 def _regrade_items(runs) -> tuple[dict | None, list[dict]]:
     """The latest regrade row's JSON and its items (saved trials re-scored by `harbor job regrade`)."""
     run = next(iter(_of(runs, "regrade")), None)  # one row per submission (run_index 0)
@@ -417,6 +436,7 @@ RESULT_RULES = {
     "15.33": rule_positive_control,
     "15.36": rule_cheap_model,
     "15.37": rule_null_ladder,
+    "15.38": rule_alternative_rejected,
 }
 
 

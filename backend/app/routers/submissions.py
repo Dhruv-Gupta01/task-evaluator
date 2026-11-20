@@ -1,4 +1,5 @@
 import json
+import re
 import uuid
 from datetime import UTC, datetime
 
@@ -19,6 +20,7 @@ from app.services import (
     generators,
     probes,
     redaction,
+    solution_variants,
     submission_diff,
     submission_service,
     task_runner,
@@ -751,6 +753,40 @@ async def trigger_tier1(
     return {"status": "started"}
 
 
+_SOLUTION_VALUE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,40}$")
+
+
+@router.post("/submissions/{submission_id}/solution-variants", status_code=202)
+async def trigger_solution_variants(
+    submission_id: str, values: str, runs: int = 3, db: Session = Depends(get_db)
+) -> dict[str, str]:
+    """Runs each correct alternative solution as its own Oracle trial with `--ae SOLUTION=<value>`, `runs` times
+    each (1 to 5, default 3), one at a time. `values` is a comma-separated list of the SOLUTION values the reviewer
+    knows are correct (at most 10). Replaces an earlier request. Needs Build and the default Oracle already passing.
+    Not Gate 1 runs. Advisory; no LLM."""
+    vals = list(dict.fromkeys(v.strip() for v in values.split(",") if v.strip()))
+    if not vals or len(vals) > 10:
+        raise HTTPException(status_code=400, detail="give between 1 and 10 SOLUTION values, comma-separated")
+    bad = [v for v in vals if not _SOLUTION_VALUE_RE.match(v)]
+    if bad:
+        raise HTTPException(status_code=400, detail=f"a SOLUTION value may use letters, digits, _ . - only (max 40): {bad[0]!r}")
+    if not 1 <= runs <= 5:
+        raise HTTPException(status_code=400, detail="runs must be between 1 and 5")
+    _require_built_submission(submission_id, db)
+    if db.query(Run).filter_by(submission_id=submission_id, kind="oracle", reward=1).first() is None:
+        raise HTTPException(status_code=400, detail="run the Oracle and get a pass first")
+    db.query(Run).filter(
+        Run.submission_id == submission_id, Run.kind.startswith(solution_variants.PREFIX, autoescape=True)
+    ).delete(synchronize_session=False)
+    db.flush()
+    for v in vals:
+        for i in range(runs):
+            db.add(Run(submission_id=submission_id, kind=solution_variants.PREFIX + v, run_index=i, status="pending"))
+    db.commit()
+    await task_queue.submit(f"{submission_id}:solution_variants", task_runner.run_solution_variants(submission_id))
+    return {"status": "started"}
+
+
 @router.post("/submissions/{submission_id}/tiers", status_code=202)
 async def trigger_tier_cycle(
     submission_id: str,
@@ -1411,6 +1447,12 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
             "counts": submission_service.attempt_counts(schema.tier2.logs),
             "web_use": submission_service.attempt_web_use(schema.tier2.logs),
             "rulings": schema.tier2_decisions,
+        },
+        # Correct alternative solutions, each run as its own Oracle trial (services/solution_variants.py).
+        "solution_variants": {
+            "status": schema.solution_variants.status,
+            "not_run": schema.solution_variants.status == "not-run",
+            "variants": [v.model_dump() for v in schema.solution_variants.variants],
         },
         # Tier 0, 1 and 2 repeated on the patched task until a round needs no patch (every round kept).
         "tier_cycle": {

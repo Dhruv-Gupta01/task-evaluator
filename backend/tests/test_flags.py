@@ -84,8 +84,8 @@ def fired(root: Path, rule: str, **ctx) -> list[fr.Finding]:
     return fr.STATIC_RULES[rule](fr.load_context(root, **ctx)).findings
 
 
-def test_catalogue_has_37_rules_in_11_checks():
-    assert list(fr.RULES) == [f"15.{i}" for i in range(1, 38)]
+def test_catalogue_has_38_rules_in_11_checks():
+    assert list(fr.RULES) == [f"15.{i}" for i in range(1, 39)]  # 15.38 (alternative solution rejected) came after the first 37
     assert len({r.check for r in fr.RULES.values()}) == 11
     for rule_id in fr.STATIC_RULES:
         assert fr.RULES[rule_id].method == "static" and fr.RULES[rule_id].batch in (2, 3)

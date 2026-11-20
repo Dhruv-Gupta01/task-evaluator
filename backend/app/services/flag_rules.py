@@ -72,6 +72,7 @@ RULES: dict[str, Rule] = {
         Rule("15.35", "CK-B", "Verifier reads an agent artifact without a size bound", ADVISORY, "static", 2),
         Rule("15.36", "CK-H", "A cheap model passed", ADVISORY, "result", 6),
         Rule("15.37", "CK-H", "A null-ladder rung passed", BLOCKER, "probe", 4),
+        Rule("15.38", "CK-D", "A correct alternative solution is rejected", BLOCKER, "result", 6),
     )
 }
 

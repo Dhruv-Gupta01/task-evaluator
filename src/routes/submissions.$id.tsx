@@ -112,6 +112,7 @@ function SubmissionDetail() {
         isActive(d.image_inventory.status) ||
         isActive(d.fresh_build.status) ||
         isActive(d.regrade?.status ?? "not-run") ||
+        isActive(d.solution_variants?.status ?? "not-run") ||
         (d.oracle.stress_runs ?? []).some((r) => r.reward == null && !r.logs) ||
         d.build.status === "pending";
       return any ? 2500 : false;
@@ -161,11 +162,21 @@ function SubmissionDetail() {
   // Every trigger appends n more runs to whatever's already there (Gate 1
   // needs 3 consecutive reward=1 runs), so default to 3.
   const [oracleN, setOracleN] = useState(3);
+  const [variantValues, setVariantValues] = useState("");
+  const [variantRuns, setVariantRuns] = useState("3");
   const [probeCovered, setProbeCovered] = useState(false);
   const mOracle = useMutation({
     mutationFn: () => api.oracle(id, oracleN),
     onSuccess: () => {
       toast.success(`${oracleN} oracle run(s) started`);
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const mSolutionVariants = useMutation({
+    mutationFn: () => api.solutionVariants(id, variantValues, Number(variantRuns)),
+    onSuccess: () => {
+      toast.success("Solution variants started, one run at a time");
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -757,6 +768,80 @@ function SubmissionDetail() {
                 ))}
               </ul>
             </div>
+          )}
+        </StageCard>
+
+        {/* Solution variants */}
+        <StageCard
+          title="Solution variants"
+          description="Correct alternative solutions. If solve.sh picks one of several solutions from $SOLUTION, list the values you know are correct. Each runs as its own Oracle trial with SOLUTION=<value>, several times, and should score 1 every time: that shows the grader accepts the real range of correct answers. An oracle is a correct solution, so list only correct ones; Nop and the Weak-answer probe cover wrong answers. Not part of the Oracle gate. Needs the Oracle to pass first."
+          status={data.solution_variants?.status ?? "not-run"}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              className="w-48"
+              placeholder="Correct values, e.g. 1,2"
+              value={variantValues}
+              onChange={(e) => setVariantValues(e.target.value)}
+            />
+            <label className="text-sm text-muted-foreground">Runs each</label>
+            <Select value={variantRuns} onValueChange={setVariantRuns}>
+              <SelectTrigger className="w-16">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {["1", "2", "3", "4", "5"].map((v) => (
+                  <SelectItem key={v} value={v}>
+                    {v}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <RunButton
+              label="Run solution variants"
+              runningLabel="Running…"
+              onClick={() => mSolutionVariants.mutate()}
+              running={isActive(data.solution_variants?.status ?? "not-run")}
+              pending={mSolutionVariants.isPending}
+              disabled={!buildReady || data.oracle.status !== "passed" || !variantValues.trim()}
+              disabledReason="Build, pass the Oracle, and list at least one value"
+            />
+          </div>
+          {(data.solution_variants?.variants ?? []).length > 0 && (
+            <table className="w-full text-left text-xs">
+              <thead className="text-muted-foreground">
+                <tr>
+                  <th className="py-1 pr-2">SOLUTION</th>
+                  <th className="py-1 pr-2">Result</th>
+                  <th className="py-1">Rewards per run</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(data.solution_variants?.variants ?? []).map((v) => (
+                  <tr key={v.value} className="border-t border-border align-top">
+                    <td className="py-1 pr-2 font-mono">{v.value}</td>
+                    <td className="py-1 pr-2">
+                      {v.status === "passed"
+                        ? "all runs scored 1"
+                        : v.status === "failed"
+                          ? "rejected, or flaky: a person has to look"
+                          : v.status}
+                    </td>
+                    <td className="py-1 font-mono">
+                      {v.runs
+                        .map((r) =>
+                          r.status === "pending" || r.status === "running"
+                            ? "…"
+                            : r.reward === null
+                              ? "-"
+                              : String(r.reward),
+                        )
+                        .join(", ")}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )}
         </StageCard>
 

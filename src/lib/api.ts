@@ -153,6 +153,23 @@ export interface AgentTrialsResult {
 
 // Oracle can be run N times, always appended to the ones already there (Gate
 // 1 needs 3 *consecutive* 1.0 runs). "passed" only once every run passed.
+// Correct alternative solutions, each run as its own Oracle trial with --ae SOLUTION=<value>
+// (backend services/solution_variants.py). "passed" = every run of every listed solution scored 1.
+export interface SolutionVariantRun {
+  index: number;
+  status: StageStatus;
+  reward: number | null;
+  raw_reward?: number | null;
+}
+export interface SolutionVariant {
+  value: string;
+  status: StageStatus;
+  runs: SolutionVariantRun[];
+}
+export interface SolutionVariantsResult {
+  status: StageStatus;
+  variants: SolutionVariant[];
+}
 export interface OracleRunsResult {
   status: StageStatus;
   n: number;
@@ -1004,6 +1021,7 @@ export interface Submission {
   tier2: Tier2Result;
   tier2_decisions?: Record<string, Tier1Ruling>;
   tier_cycle?: TierCycleResult;
+  solution_variants?: SolutionVariantsResult;
   // A reviewer's genuine-or-fake call per trial, key "<stage>:<index>" (oracle | nop | agent).
   trial_verdicts?: Record<string, TrialVerdictRuling>;
   regrade?: RegradeResult;
@@ -1056,6 +1074,12 @@ export const api = {
     fetch(`${API_BASE_URL}/submissions/${id}/oracle?n=${n}${stress ? "&stress=true" : ""}`, {
       method: "POST",
     }).then(handle<unknown>),
+  // Each listed SOLUTION value is a correct alternative solution; each runs `runs` times as an Oracle trial.
+  solutionVariants: (id: string, values: string, runs: number) =>
+    fetch(
+      `${API_BASE_URL}/submissions/${id}/solution-variants?values=${encodeURIComponent(values)}&runs=${runs}`,
+      { method: "POST" },
+    ).then(handle<unknown>),
   nop: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/nop`, { method: "POST" }).then(handle<unknown>),
   // reasoningEffort / agent undefined = the server's defaults

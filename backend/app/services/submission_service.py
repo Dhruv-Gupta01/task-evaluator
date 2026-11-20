@@ -5,7 +5,7 @@ from collections import Counter
 
 from app.config import get_settings
 from app.models import LlmSpend, Run, Submission
-from app.services import image_inventory, network_policy, verifier_report, versions, web_use
+from app.services import image_inventory, network_policy, solution_variants, verifier_report, versions, web_use
 from app.services.harbor_runner import CODEX_BAKE_NOTE_MARKER
 from app.services.task_config import TaskConfig
 from app.services.tier2 import memory as tier2_memory
@@ -17,6 +17,9 @@ from app.schemas import (
     Tier0Result,
     Tier1Result,
     Tier2Result,
+    SolutionVariant,
+    SolutionVariantRun,
+    SolutionVariantsResult,
     TierCycleResult,
     BuildResult,
     ChecksumInfo,
@@ -494,6 +497,46 @@ def _tier1_result(run: Run | None) -> Tier1Result:
     return Tier1Result(status=run.status, logs=run.logs)  # type: ignore[arg-type]
 
 
+def _solution_variants_result(submission: Submission) -> SolutionVariantsResult:
+    groups = solution_variants.grouped(submission.runs)
+    if not groups:
+        return SolutionVariantsResult(status="not-run")
+    variants = [
+        SolutionVariant(
+            value=value, status=solution_variants.group_status(rs),  # type: ignore[arg-type]
+            runs=[SolutionVariantRun(index=r.run_index, status=r.status, reward=r.reward, raw_reward=r.raw_reward) for r in rs],  # type: ignore[arg-type]
+        )
+        for value, rs in groups.items()
+    ]
+    return SolutionVariantsResult(
+        status=solution_variants.group_status([r for rs in groups.values() for r in rs]),  # type: ignore[arg-type]
+        variants=variants,
+    )
+
+
+def solution_variant_lines(schema) -> list[str]:
+    """The evidence summary's section on correct alternative solutions; empty when none were run."""
+    if schema.solution_variants.status == "not-run":
+        return []
+    n = max((len(v.runs) for v in schema.solution_variants.variants), default=0)
+    lines = ["", f"## Solution variants (correct alternative solutions, {n} run(s) each)"]
+    for v in schema.solution_variants.variants:
+        done = [r for r in v.runs if r.status not in ("pending", "running")]
+        ok = sum(1 for r in done if r.reward == 1)
+        rewards = ", ".join("-" if r.reward is None else str(r.reward) for r in done)
+        if len(done) < len(v.runs):
+            lines.append(f"- {solution_variants.ENV}={v.value}: {len(done)} of {len(v.runs)} run(s) finished so far ({ok} scored 1)")
+        elif ok == len(done) and done:
+            lines.append(f"- {solution_variants.ENV}={v.value}: all {ok} run(s) scored 1")
+        else:
+            lines.append(
+                f"- {solution_variants.ENV}={v.value}: {ok} of {len(done)} run(s) scored 1 (rewards {rewards}). The grader rejected "
+                "a solution the author says is correct, or it is flaky; a person has to look."
+            )
+    lines.append("- An oracle is a correct solution, so these are only correct alternatives; wrong answers are covered by Nop and the Weak-answer probe.")
+    return lines
+
+
 def _tier_cycle_result(run: Run | None) -> TierCycleResult:
     if run is None:
         return TierCycleResult(status="not-run", logs=None)
@@ -590,6 +633,7 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         tier2=_tier2_result(_get_run(submission, "tier2_loop")),
         tier2_decisions=_reviewer_decisions(_get_run(submission, "tier2_decision")),
         tier_cycle=_tier_cycle_result(_get_run(submission, "tier_cycle")),
+        solution_variants=_solution_variants_result(submission),
         trial_verdicts=_reviewer_decisions(_get_run(submission, "trial_verdict")),
         regrade=_regrade_result(_get_run(submission, "regrade")),
         image_inventory=_image_inventory_result(_get_run(submission, "image_inventory")),
@@ -1190,6 +1234,7 @@ def build_summary_markdown(
         f"- Fresh build (no cache, Oracle): {_fmt_status(schema.fresh_build.status)}",
         f"- Failure Analysis: {_fmt_status(schema.failure_analysis.status)}",
         f"- Review Report: {_fmt_status(schema.review_report.status)}",
+        *solution_variant_lines(schema),
         *cheat_evidence_lines(schema),
         "",
         "## Cost",

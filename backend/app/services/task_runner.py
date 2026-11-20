@@ -29,6 +29,7 @@ from app.services import (
     probes,
     review_report,
     static_checks,
+    solution_variants,
     sufficiency_judge,
     tb_static_checks,
     validation_service,
@@ -908,6 +909,100 @@ def _oracle_timeout_sec(config: TaskConfig) -> float:
         + config.verifier.timeout_sec
         + _HARBOR_TIMEOUT_BUFFER_SEC
     )
+
+
+SOLUTION_VARIANT_PREFIX = solution_variants.PREFIX
+SOLUTION_ENV = solution_variants.ENV
+
+
+def solution_variant_values(db, submission_id: str) -> list[str]:
+    """The `SOLUTION` values the reviewer listed on the Solution variants card (latest request)."""
+    rows = (
+        db.query(Run.kind)
+        .filter(Run.submission_id == submission_id, Run.kind.startswith(SOLUTION_VARIANT_PREFIX, autoescape=True))
+        .distinct()
+        .all()
+    )
+    return sorted(kind[len(SOLUTION_VARIANT_PREFIX):] for (kind,) in rows)
+
+
+async def run_solution_variants(submission_id: str) -> None:
+    """Each correct alternative solution, run as its own Oracle trial: `harbor run -a oracle --ae SOLUTION=<value>`.
+    The router pre-created the pending rows (kind "solution_variant:<value>", one per repeat); they run one at a
+    time. They are not Gate 1 runs and not part of the task-version comparison (the task files do not change,
+    only an environment variable does). A task that declares SOLUTION in its own [solution.env] would override
+    ours, so that key is dropped from the temporary task copy. Advisory; no LLM."""
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+        runs = (
+            db.query(Run)
+            .filter(Run.submission_id == submission_id, Run.status == "pending",
+                    Run.kind.startswith(SOLUTION_VARIANT_PREFIX, autoescape=True))
+            .order_by(Run.kind, Run.run_index)
+            .all()
+        )
+        config = _get_task_config(submission)
+        timeout_sec = _oracle_timeout_sec(config)
+        jobs_dir = settings.storage_dir / "submissions" / submission_id / "runs" / "solution_variants" / "harbor"
+        for run in runs:
+            value = run.kind[len(SOLUTION_VARIANT_PREFIX):]
+            run.status, run.reward, run.raw_reward, run.verifier_json, run.logs = "running", None, None, None, None
+            run.started_at = datetime.now(UTC)
+            db.commit()
+            outcome = await harbor_runner.run_single(
+                Path(submission.extracted_path), "oracle", jobs_dir, f"solution-{uuid.uuid4().hex[:8]}", timeout_sec,
+                agent_env={SOLUTION_ENV: value}, drop_solution_env=(SOLUTION_ENV,),
+                extra_note=f"(solution variant: {SOLUTION_ENV}={value}, run {run.run_index + 1})",
+            )
+            _apply_trial_outcome(run, outcome)
+            run.logs = outcome.logs
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+    except Exception:
+        stuck = (
+            db.query(Run)
+            .filter(Run.submission_id == submission_id, Run.status.in_(_STUCK_STATUSES),
+                    Run.kind.startswith(SOLUTION_VARIANT_PREFIX, autoescape=True))
+            .all()
+        )
+        for r in stuck:
+            r.status, r.reward, r.logs, r.finished_at = "failed", None, traceback.format_exc(), datetime.now(UTC)
+        db.commit()
+    finally:
+        db.close()
+
+
+async def _gate_candidate(candidate: Path, gate_dir: Path, config: TaskConfig, variants: list[str]) -> tuple[bool, str]:
+    """Tier 1's patch check: the default Oracle must still score 1 on the patched task, and so must every correct
+    alternative solution the reviewer listed (a patch that breaks another valid solution is too strict)."""
+    outcome = await harbor_runner.run_single(
+        candidate, "oracle", gate_dir, f"gate-{uuid.uuid4().hex[:8]}", _oracle_timeout_sec(config)
+    )
+    shutil.rmtree(gate_dir, ignore_errors=True)
+    if outcome.reward is None:
+        return False, "the Oracle produced no reward on the patched task"
+    if outcome.reward < 1.0:
+        return False, f"Oracle reward {outcome.reward:g} on the patched task. {_failure_excerpt(outcome.logs)}"
+    message = f"Oracle reward {outcome.reward:g} on the patched task"
+    for value in variants:
+        alt = await harbor_runner.run_single(
+            candidate, "oracle", gate_dir, f"gate-{value}-{uuid.uuid4().hex[:8]}", _oracle_timeout_sec(config),
+            agent_env={SOLUTION_ENV: value}, drop_solution_env=(SOLUTION_ENV,),
+        )
+        shutil.rmtree(gate_dir, ignore_errors=True)
+        if alt.reward is None:
+            return False, f"the Oracle with {SOLUTION_ENV}={value} produced no reward on the patched task"
+        if alt.reward < 1.0:
+            return False, (
+                f"the Oracle scores 1 on the patched task, but the correct alternative solution {SOLUTION_ENV}={value} "
+                f"scores {alt.reward:g}, so the patch rejects a valid solution. {_failure_excerpt(alt.logs)}"
+            )
+    if variants:
+        message += f" and {len(variants)} correct alternative solution(s) ({', '.join(variants)}) also score 1"
+    return True, message
 
 
 async def _run_variant(task_root: Path, base: Path, i: int, variant: dict, mode: str, timeout_sec: float) -> dict:
@@ -2846,15 +2941,7 @@ async def run_tier1_stage(
             return {**(proposal or {}), "cost_usd": llm_cost(calls)}
 
         async def gate(candidate: Path) -> tuple[bool, str]:
-            outcome = await harbor_runner.run_single(
-                candidate, "oracle", base / "gate", f"gate-{uuid.uuid4().hex[:8]}", _oracle_timeout_sec(config)
-            )
-            shutil.rmtree(base / "gate", ignore_errors=True)
-            if outcome.reward is None:
-                return False, "the Oracle produced no reward on the patched task"
-            if outcome.reward >= 1.0:
-                return True, f"Oracle reward {outcome.reward:g} on the patched task"
-            return False, f"Oracle reward {outcome.reward:g} on the patched task. {_failure_excerpt(outcome.logs)}"
+            return await _gate_candidate(candidate, base / "gate", config, solution_variant_values(db, submission_id))
 
         def progress(state: dict) -> None:
             db.refresh(run)

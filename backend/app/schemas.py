@@ -125,6 +125,26 @@ class AgentTrialsResult(BaseModel):
     grader_errors: int = 0
 
 
+class SolutionVariantRun(BaseModel):
+    index: int
+    status: StageStatus
+    reward: int | None = None  # 0 | 1 | null; 1 only at a Harbor reward of 1.0
+    raw_reward: float | None = None
+
+
+class SolutionVariant(BaseModel):
+    value: str  # the SOLUTION value solve.sh reads
+    status: StageStatus  # passed = every run scored 1
+    runs: list[SolutionVariantRun] = []
+
+
+class SolutionVariantsResult(BaseModel):
+    """Correct alternative solutions, each run as its own Oracle trial (services/solution_variants.py).
+    "passed" = every run of every listed solution scored 1. Advisory; never a gate."""
+    status: StageStatus
+    variants: list[SolutionVariant] = []
+
+
 class OracleRunsResult(BaseModel):
     """Oracle can be run N times, always appended to the ones already there
     (Gate 1 needs 3 *consecutive* 1.0 runs, so history matters -- unlike Nop,
@@ -437,6 +457,7 @@ class SubmissionSchema(BaseModel):
     tier2: Tier2Result
     tier2_decisions: dict[str, dict] = {}
     tier_cycle: TierCycleResult = TierCycleResult(status="not-run", logs=None)
+    solution_variants: SolutionVariantsResult = SolutionVariantsResult(status="not-run")
     trial_verdicts: dict[str, dict] = {}  # a reviewer's genuine-or-fake call per trial, key "<stage>:<index>"
     regrade: RegradeResult
     image_inventory: ImageInventoryResult

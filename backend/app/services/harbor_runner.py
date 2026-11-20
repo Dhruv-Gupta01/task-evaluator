@@ -374,6 +374,7 @@ def _prepare_task(
     cheat_instruction_text: str | None = None,
     fresh_build: bool = False,
     agent_timeout_override: int | None = None,
+    drop_solution_env: tuple[str, ...] = (),
 ) -> tuple[Path, str | None]:
     """Returns (task path for Harbor, notes for the logs). When
     HARBOR_NETWORK_MODE or AGENT_TIMEOUT_SEC differ from the task file, or
@@ -404,6 +405,13 @@ def _prepare_task(
             f"{'this stage' if agent_timeout_override else 'the platform setting AGENT_TIMEOUT_SEC'}; "
             f"the task file had {agent_section.get('timeout_sec', 'no timeout')})"
         )
+    declared_solution_env = ((original.get("solution") or {}).get("env")) or {}
+    gone = tuple(k for k in drop_solution_env if k in declared_solution_env)
+    if gone:
+        # Harbor lets the task's [solution.env] win over `--ae`, so a key the platform sets itself (SOLUTION, for
+        # the solution-variants stage) has to be dropped from the copy or the run would ignore it.
+        edits["[solution.env]"] = (gone, "")
+        notes.append(f"(solution.env {', '.join(gone)} dropped for this run so the platform's value applies)")
     bake = (
         agent == "codex"
         and settings.codex_bake_into_image
@@ -426,6 +434,8 @@ def _prepare_task(
         raise ValueError("could not rewrite task.toml network policy")
     if "[agent]" in edits and new_agent.get("timeout_sec") != timeout:
         raise ValueError("could not rewrite task.toml agent timeout")
+    if gone and any(k in (((new.get("solution") or {}).get("env")) or {}) for k in gone):
+        raise ValueError("could not drop the task's own solution.env setting")
     if bake:
         version = settings.codex_version or "latest"
         if _bake_codex_into_environment(work_dir / "environment", version):
@@ -934,6 +944,8 @@ async def run_job(
     extra_note: str = "",
     fresh_build: bool = False,
     agent_timeout_override: int | None = None,
+    agent_env: dict[str, str] | None = None,
+    drop_solution_env: tuple[str, ...] = (),
 ) -> HarborJobResult:
     """Run `harbor run` with `n_attempts` trials of `agent` against the task
     at `task_root`. If `cost_cap_usd` is set, the job is stopped once the cost
@@ -948,6 +960,7 @@ async def run_job(
         cheat_instruction_text=cheat_instruction_text,
         fresh_build=fresh_build,
         agent_timeout_override=agent_timeout_override,
+        drop_solution_env=drop_solution_env,
     )
     job_dir = jobs_dir / job_name
     hosts_overlay = _write_build_hosts_overlay(jobs_dir.parent / f"{jobs_dir.name}-build-hosts.yaml")
@@ -984,6 +997,8 @@ async def run_job(
         cmd += ["--model", model]
     for key, value in (agent_kwargs or {}).items():
         cmd += ["--agent-kwarg", f"{key}={value}"]
+    for key, value in (agent_env or {}).items():
+        cmd += ["--ae", f"{key}={value}"]  # an environment variable for the agent (the oracle's solve.sh reads it)
 
     # C9: every trial's logs start with exactly what ran it, so a result can
     # be traced back to the precise command/config/harness version rather
@@ -1169,10 +1184,13 @@ async def run_single(
     timeout_sec: float,
     extra_note: str = "",
     fresh_build: bool = False,
+    agent_env: dict[str, str] | None = None,
+    drop_solution_env: tuple[str, ...] = (),
 ) -> TrialOutcome:
-    """One trial of a model-free agent (oracle/nop)."""
+    """One trial of a model-free agent (oracle/nop). `agent_env` becomes `--ae KEY=VALUE`."""
     result = await run_job(
-        task_root, agent, jobs_dir, job_name, timeout_sec, extra_note=extra_note, fresh_build=fresh_build
+        task_root, agent, jobs_dir, job_name, timeout_sec, extra_note=extra_note, fresh_build=fresh_build,
+        agent_env=agent_env, drop_solution_env=drop_solution_env,
     )
     if result.trials:
         return result.trials[0]

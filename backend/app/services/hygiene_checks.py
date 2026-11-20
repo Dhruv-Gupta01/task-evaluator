@@ -320,6 +320,25 @@ def _packages(dockerfile: Path) -> set[str]:
     return pkgs
 
 
+_SOLUTION_VAR = re.compile(r"\$\{?SOLUTION\b")
+
+
+def check_solution_variants_hint(task_root: Path, report) -> None:
+    """A solve.sh that reads $SOLUTION usually picks one of several correct solutions (the Harbor convention)."""
+    solution = task_root / "solution"
+    if not solution.is_dir():
+        return
+    for path, text in _text_files(solution):
+        if _SOLUTION_VAR.search(text):
+            report.add(
+                "solution_variants",
+                "info",
+                f"{path.relative_to(task_root).as_posix()} reads $SOLUTION, so this task may ship several correct solutions. "
+                "List the correct SOLUTION values on the Solution variants card to run each one and see whether the grader accepts them all.",
+            )
+            return
+
+
 def check_tool_parity(task_root: Path, report) -> None:
     verifier = task_root / "tests" / "Dockerfile"
     if not verifier.is_file():
