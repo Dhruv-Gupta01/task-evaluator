@@ -12,7 +12,7 @@ from pathlib import Path
 from app.services.hygiene_checks import _own_files, run_hygiene_checks
 from app.services.agent_user_checks import check_agent_user
 from app.services.pinning_checks import check_hf_revisions, check_licences_and_size, check_toolchain_pinning
-from app.services.reward_kit_checks import check_harbor_lint, check_reward_kit
+from app.services.reward_kit_checks import check_harbor_lint, check_reward_kit, uses_reward_kit
 from app.services.platform_checks import check_bundled_binaries, check_resources
 from app.services.reproducibility_checks import run_reproducibility_checks
 from app.services.verifier_isolation import run_isolation_checks
@@ -123,7 +123,7 @@ _TRAILING_EXIT_RE = re.compile(r"\nexit\s+\d+\s*$")
 _REWARD_WRITE_RE = re.compile(r"^\s*(?:echo|printf)\b(?P<arg>[^>\n]*)>>?\s*\S*reward\.txt", re.M)
 
 
-def check_test_sh(test_sh_path: Path, report: StaticCheckReport) -> None:
+def check_test_sh(test_sh_path: Path, report: StaticCheckReport, reward_kit: bool = False) -> None:
     if not test_sh_path.is_file():
         report.add("test_sh_present", "fail", "tests/test.sh is missing.")
         return
@@ -136,13 +136,19 @@ def check_test_sh(test_sh_path: Path, report: StaticCheckReport) -> None:
         ("test_sh_ctrf_flag", _CTRF_RE, "--ctrf flag present"),
         ("test_sh_rc_capture", _RC_CAPTURE_RE, "rc=$? capture present"),
     ]
+    rk_notes = {
+        "test_sh_ctrf_flag": "not applicable: the grader is Reward Kit, not pytest; its per-check results are in reward-details.json",
+        "test_sh_rc_capture": "not applicable: the grader is Reward Kit, which writes the reward itself, so there is no pytest exit code to capture",
+    }
     for name, pattern, ok_message in checks:
         if pattern.search(text):
             report.add(name, "info", ok_message + ".")
+        elif reward_kit and name in rk_notes:
+            report.add(name, "info", rk_notes[name] + ".")
         else:
             report.add(name, "warn", ok_message.replace("present", "missing") + ".")
 
-    _check_reward_values(text, report)
+    _check_reward_values(text, report, reward_kit)
 
     if _TRAILING_EXIT_RE.search(text.rstrip() + "\n"):
         report.add(
@@ -155,11 +161,14 @@ def check_test_sh(test_sh_path: Path, report: StaticCheckReport) -> None:
         report.add("test_sh_no_trailing_exit", "info", "No unconditional trailing exit code.")
 
 
-def _check_reward_values(text: str, report: StaticCheckReport) -> None:
+def _check_reward_values(text: str, report: StaticCheckReport, reward_kit: bool = False) -> None:
     """Terminal-Bench needs reward.txt to hold exactly 0 or 1. A literal like
     0.75 is a sure miss; a computed value cannot be judged by reading the
     script, so it is only mentioned."""
     args = [m.group("arg").strip().strip("\"'") for m in _REWARD_WRITE_RE.finditer(text)]
+    if not args and reward_kit:
+        report.add("test_sh_reward_binary", "info", "test.sh writes no reward.txt itself: Reward Kit writes the reward.")
+        return
     if not args:
         report.add(
             "test_sh_reward_binary",
@@ -416,7 +425,7 @@ def check_rubric(task_root: Path, report: StaticCheckReport) -> None:
 def run_static_checks(task_root: Path) -> StaticCheckReport:
     report = StaticCheckReport()
     check_instruction(task_root / "instruction.md", report)
-    check_test_sh(task_root / "tests" / "test.sh", report)
+    check_test_sh(task_root / "tests" / "test.sh", report, reward_kit=uses_reward_kit(task_root))
     check_python_reward(task_root, report)
     check_dockerfile(task_root / "environment" / "Dockerfile", report)
     check_hardware_flags(task_root, report)

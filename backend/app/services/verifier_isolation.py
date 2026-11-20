@@ -276,6 +276,8 @@ def _command_runs_agent(words: list[str], cwd: str | None, dirs: tuple[str, ...]
     if head in _INTERPRETERS or words[0] in _INTERPRETERS:
         if "-c" in words[1:]:
             return False  # inline code; what it runs cannot be told from here
+        if head.startswith("python") and "-m" in words[1:] and any(re.fullmatch(r"-[A-Za-z]*[IP][A-Za-z]*", w) for w in words[1:]):
+            return False  # python -I / -P -m <module>: no import from the current directory, so the module is not agent code
         return bool(rest) and _is_agent_path(rest[0], cwd, dirs)
     if head in ("pip", "pip3") or (head == "uv" and rest[:2] == ["pip", "install"]):
         args = words[1:]
