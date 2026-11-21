@@ -131,6 +131,22 @@ Files: backend/storage/submissions/{id}/ (zip, extracted task, logs, Harbor outp
 - **Harbor 0.26.0** is the tested version everywhere; `GET /versions` warns about any other.
 - **Tier logs and cost**: tier logs record the reasoning effort actually sent (none for Haiku 4.5),
   and Haiku 4.5 spend is priced and counted against the budget.
+- **Failure Analysis per trial**: `harbor analyze` now runs once per trial folder (two at a time),
+  each with its own limit (`ANALYZE_TRIAL_TIMEOUT_SEC`, default 900). One hung evaluator used to run
+  the whole job to `ANALYZE_TIMEOUT_SEC` and throw away the trials that had finished (seen on
+  2026-11-20: 2 of 3 done in 2.5 minutes, the third hung for an hour, no results kept).
+- **Task name from `[task] name`**: after Validate & Build, a submission is named by the `[task] name`
+  in `task.toml` (without `terminal-bench/`), not by the zip's file name. Versioning, the
+  earlier-upload comparison, regrade and Tier 0 comparison match uploads by that name, so renaming a
+  zip no longer hides the earlier upload.
+- **Where the grader runs agent code**: Static Checks now see compilers and provers (coqc, lean,
+  g++), commands built from named lists and constants, helper functions around `subprocess`, and a
+  compiled artifact that is run later, and they recognise a Reward Kit `Worker(...)` as the safe
+  pattern (info `verifier_runs_agent_code_in_worker`). Back-tested on the pre-Worker versions of 33
+  upstream tasks: agent code seen in 31 (was 25), with no new warnings on the 33 tasks without a
+  Worker. It is a flag for a person, not a verdict on "a Worker is needed": it still misses a grader
+  that drives the agent's web app with a browser, and code run through a file copied into a scratch
+  project. A Worker is never a gate here; the ruling goes through Flag 15.23.
 
 ### Terminal-Bench 5.0 additions (branch `harbor-5.0`)
 
