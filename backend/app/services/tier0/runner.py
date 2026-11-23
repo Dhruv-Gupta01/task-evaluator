@@ -18,6 +18,7 @@ A mutant's reward is never counted as a cheat. Only step 1 can produce `exploite
 """
 from __future__ import annotations
 
+import dataclasses
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -38,8 +39,73 @@ class Options:
     repeats: int = 1
 
 
+MAX_DROPPED_ARTIFACTS = 8
+
+
+def expand_per_artifact(probes: list[Probe], spec) -> list[Probe]:
+    """Turn each per-artifact template (G23) into one probe per declared artifact, so each run removes exactly
+    one. A task with fewer than two artifacts gets none (G0 already covers "nothing there"); at most
+    MAX_DROPPED_ARTIFACTS, the first ones in the task's own order."""
+    out: list[Probe] = []
+    for probe in probes:
+        if not probe.per_artifact:
+            out.append(probe)
+            continue
+        artifacts = list(spec.artifacts)
+        if len(artifacts) < 2:
+            continue
+        for i, artifact in enumerate(artifacts[:MAX_DROPPED_ARTIFACTS]):
+            out.append(dataclasses.replace(
+                probe, pid=f"{probe.pid}-{i}", per_artifact=False, drops_artifact=artifact,
+                title=f"{probe.title}: {artifact}",
+                agent_script=f"\nDROP={i}\n" + probe.agent_script,
+            ))
+    return out
+
+
+def _judge_env_sweep(run: docker_runner.Run, notes: list[str]) -> tuple[str, list[str]]:
+    """The reference output graded under several settings. The first two are identical (no setting changed),
+    so a difference between them is flakiness, not the environment."""
+    runs = run.env_runs
+    if len(runs) < 2:
+        return "inconclusive", notes + ["the environment sweep did not run"]
+    base, again = runs[0], runs[1]
+    if base["reward"] != again["reward"]:
+        return "flaky", notes + [
+            f"no setting changed between '{base['label']}' and '{again['label']}', yet the reward went "
+            f"from {base['reward']} to {again['reward']}: the grader is not stable on identical input"
+        ]
+    differing = [r for r in runs[2:] if r["reward"] != base["reward"]]
+    if differing:
+        return "env_sensitive", notes + [
+            f"{r['label']}: reward {r['reward']} where the baseline gave {base['reward']} (differs)"
+            for r in differing
+        ] + ["the same correct output is graded differently depending on the environment"]
+    if base["reward"] == 1.0:
+        return "valid_accepted", notes + [
+            f"the reference output scored 1 under all {len(runs)} settings ({', '.join(r['label'] for r in runs)})"
+        ]
+    return "inconclusive", notes + [
+        f"the reference output scored {base['reward']} under every setting, so there is nothing to compare; "
+        "see control G13"
+    ]
+
+
 def judge(probe: Probe, run: docker_runner.Run, spec: TaskSpec) -> tuple[str, list[str]]:
     notes = list(run.notes)
+
+    if probe.env_sweep:
+        return _judge_env_sweep(run, notes)
+
+    if probe.drops_artifact and run.reward == 1.0:
+        if probe.check:  # the reference solution must have produced something to remove
+            override, extra = probe.check(run, spec)
+            if override:
+                return override, notes + extra
+        return "artifact_not_checked", notes + [
+            f"reward 1 with {probe.drops_artifact} removed: the grader never looked at that file. "
+            "It may be optional; a person decides."
+        ]
 
     if probe.kind == "control":
         if run.reward == 1.0:
@@ -74,6 +140,16 @@ def judge(probe: Probe, run: docker_runner.Run, spec: TaskSpec) -> tuple[str, li
         if override:
             verdict = override
 
+    if (
+        probe.malformed and verdict == "held" and run.reward is None
+        and not run.timed_out and run.verifier_exit is not None
+    ):
+        # The verifier started, got a broken file and wrote no reward. Harbor then records a verifier
+        # error rather than reward 0, so the bad answer is never scored against the agent.
+        return "crashed_on_bad_input", notes + [
+            "no reward produced for a malformed artifact: the grader crashed instead of scoring 0 "
+            f"(verifier exit {run.verifier_exit}). Check how it handles an unparseable file."
+        ]
     if run.timed_out and verdict not in {"exploited"}:
         verdict = "inconclusive"
     if probe.expect_reward == 0.0 and run.reward is None and not run.timed_out:
@@ -104,11 +180,17 @@ def run_one(spec: TaskSpec, probe: Probe, opts: Options) -> record.ProbeResult:
         res.notes = ["only meaningful with sanitisation off"]
         return res
     try:
+        extra = {}
+        if probe.env_sweep:
+            from .probes.generic import ENV_SETTINGS
+            extra["verifier_envs"] = ENV_SETTINGS
         run = docker_runner.run_probe(
-            spec, probe, platform=opts.platform, sanitize=opts.sanitize, keep=opts.keep,
+            spec, probe, platform=opts.platform, sanitize=opts.sanitize, keep=opts.keep, **extra,
         )
         res.reward = run.reward
         res.diagnostics = dict(run.diagnostics)
+        if run.env_runs:
+            res.diagnostics["env_runs"] = [dict(r) for r in run.env_runs]
         if run.ctrf:
             res.diagnostics["_ctrf_failed"] = sorted(
                 k for k, v in run.ctrf.items() if v != "passed"
@@ -311,6 +393,7 @@ def run_suite(
     should_stop: Callable[[], bool] | None = None,
 ) -> list[record.ProbeResult]:
     results: list[record.ProbeResult] = []
+    probes = expand_per_artifact(probes, spec)
     # Controls first: if the task's own solution does not score 1 here, say so up front.
     probes = sorted(probes, key=lambda p: p.kind != "control")
     for i, probe in enumerate(probes, 1):

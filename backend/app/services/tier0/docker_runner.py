@@ -67,6 +67,8 @@ class Run:
     diagnostics: dict = field(default_factory=dict)
     ctrf: dict = field(default_factory=dict)   # unique test key -> status, from ctrf.json
     ctrf_records: list = field(default_factory=list)  # full per-test detail, in order
+    # One entry per environment setting an env_sweep probe graded the output under: {label, reward, ...}.
+    env_runs: list = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
 
@@ -317,8 +319,13 @@ def _ingest_ctrf(run: Run, tests: list) -> None:
         )
 
 
+def _exec_env_args(env: dict | None) -> list[str]:
+    """`docker exec -e K=V ...` arguments for the verifier process."""
+    return [a for k, v in (env or {}).items() for a in ("-e", f"{k}={v}")]
+
+
 def _verify(spec: TaskSpec, run: Run, staged_dir: Path, platform: str | None,
-            mutant, keep: bool, diagnostics: dict) -> None:
+            mutant, keep: bool, diagnostics: dict, verifier_env: dict | None = None) -> None:
     """Build the verifier, restore the staged artifacts into it, score the run.
 
     Shared by run_probe and run_replay: from the verifier's point of view a scripted
@@ -343,7 +350,7 @@ def _verify(spec: TaskSpec, run: Run, staged_dir: Path, platform: str | None,
                   f"{ver_cid}:{artifact}"], timeout=600, check=False)
 
         try:
-            ver = _run(["docker", "exec", ver_cid, "bash", "/tests/test.sh"],
+            ver = _run(["docker", "exec", *_exec_env_args(verifier_env), ver_cid, "bash", "/tests/test.sh"],
                        timeout=spec.verifier_timeout_sec, check=False)
             run.verifier_exit = ver.returncode
             run.verifier_stdout = (ver.stdout + ver.stderr)[-20000:]
@@ -405,10 +412,27 @@ def _verify(spec: TaskSpec, run: Run, staged_dir: Path, platform: str | None,
                 shutil.rmtree(staging, ignore_errors=True)
 
 
+def _verify_under_settings(spec: TaskSpec, run: Run, staged_dir: Path, platform: str | None,
+                           mutant, keep: bool, settings: list[tuple[str, dict]]) -> None:
+    """Grade the collected output once per environment setting, each in a fresh verifier container. The first
+    setting is the baseline: its result becomes the run's own, the rest are listed in `run.env_runs`."""
+    for i, (label, env) in enumerate(settings):
+        one = Run(artifacts=dict(run.artifacts))
+        _verify(spec, one, staged_dir, platform, mutant, keep, {}, verifier_env=env)
+        run.env_runs.append({"label": label, "reward": one.reward, "timed_out": one.timed_out,
+                             "verifier_exit": one.verifier_exit})
+        if i == 0:
+            for name in ("reward", "reward_raw", "verifier_exit", "verifier_stdout", "timed_out",
+                         "ctrf", "ctrf_records", "diagnostics"):
+                setattr(run, name, getattr(one, name))
+        run.notes += [f"[{label}] {n}" for n in one.notes if "ctrf" not in n]
+
+
 def run_probe(spec: TaskSpec, probe, platform: str | None = None,
               mutant: str | None = None, sanitize: bool = True,
               keep: bool = False, extra_artifacts: list[str] | None = None,
-              extra_inject: dict | None = None) -> Run:
+              extra_inject: dict | None = None,
+              verifier_envs: list[tuple[str, dict]] | None = None) -> Run:
     require_docker()
     run = Run()
     stamp = str(int(time.time() * 1000))[-9:]
@@ -471,8 +495,11 @@ def run_probe(spec: TaskSpec, probe, platform: str | None = None,
         _rm(env_cid); env_cid = None
 
         # ---- verify phase ----------------------------------------------------
-        _verify(spec, run, staged_dir, platform, mutant, keep,
-                getattr(probe, "DIAGNOSTICS", {}))
+        if verifier_envs:
+            _verify_under_settings(spec, run, staged_dir, platform, mutant, keep, verifier_envs)
+        else:
+            _verify(spec, run, staged_dir, platform, mutant, keep,
+                    getattr(probe, "DIAGNOSTICS", {}))
         return run
 
     finally:

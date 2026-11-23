@@ -92,7 +92,36 @@ def _oracle_ran(run, spec):
     n = int(line.split("RESULT oracle_artifacts:", 1)[1].split()[0] or 0)
     if n == 0:
         return "inconclusive", ["the reference solution produced no artifact, so there was nothing to mutilate"]
-    return None, [f"mutilated {n} artifact(s) produced by the reference solution"]
+    return None, [f"the reference solution produced {n} artifact(s)"]
+
+
+def _planted_check(run, spec):
+    """For probes that damage artifacts of a given type: a reward of 0 from a probe that found nothing of that
+    type to damage proves nothing (found live: G21 "held" on a task with no workbook or zip). The probe prints
+    `RESULT planted:N`; N = 0 makes the result inconclusive. A probe that never printed it is left alone."""
+    line = next((l for l in run.agent_stdout.splitlines() if "RESULT planted:" in l), None)
+    if line is None:
+        return None, []
+    n = int(line.split("RESULT planted:", 1)[1].split()[0] or 0)
+    if n == 0:
+        return "inconclusive", [
+            "nothing was changed: the task has no artifact of the type this probe damages, so a reward of "
+            f"{run.reward} says nothing about it"
+        ]
+    return None, [f"changed {n} artifact(s)"]
+
+
+def _all_of(*checks):
+    """Run several checks in order; the first override wins and every note is kept."""
+    def check(run, spec):
+        notes: list[str] = []
+        for one in checks:
+            override, extra = one(run, spec)
+            notes += extra
+            if override:
+                return override, notes
+        return None, notes
+    return check
 
 
 def _reward_file_present(run, spec):
@@ -106,6 +135,20 @@ def _reward_file_present(run, spec):
         return "inconclusive", notes
     return None, notes
 
+
+
+# Settings the same reference output is graded under (G24). The first two are identical on purpose: if they
+# disagree the grader is flaky, not environment-sensitive. en_US.UTF-8 may not be installed in the verifier
+# image; the variable is still set, which is what a different host would do.
+ENV_SETTINGS: list[tuple[str, dict]] = [
+    ("baseline", {}),
+    ("baseline-again", {}),
+    ("TZ=Pacific/Kiritimati", {"TZ": "Pacific/Kiritimati"}),
+    ("LC_ALL=C", {"LC_ALL": "C"}),
+    ("LC_ALL=en_US.UTF-8", {"LC_ALL": "en_US.UTF-8"}),
+    ("PYTHONHASHSEED=0", {"PYTHONHASHSEED": "0"}),
+    ("PYTHONHASHSEED=1", {"PYTHONHASHSEED": "1"}),
+]
 
 PROBES = [
 
@@ -436,6 +479,7 @@ done
 """,
         expect_reward=0.0,
         fault_mutants=("generic:drop-dirs", "generic:empty-literals"),
+        malformed=True,
     ),
 
     Probe(
@@ -558,6 +602,252 @@ say "RESULT oracle_artifacts:$n"
 """,
         check=_oracle_ran,
         expect_reward=0.0,
+        agent_timeout_sec=3600.0,
+        malformed=True,
+    ),
+
+    Probe(
+        pid="G17", flaw="-",
+        title="malformed outputs: random bytes that are not valid UTF-8",
+        applies_to=("*",),
+        malformed=True,
+        rationale=(
+            "Every declared artifact is overwritten with three bytes that can never be valid UTF-8 "
+            "followed by a kilobyte of random data (a folder gets one such file). A verifier must score "
+            "an unreadable submission 0. One that lets the error escape writes no reward at all, which "
+            "Harbor records as a verifier error instead of reward 0, so the bad answer is never counted "
+            "against the agent. UnicodeDecodeError is a ValueError, so most exception allowlists already "
+            "cover it; this probe is the baseline for binary and non-text parsers. The same crash, found "
+            "by GitHub Breakwater on three real Terminal-Bench tasks migrated to Reward Kit, came from "
+            "errors their per-criterion allowlist missed (see G18 and G21)."
+        ),
+        agent_script=PREAMBLE + r"""
+garbage() { { printf '\377\376\375'; head -c 1024 /dev/urandom; } > "$1"; }
+n=0
+for a in "$@"; do
+  b=$(basename "$a")
+  case "$a" in
+    */) mkdir -p "$a"; garbage "$a/garbage.bin"; n=$((n+1)); say "garbage in dir $a"; continue ;;
+  esac
+  if [[ "$b" != *.* ]]; then mkdir -p "$a"; garbage "$a/garbage.bin"; n=$((n+1)); say "garbage in dir $a"; continue; fi
+  mkdir -p "$(dirname "$a")" 2>/dev/null
+  garbage "$a"
+  n=$((n+1))
+  say "garbage file $a"
+done
+say "RESULT planted:$n"
+""",
+        check=_planted_check,
+        expect_reward=0.0,
+    ),
+
+    Probe(
+        pid="G18", flaw="-",
+        title="malformed outputs: one field of 200,000 characters in a text artifact",
+        applies_to=("*",),
+        malformed=True,
+        rationale=(
+            "Text artifacts (csv, tsv, json, jsonl, yaml, xml, txt, md, log) get a single line of 200,000 "
+            "characters. Python's csv module refuses a field above 131,072 characters with csv.Error, "
+            "which is not a ValueError, so a grader that only lists ValueError subclasses crashes "
+            "instead of scoring 0 (fin-saccr-rwa and gsea-proteomics, GitHub Breakwater). Artifacts of "
+            "other types are left alone."
+        ),
+        agent_script=PREAMBLE + r"""
+big() { head -c 200000 /dev/zero | tr '\0' 'x'; }
+n=0
+for a in "$@"; do
+  b=$(basename "$a")
+  [[ "$b" == *.* ]] || continue
+  case "${b##*.}" in
+    csv|tsv) mkdir -p "$(dirname "$a")" 2>/dev/null; { printf 'a,b\n'; big; printf ',1\n'; } > "$a"; n=$((n+1)); say "oversized field $a" ;;
+    json) mkdir -p "$(dirname "$a")" 2>/dev/null; { printf '{"a":"'; big; printf '"}\n'; } > "$a"; n=$((n+1)); say "oversized field $a" ;;
+    jsonl|yaml|yml|xml|txt|md|log) mkdir -p "$(dirname "$a")" 2>/dev/null; { big; printf '\n'; } > "$a"; n=$((n+1)); say "oversized line $a" ;;
+  esac
+done
+say "RESULT planted:$n"
+""",
+        check=_planted_check,
+        expect_reward=0.0,
+    ),
+
+    Probe(
+        pid="G19", flaw="-",
+        title="malformed outputs: JSON nested 100,000 levels deep",
+        applies_to=("*",),
+        malformed=True,
+        rationale=(
+            "json and jsonl artifacts become 100,000 opening brackets followed by 100,000 closing ones. "
+            "Python's json module raises RecursionError, which is neither a ValueError nor an OSError, so "
+            "it slips past most exception allowlists. The verifier must score 0."
+        ),
+        agent_script=PREAMBLE + r"""
+n=0
+for a in "$@"; do
+  b=$(basename "$a")
+  [[ "$b" == *.* ]] || continue
+  case "${b##*.}" in
+    json|jsonl)
+      mkdir -p "$(dirname "$a")" 2>/dev/null
+      { head -c 100000 /dev/zero | tr '\0' '['; head -c 100000 /dev/zero | tr '\0' ']'; printf '\n'; } > "$a"
+      n=$((n+1))
+      say "deep nesting $a" ;;
+  esac
+done
+say "RESULT planted:$n"
+""",
+        check=_planted_check,
+        expect_reward=0.0,
+    ),
+
+    Probe(
+        pid="G20", flaw="-",
+        title="malformed outputs: a JSON file that is only NaN",
+        applies_to=("*",),
+        malformed=True,
+        rationale=(
+            "json artifacts become the single token NaN. Python's json module accepts it, so the file "
+            "parses and the value then breaks later arithmetic and comparisons (a NaN is never equal to "
+            "anything, and sorts unpredictably). The verifier must score 0 rather than crash or pass."
+        ),
+        agent_script=PREAMBLE + r"""
+n=0
+for a in "$@"; do
+  b=$(basename "$a")
+  [[ "$b" == *.* ]] || continue
+  case "${b##*.}" in
+    json) mkdir -p "$(dirname "$a")" 2>/dev/null; printf 'NaN\n' > "$a"; n=$((n+1)); say "NaN $a" ;;
+  esac
+done
+say "RESULT planted:$n"
+""",
+        check=_planted_check,
+        expect_reward=0.0,
+    ),
+
+    Probe(
+        pid="G21", flaw="-",
+        title="malformed outputs: a zip that is not a workbook",
+        applies_to=("*",),
+        malformed=True,
+        rationale=(
+            "xlsx, xlsm, docx and zip artifacts become a valid zip holding one text file, junk.txt. The "
+            "container opens but is not the format it claims, so a grader that only planned for "
+            "zipfile.BadZipFile can still be hit by the errors a workbook reader raises for a zip that "
+            "lacks the workbook parts (GitHub Breakwater's glycan-ms2-elucidation finding listed "
+            "InvalidFileException and ParseError beside BadZipFile). Not run here against openpyxl. "
+            "The verifier must score 0."
+        ),
+        agent_script=PREAMBLE + r"""
+fakezip() {
+  printf '\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\x9c\x65\x77\x5d\x8a\x46\xb8\x3b\x0e\x00\x00\x00\x0e\x00\x00\x00\x08\x00\x00\x00\x6a\x75\x6e\x6b\x2e\x74\x78\x74\x6e\x6f\x74\x20\x61\x20\x77\x6f\x72\x6b\x62\x6f\x6f\x6b\x50\x4b\x01\x02\x14\x03\x14\x00\x00\x00\x00\x00\x9c\x65\x77\x5d\x8a\x46\xb8\x3b\x0e\x00\x00\x00\x0e\x00\x00\x00\x08\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80\x01\x00\x00\x00\x00\x6a\x75\x6e\x6b\x2e\x74\x78\x74\x50\x4b\x05\x06\x00\x00\x00\x00\x01\x00\x01\x00\x36\x00\x00\x00\x34\x00\x00\x00\x00\x00' > "$1"
+}
+n=0
+for a in "$@"; do
+  b=$(basename "$a")
+  [[ "$b" == *.* ]] || continue
+  case "${b##*.}" in
+    xlsx|xlsm|docx|zip) mkdir -p "$(dirname "$a")" 2>/dev/null; fakezip "$a"; n=$((n+1)); say "fake zip $a" ;;
+  esac
+done
+say "RESULT planted:$n"
+""",
+        check=_planted_check,
+        expect_reward=0.0,
+    ),
+
+    Probe(
+        pid="G22", flaw="-",
+        title="null-agent ladder: the reference solution's output with every digit shifted by one",
+        applies_to=("*",),
+        rationale=(
+            "Right shape, wrong numbers. The reference solution runs, then every digit in its text outputs "
+            "(txt, md, log, json, jsonl, csv, tsv, yaml, xml, html) becomes the next one (0 to 1, 1 to 2, ... "
+            "9 to 0). A grader that checks that the file exists, parses and has the right keys, or compares "
+            "numbers with a loose tolerance, still says 1. Code, scripts and binaries are left alone. The "
+            "intact solution scoring 1 is control G13. Digit rotation is one of GitHub Breakwater's "
+            "degenerate outputs."
+        ),
+        inject={"/solution": "solution"},
+        agent_script=PREAMBLE + r"""
+cd "$(dirname "$1")" 2>/dev/null || cd /app 2>/dev/null || true
+bash /solution/solve.sh >/tmp/solve.out 2>&1
+say "solve.sh exited $?"
+n=0
+k=0
+for a in "$@"; do
+  [ -e "$a" ] || continue
+  n=$((n+1))
+  if [ -d "$a" ]; then files=$(find "$a" -type f 2>/dev/null); else files="$a"; fi
+  for f in $files; do
+    case "${f##*.}" in
+      txt|md|log|json|jsonl|csv|tsv|yaml|yml|xml|html)
+        tr '0123456789' '1234567890' < "$f" > "$f.rot" && mv "$f.rot" "$f" && k=$((k+1)) ;;
+    esac
+  done
+done
+say "RESULT oracle_artifacts:$n"
+say "RESULT planted:$k"
+""",
+        check=_all_of(_oracle_ran, _planted_check),
+        expect_reward=0.0,
+        agent_timeout_sec=3600.0,
+    ),
+
+    Probe(
+        pid="G23", flaw="-",
+        title="the reference output with one declared artifact removed",
+        applies_to=("*",),
+        per_artifact=True,
+        rationale=(
+            "A template: the runner makes one probe per declared artifact (at most 8, none for a task with a "
+            "single artifact). Each runs the reference solution and then removes exactly one artifact. A grader "
+            "that still scores 1 never looked at that file, so a model could leave it out, or write anything "
+            "into it. Some files really are optional, so this is `artifact_not_checked` for a person to "
+            "judge, never counted as an attack."
+        ),
+        inject={"/solution": "solution"},
+        agent_script=PREAMBLE + r"""
+: "${DROP:?this template is expanded per artifact by the runner}"
+cd "$(dirname "$1")" 2>/dev/null || cd /app 2>/dev/null || true
+bash /solution/solve.sh >/tmp/solve.out 2>&1
+say "solve.sh exited $?"
+n=0
+for a in "$@"; do
+  [ -e "$a" ] && n=$((n+1))
+done
+idx=$((DROP+1))
+target="${!idx}"
+say "removing $target"
+rm -rf -- "$target"
+say "RESULT oracle_artifacts:$n"
+""",
+        check=_oracle_ran,
+        expect_reward=0.0,
+        agent_timeout_sec=3600.0,
+    ),
+
+    Probe(
+        pid="G24", flaw="-",
+        title="environment sweep: the reference output graded under other time zone, locale and hash-seed settings",
+        applies_to=("*",),
+        kind="valid_variant",
+        env_sweep=True,
+        rationale=(
+            "The reference solution runs once and its output is graded several times, each in a fresh verifier "
+            "container: twice with nothing changed (a difference there is `flaky`), then with another time "
+            "zone, the C and en_US.UTF-8 locales and two Python hash seeds. A correct output must be graded "
+            "the same everywhere; a verdict that follows one setting is `env_sensitive`, which means the "
+            "result depends on the machine the task happens to run on. GitHub Breakwater's environment "
+            "attribution does the same."
+        ),
+        inject={"/solution": "solution"},
+        agent_script=PREAMBLE + r"""
+cd "$(dirname "$1")" 2>/dev/null || cd /app 2>/dev/null || true
+bash /solution/solve.sh
+say "solve.sh exited $?"
+""",
+        expect_reward=1.0,
         agent_timeout_sec=3600.0,
     ),
 ]

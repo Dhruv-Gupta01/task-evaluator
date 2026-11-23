@@ -889,6 +889,12 @@ def _tier0_summary_line(t: Tier0Result) -> str:
         bits.append(f"{s['fail_open']} fail open")
     if s.get("false_zero"):
         bits.append(f"{s['false_zero']} valid solution graded 0")
+    if s.get("crashed_on_bad_input"):
+        bits.append(f"{s['crashed_on_bad_input']} grader crash on a broken file")
+    if s.get("artifact_not_checked"):
+        bits.append(f"{s['artifact_not_checked']} output file the grader never checks")
+    if s.get("env_sensitive"):
+        bits.append("verdict depends on the environment")
     if s.get("held_but_positive_control_failed"):
         bits.append(f"{len(s['held_but_positive_control_failed'])} unproven")
     if s.get("control_ok") is False:

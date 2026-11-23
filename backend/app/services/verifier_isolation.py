@@ -172,6 +172,25 @@ def check_reward_reset(t: _Task, report) -> None:
         report.add("verifier_reward_reset", "info", "test.sh clears the reward files before grading.")
 
 
+def check_shared_mode_routes(t: _Task, report) -> None:
+    """A shared verifier grades inside the container the agent worked in. Tier 0 skips such tasks, so these
+    routes (all seen in Singularity-Bench's attacks on plain Harbor) are not probed for them."""
+    if t.separate or not t.test_sh:
+        return
+    report.add(
+        "verifier_shared_mode_routes", "warn",
+        "Shared verifier: grading runs in the same container the agent used, so routes a separate verifier "
+        "closes stay open. (1) A program the agent left running can outlive the agent phase and rewrite the "
+        "reward or answer the grader's calls. (2) A fake program placed on PATH, a planted conftest.py, or a "
+        "sitecustomize.py in the working folder is picked up by the grader's own commands. (3) Files the "
+        "agent writes anywhere in the container are visible to the grader. Tier 0's probes cannot test a "
+        "shared-mode task (it is skipped), so none of this is exercised. Prefer `environment_mode = "
+        "\"separate\"` with a tests/Dockerfile and a declared artifacts list; if the task has to stay shared, "
+        "run the grader with absolute program paths, a cleaned PATH, `python -I`, and check for stray "
+        "processes first.",
+    )
+
+
 # ---- agent code inside the grader ------------------------------------------
 
 _PY_IMPORT_RE = re.compile(
@@ -751,6 +770,7 @@ def run_isolation_checks(task_root: Path, report) -> None:
     t = _load(task_root)
     for check in (
         check_reward_reset,
+        check_shared_mode_routes,
         check_agent_code_in_process,
         check_agent_code_privileges,
         check_answer_evaluation,

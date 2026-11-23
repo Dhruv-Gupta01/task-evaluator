@@ -264,6 +264,99 @@ def check_reward_kit(task_root: Path, report) -> None:
             f"The same @criterion name is used more than once ({', '.join(duplicated[:8])}): their results "
             "share one name in reward-details.json and a reviewer cannot tell which one failed.",
         )
+    check_submission_errors(task_root, report)
+
+
+# Parsers whose errors a ValueError handler does not cover (checked against the interpreter: csv.Error,
+# zipfile.BadZipFile and xml.etree.ElementTree.ParseError are not ValueErrors; ParseError is a SyntaxError).
+# InvalidFileException is openpyxl's own error for a file that is not a workbook; it is taken from the
+# GitHub Breakwater finding on glycan-ms2-elucidation, not run here. Unlisted parsers (json, pandas) raise
+# ValueError subclasses that the usual allowlist covers.
+_PARSER_ERRORS = {
+    "openpyxl": (re.compile(r"\bopenpyxl\b|\bload_workbook\s*\("), ("BadZipFile", "InvalidFileException", "ParseError")),
+    "csv": (re.compile(r"\bcsv\.(?:reader|DictReader|Sniffer)\b"), ("Error",)),
+    "zipfile": (re.compile(r"\bzipfile\.ZipFile\b|\bZipFile\s*\("), ("BadZipFile",)),
+    "ElementTree": (re.compile(r"\bElementTree\b|\bET\.(?:parse|fromstring)\b"), ("ParseError",)),
+}
+_COVERED_BY = {"ParseError": {"SyntaxError"}}  # a parent class that also catches it
+# How each error is named in the message (a bare `Error` would not say whose).
+_SHOWN_AS = {
+    "Error": "csv.Error",
+    "BadZipFile": "zipfile.BadZipFile",
+    "ParseError": "xml.etree.ElementTree.ParseError",
+    "InvalidFileException": "openpyxl.utils.exceptions.InvalidFileException",
+}
+_BROAD = {"Exception", "BaseException"}
+_ERROR_LIST_NAME = re.compile(r"ERROR|EXCEPTION", re.I)
+
+
+def _exception_names(node: ast.AST) -> set[str]:
+    """Final names in `A`, `mod.A` or a tuple/list/set of those (`csv.Error` -> `Error`)."""
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, ast.Attribute):
+        return {node.attr}
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return set().union(*(_exception_names(e) for e in node.elts)) if node.elts else set()
+    return set()
+
+
+def _caught_and_lists(tree: ast.AST) -> tuple[set[str], list[tuple[str, set[str]]], bool]:
+    """(everything the file's except clauses and error-list constants name, the named lists, a broad catch)."""
+    caught: set[str] = set()
+    lists: list[tuple[str, set[str]]] = []
+    broad = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ExceptHandler):
+            if node.type is None:
+                broad = True
+            else:
+                caught |= _exception_names(node.type)
+        elif isinstance(node, ast.Assign) and isinstance(node.value, (ast.Tuple, ast.List, ast.Set)):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and _ERROR_LIST_NAME.search(target.id):
+                    names = _exception_names(node.value)
+                    lists.append((target.id, names))
+                    caught |= names
+    return caught, lists, broad or bool(caught & _BROAD)
+
+
+def check_submission_errors(task_root: Path, report) -> None:
+    """A Reward Kit criterion that lets an exception escape aborts the whole reward: Harbor records a
+    verifier error, not reward 0, so a broken submission is never scored against the agent. Many graders
+    list the errors that mean "score 0". This warns when that list exists but misses an error the file's own
+    parser can raise. A file with no handling at all, or a broad `except Exception`, is left alone."""
+    if not uses_reward_kit(task_root):
+        return
+    for path, text in _tests_files(task_root):
+        if path.suffix != ".py":
+            continue
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        caught, lists, broad = _caught_and_lists(tree)
+        if broad or not caught:
+            continue
+        rel = path.relative_to(task_root).as_posix()
+        for parser, (pattern, errors) in _PARSER_ERRORS.items():
+            if not pattern.search(text):
+                continue
+            missing = [
+                e for e in errors if e not in caught and not (_COVERED_BY.get(e, set()) & caught)
+            ]
+            if not missing:
+                continue
+            listed = ", ".join(f"{n}: {', '.join(sorted(v))}" for n, v in lists[:2]) or ", ".join(sorted(caught)[:6])
+            report.add(
+                "reward_kit_submission_errors",
+                "warn",
+                f"{rel} reads submissions with {parser} but its error handling ({listed}) misses "
+                f"{', '.join(_SHOWN_AS.get(e, e) for e in missing)}. A broken file then raises past the handler, so no reward is written "
+                "(Harbor reports a verifier error, not reward 0) and the agent's bad answer is never scored "
+                "against it. Add the missing errors, or score any exception raised while reading the "
+                "submission as 0 and re-raise only WorkerSetupError.",
+            )
 
 
 _LINT_MAX_FINDINGS = 25

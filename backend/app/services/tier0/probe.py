@@ -32,6 +32,18 @@ Fields that decide the verdict:
                      artifacts. The probe's own check must then fire, which proves the
                      probe can see a leak. (`control_inject` does the same by copying
                      task files into the agent container, for probes that look there.)
+  malformed          The probe hands the verifier a broken file (empty, cut in half, garbage, an
+                     oversized field, a non-workbook). The verifier must score 0. A run where it
+                     started but wrote no reward is `crashed_on_bad_input`: the agent's bad
+                     answer is then reported as a grader error and never counts against it.
+  per_artifact       A template: the runner expands it into one probe per declared artifact (at most 8,
+                     none when the task has fewer than two), each with `drops_artifact` set.
+  drops_artifact     The reference output with this one artifact removed. A grader that still scores 1
+                     never looked at that file: `artifact_not_checked`. Some files may be optional, so a
+                     person decides; it is never counted as an attack.
+  env_sweep          Grade the same output under each setting in probes.generic.ENV_SETTINGS (time zone,
+                     locale, hash seed). A verdict that follows a setting is `env_sensitive`; one that
+                     changes between two identical runs is `flaky`.
   harbor_probe       Judged by a real Harbor Oracle run on a task copy whose solve.sh is
                      this script, because the answer depends on Harbor's own behaviour.
   needs_harbor       The answer depends on Harbor's own behaviour, not the task's. The
@@ -78,6 +90,10 @@ class Probe:
     control_by_check: tuple[str, ...] = ()
     control_inject: dict = field(default_factory=dict)
     harbor_probe: bool = False
+    malformed: bool = False
+    per_artifact: bool = False
+    drops_artifact: str | None = None
+    env_sweep: bool = False
 
     # attribute names docker_runner expects
     @property

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from app.config import get_settings
 from app.services.judge_files import read_text_files
+from app.services.judge_guard import FIXER_GUARD
 from app.services.llm.base import Message
 from app.services.llm.factory import get_anthropic_client
 
@@ -71,6 +72,7 @@ reference as an argument does not rebuild them. A rejected earlier try is not a 
 - If a previous try of yours was rejected, the reason is given: do not repeat it.
 Respond with ONLY JSON:
 {{"description": "one sentence on what the fix does", "hash_answers": [], "edits": [{{"file": "tests/x.py", "find": "exact text", "replace": "new text"}}]}}"""
+SYSTEM = SYSTEM + "\n\n" + FIXER_GUARD
 
 
 def _json(text: str) -> dict:

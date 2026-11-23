@@ -6,7 +6,7 @@ import re
 import shutil
 from pathlib import Path
 
-from app.services import harbor_runner, harborignore, web_use
+from app.services import harbor_runner, harborignore, log_integrity, web_use
 
 HINT_DIR = "/hinted-tests"
 _COPY_NAME = "_hinted_tests"  # folder inside environment/ (the Docker build context)
@@ -91,4 +91,7 @@ def condense_trajectory(trial_dir: Path | None, max_chars: int = MAX_TRANSCRIPT_
     used = web_use.scan(trial_dir)
     if used is not None:
         text = f"WEB USE (counted from the agent's tool calls): {web_use.describe(used)}\n" + text
+    warning = log_integrity.judge_warning(log_integrity.read_report(trial_dir))
+    if warning:
+        text = warning + "\n" + text
     return text
