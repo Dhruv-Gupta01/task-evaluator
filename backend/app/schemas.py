@@ -123,6 +123,9 @@ class AgentTrialsResult(BaseModel):
     # Trials where the grader itself broke (no score). They are left out of pass_rate,
     # pass_at_k and the refusal rate, since they say nothing about the agent: rerun them.
     grader_errors: int = 0
+    # Trials Harbor says have no valid reward (cancelled, a missing reward file, a verifier timeout, or a
+    # non-finite reward). Left out of pass_rate and pass_at_k like grader errors, never counted twice.
+    no_valid_reward: int = 0
 
 
 class SolutionVariantRun(BaseModel):

@@ -240,3 +240,31 @@ def test_the_targeted_cheat_prompt_leaves_it_out_when_nothing_is_timed(tmp_path)
     (tmp_path / "tests" / "test_x.py").write_text("def test_x():\n    assert True\n")
     (tmp_path / "instruction.md").write_text("Do the thing.\n")
     assert "same input" not in harbor_runner.targeted_cheat_instruction(tmp_path).lower()
+
+
+# ---- regression: found by running the check on a real task (int8-style, test_http_poll_wait) --------
+
+REAL_POLL = '''
+import time
+
+def test_http_poll_wait(server):
+    a = call_json(server, "POST", "/api/join", {"doc": "quiet"})
+    for wait, low, high in [(1, 0.9, 3), (100, 24, 28)]:
+        start = time.monotonic()
+        got = call_json(server, "GET", f"/api/poll?doc=quiet&client={a['client']}&wait={wait}", timeout=45)
+        took = time.monotonic() - start
+        assert got == {"msgs": []}
+        assert low <= took <= high
+'''
+
+
+def test_a_loop_whose_input_changes_inside_an_expression_is_not_a_repeat_of_one_input(tmp_path):
+    """The loop variable is used inside an f-string, so each pass calls with a different input. The only repeated
+    name is the `server` fixture handle, which is not an input."""
+    assert run_check(tmp_path, REAL_POLL).items == []
+
+
+def test_the_loop_variable_inside_a_call_expression_also_counts_as_varying(tmp_path):
+    body = ("import time\n\ndef test_speed():\n    data = load()\n    s = time.perf_counter()\n"
+            "    for i in range(5):\n        solve(data + i)\n    assert time.perf_counter() - s < 5\n")
+    assert run_check(tmp_path, body).items == []

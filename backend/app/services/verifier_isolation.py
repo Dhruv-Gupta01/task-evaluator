@@ -732,6 +732,43 @@ def _lean_toolchain_pins(t: _Task) -> list[tuple[str, str, str]]:
     return pins
 
 
+# ---- a grader that trusts what the agent's program prints (NR-17) ------------
+
+_MARKER = r"(?:\b(?:PASS(?:ED)?|OK|SUCCESS(?:FUL(?:LY)?)?|DONE|ALL\s+TESTS|VERIFIED|CORRECT)\b|✓|✅)"
+_OUT_NAME = r"[\w.\[\]()]*(?:stdout|output|out|result|res|proc|text|log)[\w.\[\]()]*"
+_PRINTED_PATTERNS = (
+    re.compile(rf"""["'][^"'\n]*{_MARKER}[^"'\n]*["']\s+in\s+{_OUT_NAME}""", re.I),          # "PASSED" in out
+    re.compile(rf"""{_OUT_NAME}\s*==\s*["'][^"'\n]*{_MARKER}[^"'\n]*["']""", re.I),         # out.strip() == "OK"
+    re.compile(rf"""re\.(?:search|match|fullmatch|findall)\(\s*r?["'][^"'\n]*{_MARKER}[^"'\n]*["']\s*,\s*{_OUT_NAME}""", re.I),
+)
+_SH_PRINTED = re.compile(rf"""\|\s*grep\s+(?!-\w*v\b)[^\n]*{_MARKER}""", re.I)
+
+
+def check_printed_text_trust(t: _Task, report) -> None:
+    """The grader runs the agent's program and decides from a success word it prints. Code the grader runs can print
+    any text, so it can print the marker without doing the work (mvcc-lsm-compaction printed the hidden harness's own
+    success lines from a global constructor). Only files that run agent code are read, so a check on pytest's or
+    another trusted tool's own output is left alone."""
+    runs = _agent_runs(t)
+    files = {where.split(":")[0] for where, _, _ in runs}
+    hits: list[str] = []
+    for rel, text in t.tests_py:
+        if rel not in files:
+            continue
+        for i, line in _code_lines(text):
+            if any(p.search(line) for p in _PRINTED_PATTERNS):
+                hits.append(f"{rel}:{i}")
+    hits += [where for where, _, call in runs if where.startswith("tests/test.sh") and _SH_PRINTED.search(call)]
+    if hits:
+        report.add(
+            "verifier_trusts_printed_text",
+            "warn",
+            f"The grader decides from a success word the agent's own program prints ({_listed(sorted(set(hits)))}). "
+            "Code the grader runs can print any text, so it can print that marker without doing the work. Grade "
+            "from a value the grader computes, or from a file it reads and checks itself, not from printed text.",
+        )
+
+
 def check_lean(t: _Task, report) -> None:
     lean = [p for p in _own_files(t.root) if p.suffix == ".lean"]
     if not lean:
@@ -751,6 +788,27 @@ def check_lean(t: _Task, report) -> None:
             "These can change what the stated theorem means without adding an axiom, so `#print axioms` and a "
             "sorry/axiom ban do not catch them (4.1-43: a macro turning the statement into `True`); reject new "
             "macro, notation, syntax and elab commands in submitted files (needs a human).",
+        )
+
+    # NR-18: a grader that decides from text in Lean's own output. Submitted Lean can write text into that output
+    # (#eval, run_cmd, macros that log messages), so a text match can be forged (takens-embedding-lean).
+    sh_capture = re.search(r"=\s*\$\([^)]*\b(?:lean|lake)\b", t.test_sh)
+    sh_pipe = re.search(r"\b(?:lean|lake)\b[^\n|]*\|\s*grep\s+(?!-\w*v\b)", t.test_sh)
+    sh_positive_grep = re.search(r"\bgrep\s+(?!-\w*v\b)", t.test_sh)
+    py_checks = [
+        rel for rel, text in t.tests_py
+        if re.search(r"""["'](?:lean|lake)["']""", text)
+        and re.search(rf"""["'][^"'\n]+["']\s+in\s+{_OUT_NAME}""", text)
+    ]
+    if sh_pipe or (sh_capture and sh_positive_grep) or py_checks:
+        report.add(
+            "lean_output_parsed",
+            "warn",
+            "The grader decides from text in Lean's own output (a grep or an `in` check on what `lean` or `lake` "
+            "prints). Submitted Lean can write its own text into that output (#eval, run_cmd, macros that log "
+            "messages), so a match can be forged. Decide from the exit code plus a trusted check run on a file the "
+            "submission cannot edit, not from output text."
+            + (f" Python files: {_listed(py_checks)}." if py_checks else ""),
         )
     report.add(
         "lean_cheat_trial_hint",
@@ -776,6 +834,7 @@ def run_isolation_checks(task_root: Path, report) -> None:
         check_answer_evaluation,
         check_source_scanning,
         check_verdict_channels,
+        check_printed_text_trust,
         check_lean,
     ):
         try:

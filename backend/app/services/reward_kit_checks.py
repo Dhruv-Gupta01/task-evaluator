@@ -265,6 +265,7 @@ def check_reward_kit(task_root: Path, report) -> None:
             "share one name in reward-details.json and a reviewer cannot tell which one failed.",
         )
     check_submission_errors(task_root, report)
+    check_reward_toml_schema(task_root, report)
 
 
 # Parsers whose errors a ValueError handler does not cover (checked against the interpreter: csv.Error,
@@ -356,6 +357,91 @@ def check_submission_errors(task_root: Path, report) -> None:
                 "(Harbor reports a verifier error, not reward 0) and the agent's bad answer is never scored "
                 "against it. Add the missing errors, or score any exception raised while reading the "
                 "submission as 0 and re-raise only WorkerSetupError.",
+            )
+
+
+# ---- reward.toml in the format Reward Kit 0.2.4 accepts (NR-48) ----------------------------
+# Read from rewardkit/models.py in harbor-rewardkit 0.2.4, the version Terminal-Bench 4.1 pins: a reward.toml is
+# validated with extra="forbid". Only `reward` (a list) and `scoring` (a table keyed by Python file name, each holding
+# `aggregation` and `threshold`) are allowed. The old directory-wide `[scoring]`, a directory `weight` or any other
+# key is rejected, and the grader stops with a validation error instead of grading.
+_RK_AGGREGATIONS = (
+    "weighted-mean", "weighted-sum", "all-pass", "any-pass", "threshold", "required-pass",
+    "weighted_mean", "all_pass", "any_pass", "required_pass",
+)
+_RK_TOP_KEYS = {"reward", "scoring"}
+_RK_SCORING_KEYS = {"aggregation", "threshold"}
+_RK_REWARD_KEYS = {"name", "weights", "aggregation", "threshold"}
+
+
+def _aggregation_problem(where: str, table: dict) -> str | None:
+    value = table.get("aggregation")
+    if value is not None and value not in _RK_AGGREGATIONS:
+        return f"`aggregation = {value!r}` in {where} is not one of {', '.join(_RK_AGGREGATIONS[:6])}"
+    return None
+
+
+def _reward_toml_problems(data: dict) -> list[str]:
+    problems: list[str] = []
+    for key in sorted(set(data) - _RK_TOP_KEYS):
+        extra = " (a directory-wide weight is no longer allowed)" if key == "weight" else ""
+        problems.append(f"unknown top-level key `{key}`{extra}")
+    scoring = data.get("scoring", {})
+    if not isinstance(scoring, dict):
+        problems.append("`scoring` must be a table of tables, one per Python file")
+        scoring = {}
+    for name, table in scoring.items():
+        if not isinstance(table, dict):
+            problems.append(
+                f"`[scoring]` has `{name}` directly under it (the old directory-wide form); put it in "
+                "`[scoring.<file name>]`, for example `[scoring.checks]` for checks.py"
+            )
+            continue
+        for key in sorted(set(table) - _RK_SCORING_KEYS):
+            problems.append(f"unknown key `{key}` in `[scoring.{name}]`")
+        if (bad := _aggregation_problem(f"`[scoring.{name}]`", table)):
+            problems.append(bad)
+    rewards = data.get("reward", [])
+    if not isinstance(rewards, list):
+        problems.append("`reward` must be a list of `[[reward]]` tables")
+        rewards = []
+    for i, entry in enumerate(rewards, 1):
+        if not isinstance(entry, dict):
+            continue
+        for key in sorted(set(entry) - _RK_REWARD_KEYS):
+            problems.append(f"unknown key `{key}` in `[[reward]]` entry {i}")
+        if (bad := _aggregation_problem(f"`[[reward]]` entry {i}", entry)):
+            problems.append(bad)
+    return problems
+
+
+def check_reward_toml_schema(task_root: Path, report) -> None:
+    """Warn when a reward.toml would be rejected by Reward Kit 0.2.4. The grader then stops with a validation error
+    and no score (a grader error), not a 0, so an author must migrate an old-format file."""
+    if not uses_reward_kit(task_root):
+        return
+    for path, text in _tests_files(task_root):
+        if path.name != "reward.toml":
+            continue
+        rel = path.relative_to(task_root).as_posix()
+        try:
+            data = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as exc:
+            report.add(
+                "reward_kit_toml_schema", "warn",
+                f"{rel} could not be read as TOML ({exc}); Reward Kit would stop with an error instead of grading.",
+            )
+            continue
+        problems = _reward_toml_problems(data)
+        if "$checks" in text:
+            problems.append("a `$checks` reference, which is no longer supported")
+        if problems:
+            report.add(
+                "reward_kit_toml_schema", "warn",
+                f"{rel}: Reward Kit 0.2.4 (the version Terminal-Bench 4.1 pins) rejects this file: "
+                + "; ".join(problems)
+                + ". The grader then stops with a validation error and no score, which shows up as a grader "
+                "error, not a 0. Migrate it to per-file tables such as `[scoring.checks]`.",
             )
 
 

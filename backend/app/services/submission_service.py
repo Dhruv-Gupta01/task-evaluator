@@ -88,6 +88,11 @@ def _is_grader_error(run: Run) -> bool:
     return bool((_verifier(run) or {}).get("grader_error"))
 
 
+def _has_no_valid_reward(run: Run) -> bool:
+    """Harbor says this trial's reward cannot be trusted (cancelled, no reward file, ...): not the agent's result."""
+    return bool((_verifier(run) or {}).get("no_valid_reward"))
+
+
 def _suggested_verdict(run: Run, verifier: dict | None) -> dict | None:
     """A pre-filled genuine-or-fake call, only for a run that has finished."""
     if run.status not in ("passed", "failed"):
@@ -288,7 +293,11 @@ def _agent_trials_result(submission: Submission) -> AgentTrialsResult:
     # A grader error is the grader's fault, not the agent's result: it is left out of the pass
     # rate, pass@k and the refusal rate, and flagged for a rerun instead.
     grader_errors = sum(1 for r in agent_runs if r.status in _TERMINAL and _is_grader_error(r))
-    scored_n = n - grader_errors
+    no_valid_reward = sum(1 for r in agent_runs if r.status in _TERMINAL and _has_no_valid_reward(r))
+    excluded = sum(
+        1 for r in agent_runs if r.status in _TERMINAL and (_is_grader_error(r) or _has_no_valid_reward(r))
+    )  # one trial that is both is removed once
+    scored_n = n - excluded
     pass_rate = None
     pass_at_k = None
     if all_terminal and scored_n > 0:
@@ -310,7 +319,7 @@ def _agent_trials_result(submission: Submission) -> AgentTrialsResult:
     return AgentTrialsResult(
         status=status, n=n, trials=trials, pass_rate=pass_rate, pass_at_k=pass_at_k,
         test_summary=test_summary, refusals=refused, pass_rate_excluding_refusals=rate_without,
-        grader_errors=grader_errors,
+        grader_errors=grader_errors, no_valid_reward=no_valid_reward,
     )
 
 
@@ -1190,6 +1199,15 @@ def build_summary_markdown(
                 "(the verifier broke, no score; left out of the pass rate and pass@k, rerun them)"
             ]
             if schema.agent_trials.grader_errors
+            else []
+        ),
+        *(
+            [
+                f"- No valid reward: {schema.agent_trials.no_valid_reward} of {schema.agent_trials.n} trials "
+                "(Harbor's error policy says the reward cannot be trusted, for example a cancelled trial; "
+                "left out of the pass rate and pass@k)"
+            ]
+            if schema.agent_trials.no_valid_reward
             else []
         ),
         *_agent_web_use_lines(schema),

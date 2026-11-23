@@ -142,8 +142,9 @@ function SubmissionDetail() {
   // Score saved trials again with the current grader, without running the agent.
   const [regradeKind, setRegradeKind] = useState<"agent" | "oracle">("agent");
   const [regradeSource, setRegradeSource] = useState<"previous" | "self">("previous");
+  const [regradeClassify, setRegradeClassify] = useState(false);
   const mRegrade = useMutation({
-    mutationFn: () => api.regrade(id, regradeKind, regradeSource),
+    mutationFn: () => api.regrade(id, regradeKind, regradeSource, regradeClassify),
     onSuccess: () => {
       toast.success("Re-grade started");
       invalidate();
@@ -1850,6 +1851,14 @@ function SubmissionDetail() {
                   task if it repeats.
                 </div>
               )}
+              {(data.agent_trials.no_valid_reward ?? 0) > 0 && (
+                <div className="border-b border-border bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+                  {data.agent_trials.no_valid_reward} of {data.agent_trials.n} trial(s) have no
+                  valid reward (Harbor says so: for example a cancelled trial or a missing reward
+                  file). They are left out of the pass rate and pass@k above, not counted as agent
+                  failures.
+                </div>
+              )}
               {data.agent_trials.test_summary && (
                 <TestSummaryBlock summary={data.agent_trials.test_summary} />
               )}
@@ -1902,7 +1911,7 @@ function SubmissionDetail() {
         {/* Re-grade saved trials (harbor job regrade) */}
         <StageCard
           title="Re-grade Saved Trials"
-          description="Score saved trials again with this upload's grader, without running the agent (harbor job regrade). Shows exactly which scores a grader fix changes. The original runs are never edited. Needs a separate-mode verifier; no LLM cost. Advisory."
+          description="Score saved trials again with this upload's grader, without running the agent (harbor job regrade). Shows exactly which scores a grader fix changes. The original runs are never edited. Needs a separate-mode verifier. No model cost unless you tick the box to have a model say whether each change was expected. Advisory."
           status={data.regrade?.status ?? "not-run"}
         >
           <div className="flex flex-wrap items-center gap-2">
@@ -1932,6 +1941,14 @@ function SubmissionDetail() {
                 <SelectItem value="self">This upload's own trials</SelectItem>
               </SelectContent>
             </Select>
+            <label className="flex items-center gap-1.5 text-sm text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={regradeClassify}
+                onChange={(e) => setRegradeClassify(e.target.checked)}
+              />
+              Ask a model if each change was expected (costs credits)
+            </label>
             <RunButton
               label="Re-grade"
               runningLabel="Re-grading…"
@@ -3914,6 +3931,12 @@ const REGRADE_CHANGE: Record<string, { label: string; cls: string }> = {
   now_no_score: { label: "now no score", cls: "text-red-600 dark:text-red-400" },
 };
 
+const REGRADE_LABEL: Record<string, string> = {
+  expected: "text-emerald-600",
+  unexpected: "font-medium text-red-600 dark:text-red-400",
+  unclear: "text-muted-foreground",
+};
+
 function RegradeView({ logs }: { logs?: string }) {
   const parsed = parseJson<RegradeReport>(logs);
   if (!logs) return null;
@@ -3952,6 +3975,14 @@ function RegradeView({ logs }: { logs?: string }) {
           {sum.tightened > 0 && (
             <>
               , <b className="text-red-600 dark:text-red-400">{sum.tightened} tightened</b>
+            </>
+          )}
+          {parsed.classified && (
+            <>
+              ; model says{" "}
+              <b className="text-emerald-600">{sum.expected ?? 0} expected</b>,{" "}
+              <b className="text-red-600 dark:text-red-400">{sum.unexpected ?? 0} unexpected</b>,{" "}
+              {sum.unclear ?? 0} unclear
             </>
           )}
           {sum.now_scored > 0 && <>, {sum.now_scored} now scored</>}
@@ -3994,11 +4025,19 @@ function RegradeView({ logs }: { logs?: string }) {
                 {it.failed_checks.length > 0 && (
                   <div className="text-muted-foreground">failed: {it.failed_checks.join(", ")}</div>
                 )}
+                {it.classification && (
+                  <div className={REGRADE_LABEL[it.classification.classification]}>
+                    model: {it.classification.classification}
+                    {it.classification.confidence === "low" && " (low confidence)"}
+                    {it.classification.reason && <> - {it.classification.reason}</>}
+                  </div>
+                )}
               </li>
             );
           })}
         </ul>
       )}
+      {parsed.classify_note && <div className="text-muted-foreground">{parsed.classify_note}</div>}
       {parsed.errors.length > 0 && (
         <LogPanel logs={parsed.errors.join("\n\n")} title="Re-grade errors" />
       )}

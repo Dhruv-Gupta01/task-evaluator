@@ -27,9 +27,11 @@ from app.services import (
     leakage_scan,
     platform_checks,
     probes,
+    regrade_classifier,
     review_report,
     static_checks,
     solution_variants,
+    submission_diff,
     sufficiency_judge,
     tb_static_checks,
     validation_service,
@@ -1485,13 +1487,15 @@ def _regrade_item(job: Path, source_dir: Path | None, outcome: "harbor_runner.Tr
     }
 
 
-async def run_regrade(submission_id: str, kind: str = "agent", source: str = "previous") -> None:
+async def run_regrade(submission_id: str, kind: str = "agent", source: str = "previous", classify: bool = False) -> None:
     """Score saved trials again with the current grader, without running the agent
     (`harbor job regrade`). It shows exactly which scores a grader fix changes and never
     edits the original runs: the answer goes in its own `regrade` row. `loosened` (0 became 1)
     means the fix made the grader accept work it rejected before, which a person should look
-    at because the task may have got easier. Advisory; no LLM, so no cost. logs is JSON:
-    {kind, source, items, summary, errors}."""
+    at because the task may have got easier. Advisory. The regrade itself uses no model, so no cost; with
+    `classify` (NR-78) a model also labels each changed trial expected, unexpected or unclear (services/regrade_classifier.py:
+    one call per changed trial, at most 12, recorded in the spend log). logs is JSON:
+    {kind, source, items, summary, errors, classified, classify_note}."""
     db = SessionLocal()
     try:
         submission = db.get(Submission, submission_id)
@@ -1524,6 +1528,26 @@ async def run_regrade(submission_id: str, kind: str = "agent", source: str = "pr
                 errors.append(f"{job.name}: {result.error[:1500]}")
                 continue
             items += [_regrade_item(job, source_dir, outcome) for source_dir, outcome in result.trials]
+        classified = False
+        classify_note = None
+        if classify:
+            if not any(i["change"] != "same" for i in items):
+                classify_note = "no trial's reward changed, so no model call was made"
+            elif (over := budget.judge_exceeded_message(db)):
+                classify_note = f"not classified: {over}"
+            else:
+                try:
+                    # What the task changed between the two uploads; for a re-score of the same upload, nothing.
+                    changes = (
+                        submission_diff.diff_tasks(Path(src.extracted_path), task_root)
+                        if src is not None and src.id != submission_id and src.extracted_path
+                        else None
+                    )
+                    with _track_llm_spend(db, submission_id, "regrade_classify"):
+                        items = await regrade_classifier.classify_changes(items, changes)
+                    classified = True
+                except Exception as exc:  # advisory: a model problem must never lose the regrade itself
+                    classify_note = f"not classified: {type(exc).__name__}: {exc}"
         counts = {c: sum(1 for i in items if i["change"] == c) for c in
                   ("same", "loosened", "tightened", "now_scored", "now_no_score")}
         summary = {
@@ -1532,6 +1556,8 @@ async def run_regrade(submission_id: str, kind: str = "agent", source: str = "pr
             "grader_errors_before": sum(1 for i in items if i["old_grader_error"]),
             "grader_errors_after": sum(1 for i in items if i["new_grader_error"]),
         }
+        if classified:
+            summary.update(regrade_classifier.tally(items))
         clean = bool(items) and not errors and counts["same"] == len(items)
         run.logs = json.dumps(
             {
@@ -1540,6 +1566,8 @@ async def run_regrade(submission_id: str, kind: str = "agent", source: str = "pr
                 "items": items,
                 "summary": summary,
                 "errors": errors,
+                "classified": classified,
+                "classify_note": classify_note,
                 "harbor_version": harbor_runner._harbor_version(),
             }
         )
@@ -1633,6 +1661,39 @@ async def _run_harbor_gate(submission_id: str, kind: str) -> None:
 _INFRA_RETRY_MARKER = "[C11: auto-retried once for infra noise]"
 
 
+def infra_retry_reason(run: Run) -> str | None:
+    """Why this agent trial should be rerun once automatically, or None. Harbor's own classification of the failure
+    (services/error_policy.py) decides first, then the text markers (services/infra_marker_scan.py):
+
+      no reward                 Harbor says never retry it (cancelled, an authentication error, a missing reward file):
+                                no. Harbor says it is retryable (environment start timeout, API errors): yes. Otherwise
+                                the old rule: yes when the log shows infrastructure noise.
+      graded, reward below 1    only an agent that exited non-zero (NonZeroAgentExitCodeError), which Harbor 0.26 now
+                                grades as a real result, and only while the log shows infrastructure noise: the agent
+                                died from the machine, not the task. A plain zero with noise in the log is a real zero.
+      reward 1, no log, already retried: never."""
+    if not run.logs or _INFRA_RETRY_MARKER in run.logs or run.reward == 1:
+        return None
+    try:
+        report = json.loads(run.verifier_json) if run.verifier_json else {}
+    except ValueError:
+        report = {}
+    policy = report.get("error_policy") if isinstance(report, dict) else None
+    markers = infra_marker_scan.scan_trial_logs(run.logs)
+    if run.reward is None:
+        if policy and policy.get("known"):
+            if not policy.get("should_retry"):
+                return None
+            return f"Harbor classes {policy['exception_type']} as retryable"
+        return f"the log showed infra noise ({', '.join(markers)})" if markers else None
+    if policy and policy.get("exception_type") == "NonZeroAgentExitCodeError" and markers:
+        return (
+            f"the agent exited non-zero while the log showed infra noise ({', '.join(markers)}); "
+            "Harbor graded it as a real result"
+        )
+    return None
+
+
 async def _retry_infra_agent_failures(
     db,
     submission: Submission,
@@ -1655,22 +1716,14 @@ async def _retry_infra_agent_failures(
     human. The original failure is kept in the retried trial's logs, not
     discarded, and the retry itself is flagged either way so it's always
     clear this reward came from a second attempt."""
-    candidates = [
-        r
-        for r in runs
-        if r.reward is None
-        and r.logs
-        and _INFRA_RETRY_MARKER not in r.logs
-        and infra_marker_scan.scan_trial_logs(r.logs)
-    ]
-    for run in candidates:
+    candidates = [(r, why) for r in runs if (why := infra_retry_reason(r))]
+    for run, retry_reason in candidates:
         reason = budget.exceeded_message(db)
         if reason:
             run.logs = f"{_INFRA_RETRY_MARKER} (not retried: {reason})\n\n{run.logs}"
             db.commit()
             continue
 
-        markers = infra_marker_scan.scan_trial_logs(run.logs)
         original_logs = run.logs
         retry_job_dir = jobs_dir.parent / f"{jobs_dir.name}-infra-retry"
         result = await harbor_runner.run_job(
@@ -1685,7 +1738,7 @@ async def _retry_infra_agent_failures(
             n_concurrent=1,
         )
         header = (
-            f"{_INFRA_RETRY_MARKER} original attempt showed infra noise ({', '.join(markers)}), "
+            f"{_INFRA_RETRY_MARKER} original attempt: {retry_reason}, "
             "so it was rerun once automatically rather than counted as a genuine failure.\n\n"
             f"=== ORIGINAL (infra-failed) ATTEMPT ===\n{original_logs[-4_000:]}\n\n"
             "=== RETRY ==="

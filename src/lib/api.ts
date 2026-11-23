@@ -140,6 +140,9 @@ export interface AgentTrialsResult {
   // Trials where the grader itself broke (no score). Left out of pass_rate, pass_at_k and the
   // refusal rate; rerun them.
   grader_errors?: number;
+  // Trials Harbor says have no valid reward (cancelled, a missing reward file, a verifier timeout, a
+  // non-finite reward). Left out of pass_rate and pass_at_k, never counted twice with grader errors.
+  no_valid_reward?: number;
   // Across the failing trials: which tests they failed and how close the best
   // one came. A single test failed by every failing trial is the typical
   // shape of an over-strict grader or an unstated rule (`notes`).
@@ -480,6 +483,13 @@ export interface RegradeItem {
   new_grader_error: { reason: string; evidence: string } | null;
   failed_checks: string[];
   flags: string[];
+  // Present only when the regrade was run with classify (NR-78): a model's label for a changed trial.
+  classification?: {
+    classification: "expected" | "unexpected" | "unclear";
+    confidence?: "high" | "low";
+    reason?: string;
+    error?: string;
+  };
 }
 export interface RegradeReport {
   kind?: "agent" | "oracle";
@@ -494,10 +504,16 @@ export interface RegradeReport {
     now_no_score: number;
     grader_errors_before: number;
     grader_errors_after: number;
+    // counts of the model's labels, only when classified
+    expected?: number;
+    unexpected?: number;
+    unclear?: number;
   };
   errors: string[];
   error?: string;
   harbor_version?: string;
+  classified?: boolean;
+  classify_note?: string | null;
 }
 
 export interface VersionInfo {
@@ -1261,10 +1277,12 @@ export const api = {
     id: string,
     kind: "agent" | "oracle" = "agent",
     source: "previous" | "self" = "previous",
+    classify = false,
   ) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/regrade?kind=${kind}&source=${source}`, {
-      method: "POST",
-    }).then(handle<unknown>),
+    fetch(
+      `${API_BASE_URL}/submissions/${id}/regrade?kind=${kind}&source=${source}&classify=${classify}`,
+      { method: "POST" },
+    ).then(handle<unknown>),
   setTrialVerdict: (
     id: string,
     body: {

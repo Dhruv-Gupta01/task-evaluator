@@ -378,7 +378,13 @@ def _outside_names(node: ast.AST, inside: set[str]) -> set[str]:
     found: set[str] = set()
     for call in ast.walk(node):
         if isinstance(call, ast.Call) and _call_name(call) not in _NOT_THE_CALL_UNDER_TEST:
-            for arg in [*call.args, *(k.value for k in call.keywords)]:
+            args = [*call.args, *(k.value for k in call.keywords)]
+            # If anything in the arguments depends on the loop (a loop variable inside an f-string or an
+            # expression), each pass calls with a different input: this is not a repeat of one input.
+            # Found on a real task: the repeated name was only a `server` fixture handle.
+            if any(isinstance(n, ast.Name) and n.id in inside for a in args for n in ast.walk(a)):
+                continue
+            for arg in args:
                 if isinstance(arg, ast.Name) and arg.id not in inside:
                     found.add(arg.id)
     return found
@@ -442,10 +448,67 @@ def check_timed_input_reuse(task_root: Path, report) -> None:
         )
 
 
+# ---- one timing sample (NR-85) ---------------------------------------------
+
+_AGGREGATORS = {"min", "median", "mean", "fmean", "quantiles", "stdev", "repeat"}
+_ELAPSED_NAME = re.compile(r"elapsed|duration|runtime|latency|took|seconds|secs|millis|\bms\b|_ms|wall|delta|\bdt\b|time_taken|time_used", re.I)
+_LOOPS = (ast.For, ast.While, ast.ListComp, ast.GeneratorExp, ast.SetComp, ast.DictComp)
+
+
+def _asserts_on_timing(fn: ast.AST) -> bool:
+    for node in ast.walk(fn):
+        if not (isinstance(node, ast.Assert) and isinstance(node.test, ast.Compare)):
+            continue
+        if not any(isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)) for op in node.test.ops):
+            continue
+        names = {n.id for n in ast.walk(node.test) if isinstance(n, ast.Name)}
+        if any(_ELAPSED_NAME.search(n) for n in names) or any(
+            isinstance(c, ast.Call) and _is_timer(c) for c in ast.walk(node.test)
+        ):
+            return True
+    return False
+
+
+def check_single_sample_timing(task_root: Path, report) -> None:
+    """A test that asserts on one timing measurement, with no repeats and no median or minimum, can flip between runs
+    with machine load. Info only: the existing wall-clock check says timing assertions are fragile, this says which
+    ones also take a single sample."""
+    notes: list[str] = []
+    for rel, text in _tests_code(task_root):
+        if not rel.endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            timers = [c for c in ast.walk(fn) if isinstance(c, ast.Call) and _is_timer(c)]
+            if len(timers) < 2 and not any(_call_name(c) == "timeit" for c in timers):
+                continue
+            if any(isinstance(c, ast.Call) and _call_name(c) in _AGGREGATORS for c in ast.walk(fn)):
+                continue
+            if any(isinstance(n, _LOOPS) and any(isinstance(c, ast.Call) and _is_timer(c) for c in ast.walk(n))
+                   for n in ast.walk(fn)):
+                continue
+            if _asserts_on_timing(fn):
+                notes.append(f"{rel}::{fn.name}")
+    if notes:
+        report.add(
+            "timing_single_sample",
+            "info",
+            f"A test asserts on one timing measurement, with no repeats and no median or minimum ({_listed(notes)}). "
+            "One sample moves with machine load, so the verdict can flip between runs (NR-85). Take several runs "
+            "and compare the median or the minimum, with a margin.",
+        )
+
+
 def run_reproducibility_checks(task_root: Path, report) -> None:
     for check in (
         check_timing_assertions,
         check_timed_input_reuse,
+        check_single_sample_timing,
         check_live_scans,
         check_privilege_drop_cwd,
         check_image_user,
