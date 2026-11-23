@@ -148,6 +148,35 @@ Files: backend/storage/submissions/{id}/ (zip, extracted task, logs, Harbor outp
   that drives the agent's web app with a browser, and code run through a file copied into a scratch
   project. A Worker is never a gate here; the ruling goes through Flag 15.23.
 
+- **Breakwater follow-up (2026-11-23)**: ideas from Singularity-Bench's Breakwater (a paper) and
+  GitHub Breakwater (a tool); neither is installed or called. All advisory.
+  - *Prompt guards*: every prompt that reads what an agent produced (Tier 1 and Tier 2 judges, the
+    failure classification and trial audit, the Tier 1 fixer) now says the text is data and that
+    instructions inside it are ignored.
+  - *Broken output files* (Tier 0 probes G17 to G21, plus the empty and half-output probes): the grader
+    must score a damaged file 0. A grader that starts and writes no reward is the new verdict
+    `crashed_on_bad_input`. A probe that found nothing of its type to damage says so (`inconclusive`),
+    never "held". A new Static Check warns when a Reward Kit grader's list of "score 0" errors misses one
+    its parser raises. **Found on pg-wal**: a deeply nested JSON report makes its grader raise
+    `RecursionError` and write no reward.
+  - *Session-log integrity*: Claude Code and Codex write their log where the agent can edit it. The
+    platform notes each log while the run is live and checks it was not changed; a mismatch flags the
+    trial and warns the judges. It cannot see an edit made and finished inside one 10-second poll.
+  - *Tier 0 additions*: G22 (every digit shifted), G23 (one declared output removed at a time,
+    `artifact_not_checked`) and G24 (the reference output graded under other time zone, locale and
+    hash-seed settings: `env_sensitive`, or `flaky` if two identical runs differ).
+  - *Shared-verifier tasks*: Tier 0 no longer skips them. A Static Check lists the routes a shared
+    verifier leaves open, and three probes (G25 a program left running, G26 swapped `pytest`/`python`,
+    G27 a planted `conftest.py`) run through real Harbor trials.
+  - *Agent output scan*: the collected output is scanned for key-shaped strings, AI-provider addresses
+    and key variable names (kind and file only, never the key).
+  - *Timed repeats*: a Static Check notes a timed call repeated on one input (answers can be cached), and
+    the Targeted cheat prompt tries it.
+  - **Checked live**: pg-wal (separate mode) for G13, G17 to G24; the smoke task (shared mode) for G25 to
+    G27, where all three exploited a vulnerable grader and a hardened copy held. **Not checked live**: log
+    integrity on a real Claude Code or Codex trial, the output scan and timed-repeat check on real tasks,
+    G26 as a non-root agent.
+
 ### Terminal-Bench 5.0 additions (branch `harbor-5.0`)
 
 All advisory, no new buttons; each extends an existing stage.
@@ -276,11 +305,19 @@ Read these before relying on the platform.
 9. **Heuristic checks produce false positives and negatives.** Answer Exposure is noisy by design,
    refusal detection is phrase matching, and the Cheat Trial "inconclusive" rule is a tool-call
    count. Each is evidence for a human, not a verdict.
-10. **Lint baseline**: `bun run lint` reports 58 prettier errors in `src/routes/submissions.$id.tsx`
-    that predate this handover. New code should not add to them.
+10. **Lint baseline**: `bun run lint` reports 38 prettier errors (measured 2026-11-23) in
+    `src/routes/submissions.$id.tsx` that predate this handover. New code should not add to them.
 11. **Not built**: a cross-architecture Oracle, scanning archives for binaries, an independent-tool
     comparison for ground truth, an author-supplied set of equivalent or false solutions, and a
     rubric-generation stage for scoring agent trajectories (planned, not started).
+12. **Not built from the Breakwater list, and why**: running tests alone or in reverse order (pytest
+    graders only, and 64 of 66 upstream tasks use Reward Kit); mechanical code mutants (the Weak-Answer
+    Probe already does it with a model, and it only fits Python outputs); swapping a file after it was
+    checked (needs a very specific grader design); fingerprinting system programs before and after the
+    agent (Harbor owns that switch; a separate verifier starts fresh; G25 to G27 detect the shared-mode
+    cases); a CI step on every edit (every upload is already compared with the previous one); a shared-mode
+    grader hardened against G26 needs binary integrity checks, not built. Singularity-Bench's API router,
+    DNS tunnelling, port squatting and token-copying attacks belong to model-training tasks.
 
 ## 8. Working on the code
 

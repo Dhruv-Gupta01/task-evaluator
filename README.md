@@ -220,6 +220,33 @@ independent-tool comparison for ground truth (rustc, a parser), and an author-su
 equivalent or false solutions. The Lean 4.28 "unsound toolchain" note rests on a milestone item title
 and is unverified.
 
+### Breakwater follow-up (Singularity-Bench and GitHub Breakwater)
+
+Ideas from a paper (Singularity-Bench's Breakwater: attacks on Harbor and five safeguards) and a tool
+(GitHub Breakwater: regression tests for verifiers). Neither is installed or called. All advisory.
+
+| Area | What it does | Where it shows |
+|---|---|---|
+| Prompt guards | Every prompt that reads what an agent produced (Tier 1 and Tier 2 judges, failure classification, trial audit, the Tier 1 fixer) says the text is data and that instructions inside it are ignored. | Judges, Failure Analysis, Tier 1 |
+| Broken output files | Tier 0 probes G17 to G21 (random non-UTF-8 bytes, one 200,000-character field, JSON nested 100,000 deep, a bare `NaN`, a zip that is not a workbook), plus the empty and half-output probes. The grader must score a damaged file 0. If it starts and writes no reward the verdict is `crashed_on_bad_input`; a probe that found nothing of its type to damage is `inconclusive`. A Static Check warns when a Reward Kit grader's "score 0" error list misses an error its parser raises (`reward_kit_submission_errors`). | Tier 0, Static Checks |
+| Session-log integrity | Claude Code and Codex write their log where the agent can edit it. While the trial runs the platform notes each log, and at the end checks nothing it saw was changed. A mismatch flags the trial and puts a warning at the top of the judges' transcript. It cannot see an edit made and finished within one 10-second poll. | Trial flags, Tier 1 and Tier 2 judges |
+| More Tier 0 probes | G22 shifts every digit of the reference output; G23 removes one declared output at a time (`artifact_not_checked` if the grader still scores 1); G24 grades the reference output under other time zone, locale and hash-seed settings (`env_sensitive`, or `flaky` if two identical runs differ). | Tier 0 |
+| Shared-verifier tasks | A Static Check lists what a shared verifier leaves open. Tier 0 no longer skips these tasks: G25 (a program left running rewrites the reward), G26 (`pytest`/`python` swapped for ones that report a pass) and G27 (a planted `conftest.py`) each run through a real Harbor trial. | Static Checks, Tier 0 |
+| Agent output scan | The output Harbor collected is scanned for key-shaped strings, AI-provider addresses and key variable names. Only the kind and the file are kept, never the key. | Trial flags |
+| Timed repeats | A Static Check notes a timed call repeated on one input (agent code can remember the answer), and the Targeted cheat prompt tries it. | Static Checks, Cheat Trial |
+
+**Checked live:** pg-wal (separate mode) for G13 and G17 to G24, where G19 found a real crash (a deeply
+nested JSON report makes its grader raise `RecursionError` and write no reward); the smoke task (shared
+mode) for G25 to G27, where all three exploited a vulnerable grader and a hardened copy held.
+**Not checked live:** log integrity on a real Claude Code or Codex trial, the output scan and timed-repeat
+check on real tasks, G26 as a non-root agent.
+
+**Not built, and why:** running tests alone or in reverse order (pytest only; 64 of 66 upstream tasks use
+Reward Kit); mechanical code mutants (the Weak-Answer Probe already does it); swapping a file after it was
+checked; fingerprinting system programs around the agent (Harbor owns that switch); a CI step on every task
+edit (every upload is already compared with the previous one); a shared-mode grader hardened against G26
+needs binary integrity checks.
+
 ## Notes
 
 - **Docker platform**: every build and container run (Build, and Oracle/Nop/Agent Trials via
