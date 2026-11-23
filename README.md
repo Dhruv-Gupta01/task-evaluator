@@ -248,6 +248,14 @@ checked; fingerprinting system programs around the agent (Harbor owns that switc
 edit (every upload is already compared with the previous one); a shared-mode grader hardened against G26
 needs binary integrity checks.
 
+### Human audit for AI detection
+
+GPTZero and the rubric's instruction check are machine opinions about whether the task was written with AI. On the AI Detection
+card a named person can now approve, dispute or mark unsure the AI use in `instruction.md`, `solution/solve.sh` or overall, with a
+written reason (needed to approve or dispute). Rulings keep a history and are tied to the current files: if the instruction or
+solution is rewritten, the ruling shows as stale and needs a new look. It appears in the evidence summary and download. Advisory:
+it never changes a gate.
+
 ### Worker required and the Grader Isolation gate
 
 Does the task's grader run agent-written code without a Reward Kit `Worker` (or equivalent isolation)?

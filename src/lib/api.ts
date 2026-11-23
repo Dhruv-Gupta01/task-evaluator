@@ -1036,6 +1036,17 @@ export interface GraderIsolationResult {
   blocks: boolean;
 }
 
+// Human audit for AI detection: a named person's approve / dispute / unsure per target. Advisory.
+export interface AiAuditResult {
+  decisions: Record<
+    string,
+    { ruling: string; adjudicator: string; reason: string; at: string; stale: boolean }
+  >;
+  history: { target: string; ruling: string; adjudicator: string; reason: string; at: string }[];
+  stale: string[];
+  summary: string;
+}
+
 export interface Submission {
   id: string;
   task_name: string;
@@ -1060,6 +1071,7 @@ export interface Submission {
   tb_static_checks: TbStaticChecksResult;
   grader_isolation: GraderIsolationResult;
   ai_detection: AiDetectionResult;
+  ai_audit: AiAuditResult;
   answer_exposure: AnswerExposureResult;
   tier0: Tier0Result;
   tier0_decisions?: Record<string, Tier0Ruling>;
@@ -1390,6 +1402,20 @@ export const api = {
     fetch(`${API_BASE_URL}/submissions/${id}/static-checks`, { method: "POST" }).then(
       handle<unknown>,
     ),
+  aiDetectionDecision: (
+    id: string,
+    body: {
+      target: string;
+      ruling: "approved" | "disputed" | "unsure";
+      adjudicator: string;
+      reason: string;
+    },
+  ) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/ai-detection-decision`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(handle<AiAuditResult>),
   graderIsolation: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/grader-isolation`, { method: "POST" }).then(
       handle<GraderIsolationResult>,

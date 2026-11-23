@@ -6,7 +6,7 @@ from pathlib import Path
 
 from app.config import get_settings
 from app.models import LlmSpend, Run, Submission
-from app.services import grader_isolation, image_inventory, network_policy, solution_variants, verifier_report, versions, web_use
+from app.services import ai_audit, grader_isolation, image_inventory, network_policy, solution_variants, verifier_report, versions, web_use
 from app.services.harbor_runner import CODEX_BAKE_NOTE_MARKER
 from app.services.task_config import TaskConfig
 from app.services.tier2 import memory as tier2_memory
@@ -38,6 +38,7 @@ from app.schemas import (
     ReviewReportResult,
     StageResult,
     StageStatus,
+    AiAuditResult,
     GraderIsolationResult,
     StaticChecksResult,
     TbStaticChecksResult,
@@ -611,6 +612,33 @@ def _grader_isolation_result(submission: Submission) -> GraderIsolationResult:
     )
 
 
+def _ai_audit_result(submission: Submission) -> AiAuditResult:
+    run = _get_run(submission, "ai_audit_decision")
+    stored = None
+    if run is not None and run.logs:
+        try:
+            stored = json.loads(run.logs)
+        except ValueError:
+            stored = None
+    fp = None
+    if submission.extracted_path:
+        try:
+            fp = ai_audit.fingerprint(Path(submission.extracted_path))
+        except OSError:
+            fp = None
+    return AiAuditResult(**ai_audit.view(stored, fp))
+
+
+def _ai_audit_line(schema) -> str:
+    audit = schema.ai_audit
+    if audit.summary == "No human audit yet.":
+        return "- AI detection human audit: not audited yet"
+    line = f"- AI detection human audit: {audit.summary}"
+    if audit.stale:
+        line += f" (changed since the ruling: {', '.join(audit.stale)}; needs a new look)"
+    return line
+
+
 def _regrade_result(run: Run | None) -> RegradeResult:
     if run is None:
         return RegradeResult(status="not-run", logs=None)
@@ -660,6 +688,7 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         static_checks=_static_checks_result(_get_run(submission, "static_checks")),
         tb_static_checks=_tb_static_checks_result(_get_run(submission, "tb_static_checks")),
         grader_isolation=_grader_isolation_result(submission),
+        ai_audit=_ai_audit_result(submission),
         ai_detection=_ai_detection_result(_get_run(submission, "ai_detection")),
         answer_exposure=_answer_exposure_result(_get_run(submission, "answer_exposure")),
         tier0=_tier0_result(_get_run(submission, "tier0_probes")),
@@ -1312,6 +1341,7 @@ def build_summary_markdown(
         "## Advisory checks",
         f"- Leakage Scan: {_fmt_status(schema.leakage_scan.status)}",
         _worker_line(schema),
+        _ai_audit_line(schema),
         (
             f"- Static Checks: {_fmt_status(schema.static_checks.status)}"
             + (

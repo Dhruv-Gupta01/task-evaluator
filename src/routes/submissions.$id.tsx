@@ -52,6 +52,7 @@ import { LogPanel } from "@/components/LogPanel";
 import { FlagsSection } from "@/components/FlagsPanel";
 import { PostFixPanel } from "@/components/PostFixPanel";
 import { GraderIsolationPanel } from "@/components/GraderIsolationPanel";
+import { AiAuditPanel } from "@/components/AiAuditPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -876,6 +877,7 @@ function SubmissionDetail() {
               );
             })()}
           <AiLayersOverview rubricCheck={data.rubric_check} aiDetection={data.ai_detection} />
+          <AiAuditPanel id={id} data={data.ai_audit} validated={validated} onChange={invalidate} />
         </StageCard>
 
         {/* Instruction Sufficiency */}

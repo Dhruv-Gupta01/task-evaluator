@@ -282,6 +282,16 @@ class AiDetectionResult(BaseModel):
     logs: str | None = None
 
 
+class AiAuditResult(BaseModel):
+    """Human audit for AI detection: a named person's approve / dispute / unsure on instruction.md,
+    solution/solve.sh and an overall call. `decisions` maps target to {ruling, adjudicator, reason, at,
+    stale}; `stale` lists targets whose files changed after the ruling. Advisory: never a gate."""
+    decisions: dict[str, dict] = {}
+    history: list[dict] = []
+    stale: list[str] = []
+    summary: str = "No human audit yet."
+
+
 class VariantProbeResult(BaseModel):
     """Valid-variant probe. Advisory: a model proposes forms of the Oracle's
     answer that the instruction allows, each is run through the real verifier,
@@ -474,6 +484,7 @@ class SubmissionSchema(BaseModel):
     tb_static_checks: TbStaticChecksResult
     grader_isolation: GraderIsolationResult = GraderIsolationResult(status="not-run")
     ai_detection: AiDetectionResult
+    ai_audit: AiAuditResult = AiAuditResult()
     answer_exposure: AnswerExposureResult
     tier0: Tier0Result
     tier0_decisions: dict[str, dict] = {}

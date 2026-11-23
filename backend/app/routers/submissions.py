@@ -15,6 +15,7 @@ from app.db import get_db
 from app.models import Flag, LlmSpend, Run, Submission
 from app.schemas import SubmissionListItem, SubmissionSchema, UploadResponse
 from app.services import (
+    ai_audit,
     grader_isolation,
     budget,
     flags,
@@ -1070,6 +1071,39 @@ def _require_grader_isolation(submission_id: str, db: Session) -> None:
         )
 
 
+class AiAuditDecision(BaseModel):
+    target: str  # instruction.md | solution/solve.sh | overall
+    ruling: str  # approved | disputed | unsure
+    adjudicator: str
+    reason: str = ""
+
+
+@router.put("/submissions/{submission_id}/ai-detection-decision")
+def set_ai_detection_decision(submission_id: str, body: AiAuditDecision, db: Session = Depends(get_db)) -> dict:
+    """Human audit for AI detection: a named person approves, disputes or is unsure about the AI use in
+    instruction.md, solution/solve.sh or overall, with a written reason (not needed for unsure). Kept
+    against a fingerprint of those two files, with history. Advisory; never changes a gate."""
+    submission, task_root = _task_root_for(submission_id, db)
+    error = ai_audit.decision_error(body.target, body.ruling, body.adjudicator, body.reason)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="ai_audit_decision", run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind="ai_audit_decision", run_index=0, status="passed")
+        db.add(run)
+    try:
+        stored = json.loads(run.logs) if run.logs else {}
+    except ValueError:
+        stored = {}
+    made = ai_audit.entry(body.ruling, body.adjudicator, body.reason, ai_audit.fingerprint(task_root))
+    stored.setdefault("current", {})[body.target] = made
+    stored.setdefault("history", []).append({"target": body.target, **made})
+    run.logs = json.dumps(stored)
+    db.commit()
+    db.refresh(submission)
+    return submission_service._ai_audit_result(submission).model_dump()
+
+
 @router.post("/submissions/{submission_id}/evidence-set", status_code=202)
 async def trigger_evidence_set(
     submission_id: str, which: str = "standard", max_cost_usd: float | None = None, db: Session = Depends(get_db)
@@ -1524,6 +1558,12 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
                 if isinstance(_json_or_raw(r.logs), dict) else None
                 for r in schema.cheat_trial.runs
             ],
+        },
+        "ai_detection": {
+            "status": schema.ai_detection.status,
+            "not_run": schema.ai_detection.status == "not-run",
+            "report": _json_or_raw(schema.ai_detection.logs),
+            "human_audit": schema.ai_audit.model_dump(),
         },
         "answer_exposure": {
             "status": schema.answer_exposure.status,
