@@ -194,7 +194,7 @@ def _cwd_at(test_sh: str, needle: re.Pattern, default: str | None) -> str | None
     return None
 
 
-def check_agent_code_in_process(t: _Task, report) -> None:
+def _import_hits(t: _Task) -> list[str]:
     hits: list[str] = []
     for rel, text in t.tests_py:
         names = _agent_names(text, t.agent_dirs)
@@ -211,6 +211,11 @@ def check_agent_code_in_process(t: _Task, report) -> None:
             hits.append(
                 f"tests/test.sh: `python -m pytest` runs from {cwd}, which `python -m` puts first on sys.path"
             )
+    return hits
+
+
+def check_agent_code_in_process(t: _Task, report) -> None:
+    hits = _import_hits(t)
     if hits:
         report.add(
             "verifier_imports_agent_code",
@@ -566,6 +571,99 @@ def check_agent_code_privileges(t: _Task, report) -> None:
         )
 
 
+# ---- is a Worker needed? (one result per task) -----------------------------
+
+_SERVICE_START_RE = re.compile(
+    r"\bsupervisorctl\b[^\n]*\b(?:start|restart|update|reload)\b|\bsystemctl\s+(?:start|restart|enable|daemon-reload)\b"
+    r"|\bservice\s+\S+\s+start\b|\bdocker[- ]compose\s+(?:-\S+\s+\S+\s+)*up\b|\bdocker\s+compose\s+(?:-\S+\s+\S+\s+)*up\b"
+)
+_VM_RE = re.compile(r"\bqemu-system-\w+|\bfirecracker\b|\bkvm\b", re.I)
+_NO_NEW_PRIVS_RE = re.compile(r"no-new-privs|no_new_privs|NO_NEW_PRIVS")
+_KILLS_CHILDREN_RE = re.compile(r"killpg|pkill|kill\s+-9|os\.kill\(|\.kill\(\)|setsid\s+-w|--kill-on-exit|start_new_session")
+_WORKER_FIX = (
+    "Run the agent's code through Reward Kit's Worker(...).run(...) (pin harbor-rewardkit==0.2.4 in tests/), "
+    "add tests/reward.toml, bump the task's minor version, and keep the pass/fail conditions the same."
+)
+
+
+def _service_launches(t: _Task) -> list[str]:
+    """Lines in test.sh or a test's shell strings that start a service from an agent-writable place."""
+    hits = []
+    for i, line in _shell_lines(t.test_sh):
+        if not line.lstrip().startswith("#") and _SERVICE_START_RE.search(line) and _mentions_agent(line, t.agent_dirs, set()):
+            hits.append(f"tests/test.sh:{i}")
+    for rel, text in t.tests_py:
+        names = _agent_names(text, t.agent_dirs)
+        for line, call in _calls(text, re.compile(r"\b(?:subprocess\.\w+|os\.system)\(")):
+            if _SERVICE_START_RE.search(call.replace('", "', " ").replace("', '", " ")) and _mentions_agent(call, t.agent_dirs, names):
+                hits.append(f"{rel}:{line}")
+    return hits
+
+
+def analyze_worker_requirement(task_root: Path) -> dict:
+    """{result: not_required | present | equivalent | missing, evidence: [file:line], absent: [...], note}.
+    Static and heuristic, so a person decides; the way-2 gate reads this same result."""
+    t = _load(task_root)
+    runs = _agent_runs(t)
+    workers = _worker_runs(t)
+    imports = _import_hits(t)
+    services = _service_launches(t)
+    undropped = [w for w, dropped, _ in runs if not dropped]
+    everything = sorted({w for w, _, _ in runs} | set(imports) | set(services))
+    alltext = t.test_sh + "\n" + "\n".join(text for _, text in t.tests_py)
+    exposed = sorted(set(undropped) | set(imports) | set(services))
+    if workers:
+        return {"result": "present", "evidence": workers, "absent": [], "also_unprotected": exposed, "note": ""}
+    if not everything:
+        return {"result": "not_required", "evidence": [], "absent": [], "also_unprotected": [], "note": ""}
+    if _VM_RE.search(alltext):
+        return {"result": "not_required", "evidence": everything, "absent": [], "also_unprotected": [],
+                "note": "agent code runs inside a VM"}
+    absent = []
+    if undropped or imports or services:
+        absent.append("a separate unprivileged user")
+    locked = bool(_LOCKS_TESTS_RE.search(alltext))
+    if not locked:
+        absent.append("/tests locked against that user")
+    if not _NO_NEW_PRIVS_RE.search(alltext):
+        absent.append("no-new-privs")
+    if not _KILLS_CHILDREN_RE.search(alltext):
+        absent.append("leftover child processes killed")
+    if not absent:
+        return {"result": "equivalent", "evidence": everything, "absent": [], "also_unprotected": [], "note": ""}
+    return {"result": "missing", "evidence": everything, "absent": absent, "also_unprotected": [], "note": ""}
+
+
+def check_worker_required(t: _Task, report) -> None:
+    a = analyze_worker_requirement(t.root)
+    where = _listed(a["evidence"])
+    if a["result"] == "not_required":
+        why = " (agent code runs inside a VM)" if a["note"] else ": nothing the agent wrote runs during grading"
+        report.add("verifier_worker_required", "info", f"Worker required: no{why}.")
+    elif a["result"] == "present":
+        extra = a["also_unprotected"]
+        if extra:
+            report.add(
+                "verifier_worker_required", "warn",
+                f"Worker required: yes, present at {where}, but agent code also runs outside it ({_listed(extra)}). "
+                f"{_WORKER_FIX}",
+            )
+        else:
+            report.add("verifier_worker_required", "info", f"Worker required: yes, present ({where}).")
+    elif a["result"] == "equivalent":
+        report.add(
+            "verifier_worker_required", "info",
+            f"Worker required: yes, equivalent isolation by hand ({where}): separate user, no-new-privs, /tests locked and "
+            "leftover processes killed. Needs a human to confirm it covers every run.",
+        )
+    else:
+        report.add(
+            "verifier_worker_required", "warn",
+            f"Worker required: YES, missing. Agent code runs in the verifier at {where} without: "
+            f"{', '.join(a['absent'])}. {_WORKER_FIX} (Heuristic: needs a human to confirm.)",
+        )
+
+
 # ---- evaluating answer text, verdict channels, seeds ------------------------
 
 _UNSAFE_LOADS = (
@@ -753,6 +851,7 @@ def run_isolation_checks(task_root: Path, report) -> None:
         check_reward_reset,
         check_agent_code_in_process,
         check_agent_code_privileges,
+        check_worker_required,
         check_answer_evaluation,
         check_source_scanning,
         check_verdict_channels,

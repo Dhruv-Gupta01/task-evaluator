@@ -1,0 +1,99 @@
+"""Way 2: the "Grader Isolation" gate. Reads the way-1 result, adds `unclear` and a reviewer override
+stored against a fingerprint of the grader's files. Advisory by default (GRADER_ISOLATION_ENFORCE off)."""
+import pytest
+
+from app.services import grader_isolation as gi
+from tests.test_verifier_isolation_detection import _task
+from tests.test_worker_required import RUN_AS_ROOT, WORKER
+
+QUIET = 'def test_x():\n    assert open("/app/out.txt").read() == "1"\n'
+
+
+def test_a_task_that_runs_no_agent_code_passes(tmp_path):
+    e = gi.evaluate(_task(tmp_path, QUIET))
+    assert e["state"] == "ok" and e["analysis"] == "not_required"
+
+
+def test_a_worker_passes(tmp_path):
+    assert gi.evaluate(_task(tmp_path, WORKER))["state"] == "ok"
+
+
+def test_unprotected_agent_code_is_missing(tmp_path):
+    e = gi.evaluate(_task(tmp_path, RUN_AS_ROOT))
+    assert e["state"] == "missing" and "tests/test_x.py:4" in e["evidence"]
+
+
+def test_a_worker_beside_an_unprotected_run_is_unclear(tmp_path):
+    body = WORKER + "\n" + RUN_AS_ROOT.split("\n\n", 1)[1].replace("test_x", "test_y")
+    assert gi.evaluate(_task(tmp_path, body))["state"] == "unclear"
+
+
+def test_only_the_python_m_pytest_heuristic_is_unclear_not_missing(tmp_path):
+    t = _task(tmp_path, QUIET, "cd /app\npython -m pytest /tests/test_x.py\n")
+    (t / "task.toml").write_text('[task]\nname = "terminal-bench/x"\n')  # shared mode
+    e = gi.evaluate(t)
+    assert e["analysis"] == "missing" and e["state"] == "unclear"
+
+
+def test_status_is_passed_only_for_ok():
+    assert gi.gate_status("ok") == "passed"
+    assert gi.gate_status("missing") == "failed" and gi.gate_status("unclear") == "failed"
+
+
+def test_the_fingerprint_changes_when_the_grader_changes(tmp_path):
+    t = _task(tmp_path, QUIET)
+    a = gi.fingerprint(t)
+    assert a == gi.fingerprint(t)
+    (t / "tests" / "test_x.py").write_text(QUIET + "# edit\n")
+    assert gi.fingerprint(t) != a
+    b = gi.fingerprint(t)
+    (t / "solution").mkdir(exist_ok=True)
+    (t / "solution" / "solve.sh").write_text("echo hi\n")
+    assert gi.fingerprint(t) == b  # the solution is not the grader
+
+
+def override(t, result="not_required", **kw):
+    return {"result": result, "reason": "task's own render.py, not agent code", "adjudicator": "Dhruv",
+            "fingerprint": gi.fingerprint(t), "at": "2026-11-23T00:00:00+00:00", **kw}
+
+
+def test_a_reviewer_can_clear_a_wrong_missing(tmp_path):
+    t = _task(tmp_path, RUN_AS_ROOT)
+    out = gi.apply_override(gi.evaluate(t), override(t), gi.fingerprint(t))
+    assert out["state"] == "ok" and out["source"] == "reviewer" and out["override"]["adjudicator"] == "Dhruv"
+
+
+def test_a_reviewer_can_mark_it_missing(tmp_path):
+    t = _task(tmp_path, QUIET)
+    out = gi.apply_override(gi.evaluate(t), override(t, "missing"), gi.fingerprint(t))
+    assert out["state"] == "missing"
+
+
+def test_an_override_for_an_older_grader_is_ignored_and_reported_stale(tmp_path):
+    t = _task(tmp_path, RUN_AS_ROOT)
+    o = override(t)
+    (t / "tests" / "test_x.py").write_text(RUN_AS_ROOT + "# changed\n")
+    out = gi.apply_override(gi.evaluate(t), o, gi.fingerprint(t))
+    assert out["state"] == "missing" and out["source"] == "detected" and out["override_stale"] is True
+
+
+@pytest.mark.parametrize("state,enforce,blocks", [
+    ("ok", True, False), ("missing", True, True), ("unclear", True, True),
+    ("missing", False, False), ("unclear", False, False),
+])
+def test_it_blocks_only_when_enforced_and_not_ok(state, enforce, blocks):
+    assert gi.blocks(state, enforce) is blocks
+
+
+@pytest.mark.parametrize("bad", [
+    {"result": "maybe", "reason": "x", "adjudicator": "a"},
+    {"result": "equivalent", "reason": "", "adjudicator": "a"},
+    {"result": "equivalent", "reason": "x", "adjudicator": " "},
+    {"result": "equivalent", "reason": "x" * 3000, "adjudicator": "a"},
+])
+def test_an_override_needs_a_valid_result_a_reason_and_a_name(bad):
+    assert gi.override_error(bad["result"], bad["reason"], bad["adjudicator"])
+
+
+def test_a_good_override_has_no_error():
+    assert gi.override_error("equivalent", "separate user, locked", "Dhruv") is None

@@ -882,6 +882,23 @@ export function agentLabel(
 }
 export type AgentChoice = (typeof AGENT_CHOICES)[number]["value"];
 
+// Grader Isolation gate (way 2 of the Worker flag): does agent-written code run in the verifier
+// without a Worker or equivalent isolation? Advisory unless `enforced`.
+export interface GraderIsolationResult {
+  status: StageStatus;
+  state: "ok" | "missing" | "unclear" | null;
+  analysis: "not_required" | "present" | "equivalent" | "missing" | null;
+  source: "detected" | "reviewer" | null;
+  evidence: string[];
+  absent: string[];
+  also_unprotected: string[];
+  note: string;
+  override: { result: string; reason: string; adjudicator: string; at: string } | null;
+  override_stale: boolean;
+  enforced: boolean;
+  blocks: boolean;
+}
+
 export interface Submission {
   id: string;
   task_name: string;
@@ -902,6 +919,7 @@ export interface Submission {
   reviewer_decisions: Record<string, ReviewerDecision>;
   static_checks: StaticChecksResult;
   tb_static_checks: TbStaticChecksResult;
+  grader_isolation: GraderIsolationResult;
   ai_detection: AiDetectionResult;
   answer_exposure: AnswerExposureResult;
   tier0: Tier0Result;
@@ -1182,6 +1200,23 @@ export const api = {
     fetch(`${API_BASE_URL}/submissions/${id}/static-checks`, { method: "POST" }).then(
       handle<unknown>,
     ),
+  graderIsolation: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/grader-isolation`, { method: "POST" }).then(
+      handle<GraderIsolationResult>,
+    ),
+  graderIsolationDecision: (
+    id: string,
+    body: {
+      result: "not_required" | "equivalent" | "missing";
+      reason: string;
+      adjudicator: string;
+    },
+  ) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/grader-isolation-decision`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(handle<GraderIsolationResult>),
   tbStaticChecks: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/tb-static-checks`, { method: "POST" }).then(
       handle<unknown>,

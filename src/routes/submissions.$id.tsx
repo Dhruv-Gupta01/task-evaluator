@@ -47,6 +47,7 @@ import {
 } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogPanel } from "@/components/LogPanel";
+import { GraderIsolationPanel } from "@/components/GraderIsolationPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -862,6 +863,20 @@ function SubmissionDetail() {
                 </>
               );
             })()}
+        </StageCard>
+
+        {/* Grader Isolation gate */}
+        <StageCard
+          title="Grader Isolation"
+          description="Does agent-written code run in the verifier without a Reward Kit Worker or equivalent isolation? Advisory by default; a reviewer can rule on it."
+          status={data.grader_isolation.status}
+        >
+          <GraderIsolationPanel
+            id={id}
+            data={data.grader_isolation}
+            validated={validated}
+            onChange={invalidate}
+          />
         </StageCard>
 
         {/* TB Static Checks */}

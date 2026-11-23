@@ -361,6 +361,25 @@ class FreshBuildResult(BaseModel):
     logs: str | None = None
 
 
+class GraderIsolationResult(BaseModel):
+    """The Grader Isolation gate (way 2 of the Worker flag). `state` is ok / missing / unclear after any
+    reviewer ruling; `analysis` is the way-1 result (not_required, present, equivalent, missing).
+    Advisory unless `enforced`. `override` is the reviewer's ruling (result, reason, adjudicator, at);
+    `override_stale` means the grader changed after it was made, so it no longer applies."""
+    status: StageStatus
+    state: str | None = None
+    analysis: str | None = None
+    source: str | None = None  # "detected" or "reviewer"
+    evidence: list[str] = []
+    absent: list[str] = []
+    also_unprotected: list[str] = []
+    note: str = ""
+    override: dict | None = None
+    override_stale: bool = False
+    enforced: bool = False
+    blocks: bool = False
+
+
 class RubricCheckResult(BaseModel):
     """`harbor check`: an evaluator agent scores the whole task against
     Harbor's quality rubric (not the agent trials -- see FailureAnalysisResult
@@ -423,6 +442,7 @@ class SubmissionSchema(BaseModel):
     reviewer_decisions: dict[str, dict] = {}
     static_checks: StaticChecksResult
     tb_static_checks: TbStaticChecksResult
+    grader_isolation: GraderIsolationResult = GraderIsolationResult(status="not-run")
     ai_detection: AiDetectionResult
     answer_exposure: AnswerExposureResult
     tier0: Tier0Result
