@@ -177,6 +177,26 @@ Files: backend/storage/submissions/{id}/ (zip, extracted task, logs, Harbor outp
     integrity on a real Claude Code or Codex trial, the output scan and timed-repeat check on real tasks,
     G26 as a non-root agent.
 
+- **Gap-closing batch (2026-11-23)**: eight items from the "Platform checks tracker" sheet. All advisory.
+  - *Harbor's own failure classification*: a copy of Harbor 0.26.0's table of failure types. A trial Harbor
+    says has no valid reward (cancelled, a missing reward file, a verifier timeout) or whose reward is NaN or
+    infinite is marked and left out of the pass rate and pass@k (a banner and an evidence line say how many).
+    The one automatic retry now also covers an agent that exited non-zero while the log shows infrastructure
+    noise (Harbor grades those as a real 0), and never restarts a cancelled trial. A test compares the copy with
+    the installed Harbor, so refresh it when Harbor is upgraded.
+  - *Four new Static Checks*: a `reward.toml` Reward Kit 0.2.4 would reject (read from Reward Kit's own source),
+    a grader that decides from a success word the agent's program prints, a Lean grader that decides from text in
+    Lean's output, and a test that asserts on one timing sample.
+  - *Regrade explained by a model* (opt-in, costs credits): tick the box next to Re-grade and a model labels each
+    changed trial expected, unexpected or unclear, from the rewards, the missing tests and what changed in the
+    task. At most 12 calls; a failure never loses the regrade.
+  - *Checked on real tasks*: the new checks stay quiet on pg-wal, the smoke task and the int8-style task. Running
+    them found a false alarm in the earlier timed-repeats check (a loop whose input varies inside an f-string),
+    now fixed.
+  - *Decisions*: a missing or invalid `ctrf.json` stays a warning, not a gate; Harbor's Fortify is not
+    integrated (the Tier 1 fixer and the tier cycle do that job); the platform stays on the harbor command and
+    does not move to `harbor serve`.
+
 ### Terminal-Bench 5.0 additions (branch `harbor-5.0`)
 
 All advisory, no new buttons; each extends an existing stage.
@@ -318,6 +338,11 @@ Read these before relying on the platform.
     cases); a CI step on every edit (every upload is already compared with the previous one); a shared-mode
     grader hardened against G26 needs binary integrity checks, not built. Singularity-Bench's API router,
     DNS tunnelling, port squatting and token-copying attacks belong to model-training tasks.
+13. **Genuine gaps still open from the research sheet**: a verifier network allowlist (restricted networks gave false
+    zeros and blocked sidecars), Reward Kit Worker privileges after dropping them, one task's own memory
+    measurement, cleanup of a command's child processes in Reward Kit, and a deterministic check that a grader
+    recomputes the result (only the model-based Sufficiency tags ask). **Keep in step with Harbor**: the copy of
+    Harbor's failure table must be refreshed after a Harbor upgrade (a test fails when it differs).
 
 ## 8. Working on the code
 

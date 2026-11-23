@@ -247,6 +247,28 @@ checked; fingerprinting system programs around the agent (Harbor owns that switc
 edit (every upload is already compared with the previous one); a shared-mode grader hardened against G26
 needs binary integrity checks.
 
+### Gap-closing batch (Harbor research sheet)
+
+Eight gaps from the "Platform checks tracker" sheet. All advisory.
+
+| Area | What it does | Where it shows |
+|---|---|---|
+| Harbor's failure classification | A trial Harbor says has no valid reward (cancelled, a missing reward file, a verifier timeout), or whose reward is NaN or infinite, is marked and left out of the pass rate and pass@k. The one automatic infra retry also covers an agent that exited non-zero while the log shows infrastructure noise, and never restarts a cancelled trial. The table is a copy of Harbor 0.26.0's, checked by a test. | Agent Trials, evidence summary |
+| `reward.toml` check | Warns when a Reward Kit 0.2.4 would reject the file (the old directory-wide `[scoring]`, a `weight`, an unknown key or aggregation). Read from Reward Kit's own source. | Static Checks |
+| Printed success words | Warns when a grader runs the agent's program and decides from a success word it prints. | Static Checks |
+| Lean output | Warns when a Lean grader decides from text in Lean's output. | Static Checks |
+| One timing sample | Notes a test that asserts on one timing measurement with no repeats, median or minimum. | Static Checks |
+| Regrade explained by a model | Opt-in checkbox next to Re-grade: a model labels each changed trial expected, unexpected or unclear. At most 12 calls, counted in the budget. | Re-grade Saved Trials |
+
+**Decisions:** a missing or invalid `ctrf.json` stays a warning, not a gate. Harbor's Fortify is not integrated,
+because the Tier 1 fixer and the tier cycle do that job. The platform stays on the harbor command and does not
+move to `harbor serve`.
+
+**Still open:** a verifier network allowlist, Reward Kit Worker privileges, one task's memory measurement,
+child-process cleanup in Reward Kit, and a deterministic "grader recomputes the result" check.
+**Checked on real tasks:** the new checks stay quiet on pg-wal, the smoke task and the int8-style task (3 tasks).
+**Not checked:** the Lean check on a real Lean task, and the retry change with a real failing agent.
+
 ## Notes
 
 - **Docker platform**: every build and container run (Build, and Oracle/Nop/Agent Trials via
