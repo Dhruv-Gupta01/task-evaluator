@@ -177,6 +177,7 @@ Files: backend/storage/submissions/{id}/ (zip, extracted task, logs, Harbor outp
     integrity on a real Claude Code or Codex trial, the output scan and timed-repeat check on real tasks,
     G26 as a non-root agent.
 
+- **Flag 15.39, plain answers under `tests/` (2026-11-23)**: a Blocker Flag (static, no Docker or LLM) for expected answers stored in clear text in JSON/JSONL data files under `tests/`, because Tier 1 gives its attacker a read-only copy of `tests/` and plain answers are copied. Where hashing fits it is a Blocker with the fix (a `<key>_sha256` fingerprint, the grader hashes the agent's output); where it does not (a tolerance comparison, or a generator under `tests/`) it is advisory and the ruling must say why. It does not close readable inputs plus a reachable answer source (the int8 lookup-table attack). Rulings work like every other Flag. Only JSON/JSONL is read. On the stored real tasks: pg-wal and a web task quiet, the 51-file task advisory.
 - **Worker required and the Grader Isolation gate (2026-11-23)**: two steps, test-first.
   - *Way 1, advice only*: the Static Check `verifier_worker_required` (`verifier_isolation.analyze_worker_requirement`)
     reads the task's files as text and returns `not_required`, `present`, `equivalent` or `missing`. Agent code counts

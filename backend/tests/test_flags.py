@@ -85,11 +85,11 @@ def fired(root: Path, rule: str, **ctx) -> list[fr.Finding]:
     return fr.STATIC_RULES[rule](fr.load_context(root, **ctx)).findings
 
 
-def test_catalogue_has_38_rules_in_11_checks():
-    assert list(fr.RULES) == [f"15.{i}" for i in range(1, 39)]  # 15.38 (alternative solution rejected) came after the first 37
+def test_catalogue_has_39_rules_in_11_checks():
+    assert list(fr.RULES) == [f"15.{i}" for i in range(1, 40)]  # 15.38 (alternative solution rejected) and 15.39 (plain answers) came after the first 37
     assert len({r.check for r in fr.RULES.values()}) == 11
     for rule_id in fr.STATIC_RULES:
-        assert fr.RULES[rule_id].method == "static" and fr.RULES[rule_id].batch in (2, 3)
+        assert fr.RULES[rule_id].method == "static" and fr.RULES[rule_id].batch in (2, 3, 9)
 
 
 PSQL = 'import subprocess\ndef q(sql):\n    return subprocess.run(["psql", "-c", sql])\n'
@@ -338,4 +338,4 @@ def test_every_rule_has_one_group_and_the_groups_split_as_planned():
     assert groups["15.23"] == "static" and groups["15.24"] == "static"
     # probes and saved runs are results
     assert groups["15.1"] == groups["15.29"] == groups["15.38"] == "results"
-    assert sum(1 for v in groups.values() if v == "static") == 12
+    assert sum(1 for v in groups.values() if v == "static") == 13  # 15.39 (plain answers) joined the 12

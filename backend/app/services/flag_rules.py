@@ -93,6 +93,7 @@ RULES: dict[str, Rule] = {
         Rule("15.36", "CK-H", "A cheap model passed", ADVISORY, "result", 6),
         Rule("15.37", "CK-H", "A null-ladder rung passed", BLOCKER, "probe", 4),
         Rule("15.38", "CK-D", "A correct alternative solution is rejected", BLOCKER, "result", 6),
+        Rule("15.39", "CK-B", "Expected answers are stored in clear text under tests/", BLOCKER, "static", 9),
     )
 }
 
@@ -430,6 +431,90 @@ def rule_unbounded_read(ctx: Context) -> RuleResult:
             evidence,
         ))
     return RuleResult(findings, f"{len(evidence)} unbounded read(s) of agent artifacts")
+
+
+# ---- CK-B: plain answers under tests/ (15.39) ---------------------------------------
+
+_ANSWER_KEY_RE = re.compile(r"expect|answer|ground_?truth|golden|reference|oracle", re.I)
+_HASH_KEY_RE = re.compile(r"(?:_sha256|_hash|_digest|_fingerprint)$", re.I)
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$", re.I)
+_TOLERANCE_RE = re.compile(r"\bapprox\b|isclose|\batol\b|\brtol\b|rel_tol|abs_tol|tolerance|assert_allclose|allclose", re.I)
+_GENERATOR_RE = re.compile(r"(?:^|/)(?:gen(?:erat\w*)?|make_\w+|build_\w+|create_\w+)(?:[_./]|$)", re.I)
+_MIN_ANSWER_CHARS = 20
+
+
+def _plain_answers(value, path: str = "") -> list[tuple[str, int]]:
+    """(key path, size) of answer-like keys holding a long exact value that is not already a fingerprint."""
+    found: list[tuple[str, int]] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            here = f"{path}.{key}" if path else str(key)
+            if _ANSWER_KEY_RE.search(str(key)) and not _HASH_KEY_RE.search(str(key)):
+                if f"{key}_sha256" in value or f"{key}_hash" in value:
+                    continue
+                size = len(json.dumps(item, sort_keys=True, ensure_ascii=False)) if not isinstance(item, (bool, int, float)) else 0
+                if isinstance(item, str) and _HEX64_RE.match(item):
+                    continue
+                if isinstance(item, float) or isinstance(item, (bool, int)) or size < _MIN_ANSWER_CHARS:
+                    continue
+                found.append((here, size))
+                continue
+            found.extend(_plain_answers(item, here))
+    elif isinstance(value, list):
+        for i, item in enumerate(value):
+            found.extend(_plain_answers(item, f"{path}[{i}]"))
+    return found
+
+
+def rule_plain_answers(ctx: Context) -> RuleResult:
+    """15.39: expected answers sit in clear text in tests/ data files. Tier 1 hands an attacker a read-only
+    copy of tests/, so a grader that compares exact, unguessable values should store fingerprints instead."""
+    tests = ctx.root / "tests"
+    files = [p for p in sorted(tests.rglob("*")) if p.is_file() and p.suffix.lower() in (".json", ".jsonl")] if tests.is_dir() else []
+    evidence: list[str] = []
+    for path in files:
+        rel = path.relative_to(ctx.root).as_posix()
+        if "/vendor/" in rel or "node_modules" in rel:
+            continue
+        try:
+            raw = path.read_text()
+            docs = [json.loads(line) for line in raw.splitlines() if line.strip()] if path.suffix == ".jsonl" else [json.loads(raw)]
+        except (OSError, UnicodeDecodeError, ValueError):
+            continue
+        hits: dict[str, int] = {}
+        for doc in docs:
+            for key_path, _ in _plain_answers(doc):
+                # collapse list indexes so one file lists each key once, with a count
+                hits[re.sub(r"\[\d+\]", "[]", key_path)] = hits.get(re.sub(r"\[\d+\]", "[]", key_path), 0) + 1
+        for key_path, count in hits.items():
+            evidence.append(f"{rel}: `{key_path}` ({count} value{'s' if count != 1 else ''})")
+    note = f"{len(files)} data file(s) read; {len(evidence)} plain answer key(s)"
+    if not evidence:
+        return RuleResult([], note)
+    py_text = "\n".join(text for _, text in ctx.task.tests_py)
+    tolerance = bool(_TOLERANCE_RE.search(py_text))
+    generator = any(_GENERATOR_RE.search(p.relative_to(ctx.root).as_posix()) for p in tests.rglob("*") if p.is_file())
+    shown = evidence[:8] + ([f"(+{len(evidence) - 8} more)"] if len(evidence) > 8 else [])
+    limit = (
+        " Hashing alone does not close a task whose test inputs are readable and whose answer source is "
+        "reachable (an agent can ask the source for every answer): generate the inputs at grading time from a "
+        "seed that is not shipped, or hold cases back."
+    )
+    if tolerance or generator:
+        why = "a tolerance comparison (approx/isclose)" if tolerance else "a generator under tests/ that can rebuild the answers"
+        return RuleResult([Finding(
+            "15.39",
+            f"Expected answers are stored in clear text under tests/, and hashing does not fit here because of {why}. "
+            "Say so in the ruling; a copy of tests/ (as Tier 1 gives its attacker) shows the answers." + limit,
+            shown, key="not_hashable", severity=ADVISORY,
+        )], note)
+    return RuleResult([Finding(
+        "15.39",
+        "Expected answers are stored in clear text under tests/. A copy of tests/ (Tier 1 gives its attacker a read-only "
+        "one) hands over the answers. Store a SHA-256 fingerprint next to each (`<key>_sha256`, the hex digest of the "
+        "exact expected bytes or text) and have the grader hash the agent's output and compare digests." + limit,
+        shown,
+    )], note)
 
 
 # ---- CK-J: exposure and metadata --------------------------------------------------
@@ -852,6 +937,7 @@ STATIC_RULES = {
     "15.24": rule_verifier_time_budget,
     "15.26": rule_canary_reused,
     "15.35": rule_unbounded_read,
+    "15.39": rule_plain_answers,
     "15.18": rule_version_class,
     "15.25": rule_task_version,
     "15.30": rule_instruction_changed,
