@@ -14,6 +14,7 @@ from app.services.infra_marker_scan import scan_environment_causes, scan_trial_l
 from app.services.llm.base import Message
 from app.services.llm.factory import get_llm_client
 from app.services.static_checks import run_static_checks
+from app.services.submission_service import worker_required_from_report
 from app.services.submission_service import to_schema
 
 MAX_TRIAL_LOG_CHARS = 4_000
@@ -101,6 +102,9 @@ def all_gates_terminal(submission) -> tuple[bool, list[str]]:
         missing.append("sufficiency")
     if schema.agent_trials.status not in _TERMINAL_STATUSES:
         missing.append("agent_trials")
+    # an advisory gate (the default) never holds the report back; an enforced one must have been run
+    if schema.grader_isolation.enforced and schema.grader_isolation.status not in _TERMINAL_STATUSES:
+        missing.append("grader_isolation")
     return (len(missing) == 0, missing)
 
 
@@ -175,4 +179,5 @@ async def run_review_report(submission, task_root: Path) -> dict:
         "report_markdown": response.text,
         "static_fail_count": static_report.fail_count,
         "static_warn_count": static_report.warn_count,
+        "worker_required": worker_required_from_report(static_report),
     }

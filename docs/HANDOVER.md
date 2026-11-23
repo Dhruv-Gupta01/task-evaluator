@@ -177,6 +177,24 @@ Files: backend/storage/submissions/{id}/ (zip, extracted task, logs, Harbor outp
     integrity on a real Claude Code or Codex trial, the output scan and timed-repeat check on real tasks,
     G26 as a non-root agent.
 
+- **Worker required and the Grader Isolation gate (2026-11-23)**: two steps, test-first.
+  - *Way 1, advice only*: the Static Check `verifier_worker_required` (`verifier_isolation.analyze_worker_requirement`)
+    reads the task's files as text and returns `not_required`, `present`, `equivalent` or `missing`. Agent code counts
+    when the grader runs it (subprocess, test.sh, compilers, provers), imports it (`sys.path`, `importlib`, `runpy`,
+    `PYTHONPATH`) or starts a service from an agent path (`supervisorctl`, `systemctl`, `service x start`,
+    `docker compose up`; the task's own services do not count). `missing` is a warning with file:line evidence, the
+    protections that are absent and the fix text. It shows in the evidence summary and as `worker_required` in the
+    Review Report result. On the stored real tasks: pg-wal `present`, a web task `not_required`, the smoke task
+    `missing` (its `python -m pytest` from `/app`, the old shared-mode finding).
+  - *Way 2, the gate*: `services/grader_isolation.py`, `POST /grader-isolation`, `PUT /grader-isolation-decision`, the
+    Grader Isolation card. States `ok`/`missing`/`unclear`; a reviewer ruling needs a reason and a name and is kept
+    against a fingerprint of `tests/`, `task.toml` and the environment Dockerfile (stale when the grader changes).
+    `GRADER_ISOLATION_ENFORCE` (default false) makes it block agent stages (409) and the Review Report; off, it only
+    records. Neither step adds isolation to a task: the author does that, with a Reward Kit `Worker`.
+  - *Not built*: the 37th rubric criterion `untrusted_code_isolation` (it would make our copy of the TB rubric differ
+    from upstream), a bulk run over stored tasks, and a live run of the card in a browser. `missing` stays a warning,
+    not a fail, because the detection is heuristic.
+
 - **Gap-closing batch (2026-11-23)**: eight items from the "Platform checks tracker" sheet. All advisory.
   - *Harbor's own failure classification*: a copy of Harbor 0.26.0's table of failure types. A trial Harbor
     says has no valid reward (cancelled, a missing reward file, a verifier timeout) or whose reward is NaN or

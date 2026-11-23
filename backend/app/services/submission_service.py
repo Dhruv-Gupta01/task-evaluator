@@ -2,10 +2,11 @@ import json
 import math
 import re
 from collections import Counter
+from pathlib import Path
 
 from app.config import get_settings
 from app.models import LlmSpend, Run, Submission
-from app.services import image_inventory, network_policy, solution_variants, verifier_report, versions, web_use
+from app.services import grader_isolation, image_inventory, network_policy, solution_variants, verifier_report, versions, web_use
 from app.services.harbor_runner import CODEX_BAKE_NOTE_MARKER
 from app.services.task_config import TaskConfig
 from app.services.tier2 import memory as tier2_memory
@@ -37,6 +38,7 @@ from app.schemas import (
     ReviewReportResult,
     StageResult,
     StageStatus,
+    GraderIsolationResult,
     StaticChecksResult,
     TbStaticChecksResult,
     AiDetectionResult,
@@ -586,6 +588,29 @@ def _reviewer_decisions(run: Run | None) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _grader_isolation_result(submission: Submission) -> GraderIsolationResult:
+    run = _get_run(submission, "grader_isolation")
+    enforced = bool(get_settings().grader_isolation_enforce)
+    if run is None or not run.logs or not submission.extracted_path:
+        return GraderIsolationResult(status="not-run", enforced=enforced)
+    try:
+        evaluation = json.loads(run.logs)
+        decisions = _reviewer_decisions(_get_run(submission, "grader_isolation_decision"))
+        out = grader_isolation.apply_override(
+            evaluation, decisions.get("current"), grader_isolation.fingerprint(Path(submission.extracted_path))
+        )
+    except (ValueError, OSError, AttributeError):
+        return GraderIsolationResult(status="failed", note="the stored result could not be read", enforced=enforced)
+    return GraderIsolationResult(
+        status=grader_isolation.gate_status(out["state"]),  # type: ignore[arg-type]
+        state=out["state"], analysis=out.get("analysis"), source=out["source"],
+        evidence=out.get("evidence", []), absent=out.get("absent", []),
+        also_unprotected=out.get("also_unprotected", []), note=out.get("note", ""),
+        override=out["override"], override_stale=out["override_stale"],
+        enforced=enforced, blocks=grader_isolation.blocks(out["state"], enforced),
+    )
+
+
 def _regrade_result(run: Run | None) -> RegradeResult:
     if run is None:
         return RegradeResult(status="not-run", logs=None)
@@ -634,6 +659,7 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         reviewer_decisions=_reviewer_decisions(_get_run(submission, "reviewer_decision")),
         static_checks=_static_checks_result(_get_run(submission, "static_checks")),
         tb_static_checks=_tb_static_checks_result(_get_run(submission, "tb_static_checks")),
+        grader_isolation=_grader_isolation_result(submission),
         ai_detection=_ai_detection_result(_get_run(submission, "ai_detection")),
         answer_exposure=_answer_exposure_result(_get_run(submission, "answer_exposure")),
         tier0=_tier0_result(_get_run(submission, "tier0_probes")),
@@ -1137,6 +1163,56 @@ def verifier_reports(schema: SubmissionSchema) -> list[dict]:
     ]
 
 
+_WORKER_LABELS = {
+    "not_required": "Worker required: no",
+    "present": "Worker required: yes – present",
+    "equivalent": "Worker required: yes – equivalent isolation by hand",
+    "missing": "Worker required: YES – missing",
+}
+
+
+def _worker_badge(message: str) -> dict | None:
+    head = message.lower()
+    if head.startswith("worker required: no"):
+        result = "not_required"
+    elif head.startswith("worker required: yes, present"):
+        result = "present"
+    elif head.startswith("worker required: yes, equivalent"):
+        result = "equivalent"
+    elif head.startswith("worker required: yes, missing"):
+        result = "missing"
+    else:
+        return None
+    return {"result": result, "label": _WORKER_LABELS[result], "detail": message,
+            "partial": result == "present" and "also runs outside" in head}
+
+
+def worker_required_badge(static_logs: str | None) -> dict | None:
+    """The Static Check `verifier_worker_required` as {result, label, detail, partial}, or None when
+    Static Checks has not run or has no such finding. Advisory evidence, never a gate."""
+    try:
+        results = (json.loads(static_logs) if static_logs else {}).get("results") or []
+    except (TypeError, ValueError, AttributeError):
+        return None
+    for r in results:
+        if isinstance(r, dict) and r.get("name") == "verifier_worker_required":
+            return _worker_badge(str(r.get("message", "")))
+    return None
+
+
+def worker_required_from_report(report) -> dict | None:
+    for r in report.results:
+        if r.name == "verifier_worker_required":
+            return _worker_badge(r.message)
+    return None
+
+
+def _worker_line(schema) -> str:
+    badge = worker_required_badge(schema.static_checks.logs)
+    if badge is None:
+        return "- Worker required: not checked (run Static Checks)"
+    return f"- {badge['label']}" + (" (agent code also runs outside it)" if badge["partial"] else "") + " [advisory; needs a human]"
+
 def build_summary_markdown(
     schema: SubmissionSchema, total_cost_usd: float | None, cost_report: dict | None = None
 ) -> str:
@@ -1235,6 +1311,7 @@ def build_summary_markdown(
         "",
         "## Advisory checks",
         f"- Leakage Scan: {_fmt_status(schema.leakage_scan.status)}",
+        _worker_line(schema),
         (
             f"- Static Checks: {_fmt_status(schema.static_checks.status)}"
             + (

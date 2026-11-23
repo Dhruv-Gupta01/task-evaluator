@@ -147,7 +147,8 @@ a few minutes). If one fails, see [Troubleshooting](#troubleshooting). To test a
 
 The submission page runs top to bottom in three sections: **Before the agent trials**, **Agent
 trials**, **After the agent trials**. A button that depends on an earlier stage is greyed out and
-says what it is waiting for. Only Build, Oracle, Nop, Sufficiency and Agent Trials are gates;
+says what it is waiting for. Only Build, Oracle, Nop, Sufficiency and Agent Trials are gates (the Grader Isolation card
+below is a sixth gate only when `GRADER_ISOLATION_ENFORCE=true`; by default it is advisory);
 everything else is **advisory** and never changes a gate. All of it comes from the task files
 and Harbor's own results, so a finding is a question for a reviewer, not a verdict.
 
@@ -246,6 +247,19 @@ Reward Kit); mechanical code mutants (the Weak-Answer Probe already does it); sw
 checked; fingerprinting system programs around the agent (Harbor owns that switch); a CI step on every task
 edit (every upload is already compared with the previous one); a shared-mode grader hardened against G26
 needs binary integrity checks.
+
+### Worker required and the Grader Isolation gate
+
+Does the task's grader run agent-written code without a Reward Kit `Worker` (or equivalent isolation)?
+The platform only reports this; it adds no isolation, the task author does.
+
+| Area | What it does | Where it shows |
+|---|---|---|
+| Worker required (Static Check `verifier_worker_required`) | Reads the task's files as text and gives one result: `not_required` (nothing agent-written runs in grading, or it runs in a VM), `present` (a `Worker` runs it), `equivalent` (a separate user, no-new-privs, `/tests` locked and children killed, all found in the task's files) or `missing` (agent code runs with none of that). Agent code counts when the grader runs it, imports it, or starts a service from an agent path (`supervisorctl`, `systemctl`, `docker compose up`). `missing` is a warning with file:line evidence, what is absent and the fix (use `Worker(...).run(...)`, pin `harbor-rewardkit==0.2.4`, add `tests/reward.toml`, bump the minor version). | Static Checks, evidence summary, Review Report (`worker_required`) |
+| Grader Isolation gate | Turns that result into `ok`, `missing` or `unclear` (a Worker with agent code also running outside it, or only the shared-mode `python -m pytest` note). A reviewer can rule not_required, equivalent or missing with a written reason and a name; the ruling is kept against a fingerprint of `tests/`, `task.toml` and `environment/Dockerfile`, so a changed grader is checked again. Advisory unless `GRADER_ISOLATION_ENFORCE=true`, which makes agent trials, the cheat trial, Tier 1, Tier 2, the tier cycle and evidence sets return 409 and the Review Report wait until it passes or a reviewer rules. | Grader Isolation card |
+
+It is a text-pattern guess, so a finding is a question for a person. Existing accepted tasks are not
+re-checked automatically; run the gate on each.
 
 ### Gap-closing batch (Harbor research sheet)
 

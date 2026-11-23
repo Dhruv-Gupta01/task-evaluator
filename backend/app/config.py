@@ -204,6 +204,9 @@ class Settings(BaseSettings):
     # Spending cap for all priced LLM use (agent trials and OpenAI judge
     # calls) per calendar month (UTC); 0 disables it.
     llm_budget_usd: float = 50.0
+    # Grader Isolation gate: off = advisory (recorded, never blocks); on = Agent Trials, the cheat tiers
+    # and the Review Report wait until it passes or a reviewer rules on it
+    grader_isolation_enforce: bool = False
 
 
 def host_env_for_subprocess(extra: dict[str, str] | None = None) -> dict[str, str]:

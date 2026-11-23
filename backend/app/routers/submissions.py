@@ -15,6 +15,7 @@ from app.db import get_db
 from app.models import Flag, LlmSpend, Run, Submission
 from app.schemas import SubmissionListItem, SubmissionSchema, UploadResponse
 from app.services import (
+    grader_isolation,
     budget,
     flags,
     generators,
@@ -189,6 +190,7 @@ async def trigger_agent_trials(
             status_code=400, detail=f"n must be between 1 and {settings.max_agent_trials}"
         )
     _require_built_submission(submission_id, db)
+    _require_grader_isolation(submission_id, db)
     _raise_if_over_budget(db, budget.exceeded_message(db))
 
     if append:
@@ -523,6 +525,7 @@ async def trigger_cheat_trial(
         raise HTTPException(status_code=400, detail="max_cost_usd must be between 0 and 10000")
     _raise_if_over_budget(db, budget.exceeded_message(db))
     _require_built_submission(submission_id, db)
+    _require_grader_isolation(submission_id, db)
 
     # Each tier's evidence is kept (CK-I needs tier 1 and tier 2 side by side): a new run
     # replaces only the earlier trials of its own tier, plus unfinished ones (the new job
@@ -748,6 +751,7 @@ async def trigger_tier1(
         raise HTTPException(status_code=400, detail="max_cost_usd must be between 0 and 10000")
     _raise_if_over_budget(db, budget.exceeded_message(db))
     _require_built_submission(submission_id, db)
+    _require_grader_isolation(submission_id, db)
     if db.query(Run).filter_by(submission_id=submission_id, kind="oracle", reward=1).first() is None:
         raise HTTPException(status_code=400, detail="run the Oracle and get a pass first")
     _queue_row(db, submission_id, "tier1_loop")
@@ -822,6 +826,7 @@ async def trigger_tier_cycle(
         raise HTTPException(status_code=400, detail="max_cost_usd must be between 0 and 10000")
     _raise_if_over_budget(db, budget.exceeded_message(db))
     _require_built_submission(submission_id, db)
+    _require_grader_isolation(submission_id, db)
     if db.query(Run).filter_by(submission_id=submission_id, kind="oracle", reward=1).first() is None:
         raise HTTPException(status_code=400, detail="run the Oracle and get a pass first")
     for kind in ("tier_cycle", "tier0_probes", "tier1_loop"):
@@ -873,6 +878,7 @@ async def trigger_tier2(
         raise HTTPException(status_code=400, detail="there is no hardened copy from Tier 1 for this upload")
     _raise_if_over_budget(db, budget.exceeded_message(db))
     _require_built_submission(submission_id, db)
+    _require_grader_isolation(submission_id, db)
     if db.query(Run).filter_by(submission_id=submission_id, kind="oracle", reward=1).first() is None:
         raise HTTPException(status_code=400, detail="run the Oracle and get a pass first")
     _queue_row(db, submission_id, "tier2_loop")
@@ -972,6 +978,98 @@ def set_reviewer_decision(
     return decisions
 
 
+# ---- Grader Isolation gate (way 2 of the Worker flag) ----------------------------------------
+
+class GraderIsolationDecision(BaseModel):
+    result: str  # not_required | equivalent | missing
+    reason: str
+    adjudicator: str
+
+
+def _task_root_for(submission_id: str, db: Session) -> tuple[Submission, Path]:
+    submission = db.get(Submission, submission_id)
+    if submission is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if submission.extracted_path is None:
+        raise HTTPException(status_code=400, detail="validate the submission first (files must be extracted)")
+    return submission, Path(submission.extracted_path)
+
+
+def _store_grader_isolation(db: Session, submission_id: str, task_root: Path) -> None:
+    evaluation = grader_isolation.evaluate(task_root)
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="grader_isolation", run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind="grader_isolation", run_index=0)
+        db.add(run)
+    run.status = grader_isolation.gate_status(evaluation["state"])
+    run.reward = 1 if run.status == "passed" else 0
+    run.logs = json.dumps(evaluation)
+    run.finished_at = datetime.now(UTC)
+    db.commit()
+
+
+@router.post("/submissions/{submission_id}/grader-isolation")
+def run_grader_isolation(submission_id: str, db: Session = Depends(get_db)) -> dict:
+    """The Grader Isolation gate: does agent-written code run in the verifier without a Worker or
+    equivalent isolation? Static, no Docker or LLM, a second or two. Advisory unless
+    GRADER_ISOLATION_ENFORCE is on. A reviewer ruling made on the same grader files is kept."""
+    submission, task_root = _task_root_for(submission_id, db)
+    _store_grader_isolation(db, submission_id, task_root)
+    db.refresh(submission)
+    return submission_service._grader_isolation_result(submission).model_dump()
+
+
+@router.put("/submissions/{submission_id}/grader-isolation-decision")
+def set_grader_isolation_decision(
+    submission_id: str, body: GraderIsolationDecision, db: Session = Depends(get_db)
+) -> dict:
+    """A reviewer's ruling on the gate (not_required, equivalent or missing) with a written reason and a
+    name. It is kept against a fingerprint of tests/, task.toml and the environment Dockerfile, so a
+    changed grader is checked again. Run the gate first."""
+    submission, task_root = _task_root_for(submission_id, db)
+    error = grader_isolation.override_error(body.result, body.reason, body.adjudicator)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    if db.query(Run).filter_by(submission_id=submission_id, kind="grader_isolation", run_index=0).one_or_none() is None:
+        _store_grader_isolation(db, submission_id, task_root)
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="grader_isolation_decision", run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind="grader_isolation_decision", run_index=0, status="passed")
+        db.add(run)
+    history = submission_service._reviewer_decisions(run).get("history", [])
+    entry = {
+        "result": body.result, "reason": body.reason.strip(), "adjudicator": body.adjudicator.strip(),
+        "fingerprint": grader_isolation.fingerprint(task_root), "at": datetime.now(UTC).isoformat(),
+    }
+    run.logs = json.dumps({"current": entry, "history": [*history, entry]})
+    db.commit()
+    db.refresh(submission)
+    return submission_service._grader_isolation_result(submission).model_dump()
+
+
+def _require_grader_isolation(submission_id: str, db: Session) -> None:
+    """When GRADER_ISOLATION_ENFORCE is on, a stage that runs agents waits until the gate passes or a
+    reviewer rules on it. Off by default: nothing is blocked."""
+    if not settings.grader_isolation_enforce:
+        return
+    submission = db.get(Submission, submission_id)
+    if submission is None or submission.extracted_path is None:
+        return
+    if db.query(Run).filter_by(submission_id=submission_id, kind="grader_isolation", run_index=0).one_or_none() is None:
+        _store_grader_isolation(db, submission_id, Path(submission.extracted_path))
+        db.refresh(submission)
+    result = submission_service._grader_isolation_result(submission)
+    if result.blocks:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Grader Isolation is {result.state}: agent code may run in the verifier without a Worker "
+                f"({', '.join(result.evidence[:3]) or 'see the card'}). Fix the task, or a reviewer rules on it "
+                "(PUT /grader-isolation-decision), before agents run."
+            ),
+        )
+
+
 @router.post("/submissions/{submission_id}/evidence-set", status_code=202)
 async def trigger_evidence_set(
     submission_id: str, which: str = "standard", max_cost_usd: float | None = None, db: Session = Depends(get_db)
@@ -984,6 +1082,7 @@ async def trigger_evidence_set(
     if max_cost_usd is not None and not 0 < max_cost_usd <= 10_000:
         raise HTTPException(status_code=400, detail="max_cost_usd must be between 0 and 10000")
     _require_built_submission(submission_id, db)
+    _require_grader_isolation(submission_id, db)
     _raise_if_over_budget(db, budget.exceeded_message(db))
     await task_queue.submit(f"{submission_id}:agent", task_runner.run_evidence_set(submission_id, which, max_cost_usd))
     return {"status": "started", "pairs": json.dumps(task_runner.evidence_pairs(which))}
