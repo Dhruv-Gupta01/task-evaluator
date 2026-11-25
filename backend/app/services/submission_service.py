@@ -36,6 +36,8 @@ from app.schemas import (
     StageResult,
     StageStatus,
     GraderIsolationResult,
+    WorkerProbeCheck,
+    WorkerProbeResult,
     StaticChecksResult,
     TbStaticChecksResult,
     AiDetectionResult,
@@ -542,6 +544,22 @@ def _grader_isolation_result(submission: Submission) -> GraderIsolationResult:
     )
 
 
+def _worker_probe_result(run: Run | None) -> WorkerProbeResult:
+    if run is None:
+        return WorkerProbeResult(status="not-run")
+    if run.status in ("pending", "running") or not run.logs:
+        return WorkerProbeResult(status=run.status)  # type: ignore[arg-type]
+    try:
+        detail = json.loads(run.logs)
+        checks = [WorkerProbeCheck(**c) for c in detail.get("checks", [])]
+    except (ValueError, TypeError):
+        return WorkerProbeResult(status="failed", error="the stored result could not be read")
+    return WorkerProbeResult(
+        status=run.status,  # type: ignore[arg-type]
+        skipped=bool(detail.get("skipped")), checks=checks, note=detail.get("note", ""), error=detail.get("error"),
+    )
+
+
 def _regrade_result(run: Run | None) -> RegradeResult:
     if run is None:
         return RegradeResult(status="not-run", logs=None)
@@ -590,6 +608,7 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         static_checks=_static_checks_result(_get_run(submission, "static_checks")),
         tb_static_checks=_tb_static_checks_result(_get_run(submission, "tb_static_checks")),
         grader_isolation=_grader_isolation_result(submission),
+        worker_probe=_worker_probe_result(_get_run(submission, "worker_probe")),
         ai_detection=_ai_detection_result(_get_run(submission, "ai_detection")),
         answer_exposure=_answer_exposure_result(_get_run(submission, "answer_exposure")),
         tier0=_tier0_result(_get_run(submission, "tier0_probes")),
@@ -1074,6 +1093,21 @@ def _worker_line(schema) -> str:
         return "- Worker required: not checked (run Static Checks)"
     return f"- {badge['label']}" + (" (agent code also runs outside it)" if badge["partial"] else "") + " [advisory; needs a human]"
 
+def _worker_probe_line(schema) -> str:
+    probe = schema.worker_probe
+    if probe.status in ("not-run", "pending", "running"):
+        return "- Worker probe: not run yet (POST /worker-probe; needs Docker)" if probe.status == "not-run" else f"- Worker probe: {probe.status}"
+    if probe.skipped:
+        return f"- Worker probe: skipped -- {probe.note}"
+    if probe.error and not probe.checks:
+        return f"- Worker probe: FAILED to run -- {probe.error[:160]}"
+    ok = sum(1 for c in probe.checks if c.ok)
+    head = f"- Worker probe: {'passed' if probe.status == 'passed' else 'FAILED'}, {ok} of {len(probe.checks)} checks held"
+    bad = [f"{c.name} ({c.detail})" for c in probe.checks if not c.ok]
+    note = f" -- {probe.note}" if probe.note else ""
+    return head + (f"; failed: {'; '.join(bad)}" if bad else "") + note + " [advisory; needs a human]"
+
+
 def build_summary_markdown(
     schema: SubmissionSchema, total_cost_usd: float | None, cost_report: dict | None = None
 ) -> str:
@@ -1163,6 +1197,7 @@ def build_summary_markdown(
         "## Advisory checks",
         f"- Leakage Scan: {_fmt_status(schema.leakage_scan.status)}",
         _worker_line(schema),
+        _worker_probe_line(schema),
         (
             f"- Static Checks: {_fmt_status(schema.static_checks.status)}"
             + (

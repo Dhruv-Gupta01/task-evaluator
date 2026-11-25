@@ -1289,6 +1289,7 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
                 for r in schema.cheat_trial.runs
             ],
         },
+        "worker_probe": schema.worker_probe.model_dump(),
         "answer_exposure": {
             "status": schema.answer_exposure.status,
             "not_run": schema.answer_exposure.status == "not-run",

@@ -361,6 +361,23 @@ class FreshBuildResult(BaseModel):
     logs: str | None = None
 
 
+class WorkerProbeCheck(BaseModel):
+    name: str
+    ok: bool
+    detail: str = ""
+
+
+class WorkerProbeResult(BaseModel):
+    """What a Reward Kit Worker could reach in the task's own verifier image (services/worker_probe.py).
+    `skipped` means the grader has no Worker or no separate verifier image, so there was nothing to probe.
+    Advisory evidence, never a gate."""
+    status: StageStatus
+    skipped: bool = False
+    checks: list[WorkerProbeCheck] = []
+    note: str = ""
+    error: str | None = None
+
+
 class GraderIsolationResult(BaseModel):
     """The Grader Isolation gate (way 2 of the Worker flag). `state` is ok / missing / unclear after any
     reviewer ruling; `analysis` is the way-1 result (not_required, present, equivalent, missing).
@@ -443,6 +460,7 @@ class SubmissionSchema(BaseModel):
     static_checks: StaticChecksResult
     tb_static_checks: TbStaticChecksResult
     grader_isolation: GraderIsolationResult = GraderIsolationResult(status="not-run")
+    worker_probe: WorkerProbeResult = WorkerProbeResult(status="not-run")
     ai_detection: AiDetectionResult
     answer_exposure: AnswerExposureResult
     tier0: Tier0Result

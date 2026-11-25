@@ -48,6 +48,7 @@ import {
 import { StatusBadge } from "@/components/StatusBadge";
 import { LogPanel } from "@/components/LogPanel";
 import { GraderIsolationPanel } from "@/components/GraderIsolationPanel";
+import { WorkerProbePanel } from "@/components/WorkerProbePanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -103,6 +104,7 @@ function SubmissionDetail() {
         isActive(d.cheat_trial.status) ||
         isActive(d.rubric_check.status) ||
         isActive(d.answer_exposure.status) ||
+        isActive(d.worker_probe?.status ?? "not-run") ||
         isActive(d.tier0.status) ||
         isActive(d.tier1.status) ||
         isActive(d.tier2.status) ||
@@ -874,6 +876,20 @@ function SubmissionDetail() {
           <GraderIsolationPanel
             id={id}
             data={data.grader_isolation}
+            validated={validated}
+            onChange={invalidate}
+          />
+        </StageCard>
+
+        {/* Worker probe */}
+        <StageCard
+          title="Worker Probe"
+          description="Advisory: runs a Reward Kit Worker in this task's own verifier image and checks what it can reach (user, privileges, /tests, the reward file, environment, leftover processes). Needs Docker; skipped when the grader has no Worker."
+          status={data.worker_probe?.status ?? "not-run"}
+        >
+          <WorkerProbePanel
+            id={id}
+            data={data.worker_probe}
             validated={validated}
             onChange={invalidate}
           />

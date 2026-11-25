@@ -899,6 +899,21 @@ export interface GraderIsolationResult {
   blocks: boolean;
 }
 
+// Worker probe (NR-10): what a Reward Kit Worker could reach in the task's own verifier image.
+// `skipped` = no Worker in the grader or no separate verifier image. Advisory evidence, never a gate.
+export interface WorkerProbeCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+export interface WorkerProbeResult {
+  status: StageStatus;
+  skipped: boolean;
+  checks: WorkerProbeCheck[];
+  note: string;
+  error: string | null;
+}
+
 export interface Submission {
   id: string;
   task_name: string;
@@ -920,6 +935,7 @@ export interface Submission {
   static_checks: StaticChecksResult;
   tb_static_checks: TbStaticChecksResult;
   grader_isolation: GraderIsolationResult;
+  worker_probe: WorkerProbeResult;
   ai_detection: AiDetectionResult;
   answer_exposure: AnswerExposureResult;
   tier0: Tier0Result;
@@ -1217,6 +1233,10 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(handle<GraderIsolationResult>),
+  workerProbe: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/worker-probe`, { method: "POST" }).then(
+      handle<unknown>,
+    ),
   tbStaticChecks: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/tb-static-checks`, { method: "POST" }).then(
       handle<unknown>,
