@@ -1,8 +1,7 @@
 """Static Checks no longer warn about things a Reward Kit grader does not need or does not do."""
 
 from app.services import hygiene_checks, static_checks, verifier_isolation, versions
-from tests.test_flags import make_task
-from tests.test_harborignore import write
+from tests._fixtures import make_task, write
 
 RK_TEST_SH = """#!/bin/bash
 set -uo pipefail

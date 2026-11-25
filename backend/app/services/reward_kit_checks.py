@@ -13,6 +13,7 @@ else, because plain pytest graders are still allowed. Reward Kit being
 absent says nothing about the task being wrong."""
 
 import ast
+import json
 import re
 import subprocess
 import tomllib
@@ -263,10 +264,240 @@ def check_reward_kit(task_root: Path, report) -> None:
             f"The same @criterion name is used more than once ({', '.join(duplicated[:8])}): their results "
             "share one name in reward-details.json and a reviewer cannot tell which one failed.",
         )
+    check_submission_errors(task_root, report)
+    check_reward_toml_schema(task_root, report)
+
+
+# Parsers whose errors a ValueError handler does not cover (checked against the interpreter: csv.Error,
+# zipfile.BadZipFile and xml.etree.ElementTree.ParseError are not ValueErrors; ParseError is a SyntaxError).
+# InvalidFileException is openpyxl's own error for a file that is not a workbook; it is taken from the
+# GitHub Breakwater finding on glycan-ms2-elucidation, not run here. Unlisted parsers (json, pandas) raise
+# ValueError subclasses that the usual allowlist covers.
+_PARSER_ERRORS = {
+    "openpyxl": (re.compile(r"\bopenpyxl\b|\bload_workbook\s*\("), ("BadZipFile", "InvalidFileException", "ParseError")),
+    "csv": (re.compile(r"\bcsv\.(?:reader|DictReader|Sniffer)\b"), ("Error",)),
+    "zipfile": (re.compile(r"\bzipfile\.ZipFile\b|\bZipFile\s*\("), ("BadZipFile",)),
+    "ElementTree": (re.compile(r"\bElementTree\b|\bET\.(?:parse|fromstring)\b"), ("ParseError",)),
+}
+_COVERED_BY = {"ParseError": {"SyntaxError"}}  # a parent class that also catches it
+# How each error is named in the message (a bare `Error` would not say whose).
+_SHOWN_AS = {
+    "Error": "csv.Error",
+    "BadZipFile": "zipfile.BadZipFile",
+    "ParseError": "xml.etree.ElementTree.ParseError",
+    "InvalidFileException": "openpyxl.utils.exceptions.InvalidFileException",
+}
+_BROAD = {"Exception", "BaseException"}
+_ERROR_LIST_NAME = re.compile(r"ERROR|EXCEPTION", re.I)
+
+
+def _exception_names(node: ast.AST) -> set[str]:
+    """Final names in `A`, `mod.A` or a tuple/list/set of those (`csv.Error` -> `Error`)."""
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, ast.Attribute):
+        return {node.attr}
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return set().union(*(_exception_names(e) for e in node.elts)) if node.elts else set()
+    return set()
+
+
+def _caught_and_lists(tree: ast.AST) -> tuple[set[str], list[tuple[str, set[str]]], bool]:
+    """(everything the file's except clauses and error-list constants name, the named lists, a broad catch)."""
+    caught: set[str] = set()
+    lists: list[tuple[str, set[str]]] = []
+    broad = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ExceptHandler):
+            if node.type is None:
+                broad = True
+            else:
+                caught |= _exception_names(node.type)
+        elif isinstance(node, ast.Assign) and isinstance(node.value, (ast.Tuple, ast.List, ast.Set)):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and _ERROR_LIST_NAME.search(target.id):
+                    names = _exception_names(node.value)
+                    lists.append((target.id, names))
+                    caught |= names
+    return caught, lists, broad or bool(caught & _BROAD)
+
+
+def check_submission_errors(task_root: Path, report) -> None:
+    """A Reward Kit criterion that lets an exception escape aborts the whole reward: Harbor records a
+    verifier error, not reward 0, so a broken submission is never scored against the agent. Many graders
+    list the errors that mean "score 0". This warns when that list exists but misses an error the file's own
+    parser can raise. A file with no handling at all, or a broad `except Exception`, is left alone."""
+    if not uses_reward_kit(task_root):
+        return
+    for path, text in _tests_files(task_root):
+        if path.suffix != ".py":
+            continue
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        caught, lists, broad = _caught_and_lists(tree)
+        if broad or not caught:
+            continue
+        rel = path.relative_to(task_root).as_posix()
+        for parser, (pattern, errors) in _PARSER_ERRORS.items():
+            if not pattern.search(text):
+                continue
+            missing = [
+                e for e in errors if e not in caught and not (_COVERED_BY.get(e, set()) & caught)
+            ]
+            if not missing:
+                continue
+            listed = ", ".join(f"{n}: {', '.join(sorted(v))}" for n, v in lists[:2]) or ", ".join(sorted(caught)[:6])
+            report.add(
+                "reward_kit_submission_errors",
+                "warn",
+                f"{rel} reads submissions with {parser} but its error handling ({listed}) misses "
+                f"{', '.join(_SHOWN_AS.get(e, e) for e in missing)}. A broken file then raises past the handler, so no reward is written "
+                "(Harbor reports a verifier error, not reward 0) and the agent's bad answer is never scored "
+                "against it. Add the missing errors, or score any exception raised while reading the "
+                "submission as 0 and re-raise only WorkerSetupError.",
+            )
+
+
+# ---- reward.toml in the format Reward Kit 0.2.4 accepts (NR-48) ----------------------------
+# Read from rewardkit/models.py in harbor-rewardkit 0.2.4, the version Terminal-Bench 4.1 pins: a reward.toml is
+# validated with extra="forbid". Only `reward` (a list) and `scoring` (a table keyed by Python file name, each holding
+# `aggregation` and `threshold`) are allowed. The old directory-wide `[scoring]`, a directory `weight` or any other
+# key is rejected, and the grader stops with a validation error instead of grading.
+_RK_AGGREGATIONS = (
+    "weighted-mean", "weighted-sum", "all-pass", "any-pass", "threshold", "required-pass",
+    "weighted_mean", "all_pass", "any_pass", "required_pass",
+)
+_RK_TOP_KEYS = {"reward", "scoring"}
+_RK_SCORING_KEYS = {"aggregation", "threshold"}
+_RK_REWARD_KEYS = {"name", "weights", "aggregation", "threshold"}
+
+
+def _aggregation_problem(where: str, table: dict) -> str | None:
+    value = table.get("aggregation")
+    if value is not None and value not in _RK_AGGREGATIONS:
+        return f"`aggregation = {value!r}` in {where} is not one of {', '.join(_RK_AGGREGATIONS[:6])}"
+    return None
+
+
+def _reward_toml_problems(data: dict) -> list[str]:
+    problems: list[str] = []
+    for key in sorted(set(data) - _RK_TOP_KEYS):
+        extra = " (a directory-wide weight is no longer allowed)" if key == "weight" else ""
+        problems.append(f"unknown top-level key `{key}`{extra}")
+    scoring = data.get("scoring", {})
+    if not isinstance(scoring, dict):
+        problems.append("`scoring` must be a table of tables, one per Python file")
+        scoring = {}
+    for name, table in scoring.items():
+        if not isinstance(table, dict):
+            problems.append(
+                f"`[scoring]` has `{name}` directly under it (the old directory-wide form); put it in "
+                "`[scoring.<file name>]`, for example `[scoring.checks]` for checks.py"
+            )
+            continue
+        for key in sorted(set(table) - _RK_SCORING_KEYS):
+            problems.append(f"unknown key `{key}` in `[scoring.{name}]`")
+        if (bad := _aggregation_problem(f"`[scoring.{name}]`", table)):
+            problems.append(bad)
+    rewards = data.get("reward", [])
+    if not isinstance(rewards, list):
+        problems.append("`reward` must be a list of `[[reward]]` tables")
+        rewards = []
+    for i, entry in enumerate(rewards, 1):
+        if not isinstance(entry, dict):
+            continue
+        for key in sorted(set(entry) - _RK_REWARD_KEYS):
+            problems.append(f"unknown key `{key}` in `[[reward]]` entry {i}")
+        if (bad := _aggregation_problem(f"`[[reward]]` entry {i}", entry)):
+            problems.append(bad)
+    return problems
+
+
+def check_reward_toml_schema(task_root: Path, report) -> None:
+    """Warn when a reward.toml would be rejected by Reward Kit 0.2.4. The grader then stops with a validation error
+    and no score (a grader error), not a 0, so an author must migrate an old-format file."""
+    if not uses_reward_kit(task_root):
+        return
+    for path, text in _tests_files(task_root):
+        if path.name != "reward.toml":
+            continue
+        rel = path.relative_to(task_root).as_posix()
+        try:
+            data = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as exc:
+            report.add(
+                "reward_kit_toml_schema", "warn",
+                f"{rel} could not be read as TOML ({exc}); Reward Kit would stop with an error instead of grading.",
+            )
+            continue
+        problems = _reward_toml_problems(data)
+        if "$checks" in text:
+            problems.append("a `$checks` reference, which is no longer supported")
+        if problems:
+            report.add(
+                "reward_kit_toml_schema", "warn",
+                f"{rel}: Reward Kit 0.2.4 (the version Terminal-Bench 4.1 pins) rejects this file: "
+                + "; ".join(problems)
+                + ". The grader then stops with a validation error and no score, which shows up as a grader "
+                "error, not a 0. Migrate it to per-file tables such as `[scoring.checks]`.",
+            )
+
+
+_LINT_MAX_FINDINGS = 25
+_LINT_MAX_EXTRAS = 15
+# Reported by the agent-user check (agent_runs_as_root), which says more about it than Harbor does.
+_LINT_COVERED_ELSEWHERE = {"root-agent"}
+
+
+def _run_lint(task_root: Path, extra: list[str]) -> tuple[list[dict] | None, str]:
+    """`harbor lint --json` on a task. The task path goes first: --select and --extend-select take
+    several values, so a path after them is read as one more rule name and the command fails.
+    Returns (findings, "") or (None, why it could not run)."""
+    cmd = [get_settings().harbor_bin, "lint", f"{task_root}/", "--json", *extra]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"{type(exc).__name__}"
+    try:
+        data = json.loads(out.stdout or "")
+    except ValueError:
+        data = None
+    if isinstance(data, list):
+        return data, ""
+    return None, ((out.stdout or "") + (out.stderr or "")).strip()[:600]
+
+
+def _lint_where(finding: dict, task_root: Path) -> str:
+    path = str(finding.get("path") or "")
+    try:
+        path = str(Path(path).resolve().relative_to(task_root.resolve()))
+    except (ValueError, OSError):
+        pass
+    line = finding.get("line")
+    return f"{path}:{line}" if path and line else path
+
+
+def _author_ignored(task_root: Path) -> set[str]:
+    """Rules the task's own [metadata.harbor.lint] ignore list switches off."""
+    try:
+        data = tomllib.loads((task_root / "task.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return set()
+    lint = (((data.get("metadata") or {}).get("harbor") or {}).get("lint")) or {}
+    ignored = lint.get("ignore") if isinstance(lint, dict) else None
+    return {str(x) for x in ignored} if isinstance(ignored, list) else set()
 
 
 def check_harbor_lint(task_root: Path, report) -> None:
-    """Harbor's own task linter (Harbor 0.25 and newer): settings, files and verifier setup."""
+    """Harbor's own task linter (Harbor 0.25 and newer), one finding per line.
+
+    Two runs: Harbor's default rules with the task's own `[metadata.harbor.lint]` settings
+    (warn: these are what Harbor itself calls a problem), then `--extend-select ALL`, whose extra
+    findings are Harbor's stricter rules and anything the author chose to ignore (info, labelled
+    as such). Any selection given on the command line overrides the author's `ignore`, so the
+    author's settings only hold in the first run. `root-agent` is left to the agent-user check."""
     if not versions._harbor_has_command("lint"):
         report.add(
             "harbor_lint",
@@ -275,19 +506,32 @@ def check_harbor_lint(task_root: Path, report) -> None:
             f"{versions.HARBOR_MIN_FOR_WORKER} or newer), so Harbor's own task check was not run.",
         )
         return
-    try:
-        out = subprocess.run(
-            [get_settings().harbor_bin, "lint", f"{task_root}/"], capture_output=True, text=True, timeout=180
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        report.add("harbor_lint", "info", f"`harbor lint` could not run: {type(exc).__name__}")
+    base, why = _run_lint(task_root, [])
+    if base is None:
+        report.add("harbor_lint", "info", f"`harbor lint` could not run: {why or 'no output'}")
         return
-    text = ((out.stdout or "") + (out.stderr or "")).strip()
-    if out.returncode == 0:
-        report.add("harbor_lint", "info", "`harbor lint` found no problems.")
-    else:
-        report.add(
-            "harbor_lint",
-            "warn",
-            "`harbor lint` reported problems (or this Harbor version takes other arguments):\n" + text[:1500],
+    strict, _ = _run_lint(task_root, ["--extend-select", "ALL"])
+    for f in base[:_LINT_MAX_FINDINGS]:
+        where = _lint_where(f, task_root)
+        report.add("harbor_lint", "warn", f"[{f.get('rule')}] {where + ': ' if where else ''}{f.get('message')}")
+    if len(base) > _LINT_MAX_FINDINGS:
+        report.add("harbor_lint", "warn", f"... and {len(base) - _LINT_MAX_FINDINGS} more `harbor lint` finding(s)")
+    seen = {(f.get("rule"), f.get("path"), f.get("message")) for f in base}
+    ignored = _author_ignored(task_root)
+    extras = [
+        f for f in (strict or [])
+        if (f.get("rule"), f.get("path"), f.get("message")) not in seen and f.get("rule") not in _LINT_COVERED_ELSEWHERE
+    ]
+    for f in extras[:_LINT_MAX_EXTRAS]:
+        where = _lint_where(f, task_root)
+        why_extra = (
+            "the task's own lint settings ignore this rule"
+            if f.get("rule") in ignored
+            else "a stricter Harbor rule, not in its default set"
         )
+        report.add("harbor_lint", "info", f"[{f.get('rule')}] {where + ': ' if where else ''}{f.get('message')} ({why_extra})")
+    if len(extras) > _LINT_MAX_EXTRAS:
+        report.add("harbor_lint", "info", f"... and {len(extras) - _LINT_MAX_EXTRAS} more stricter `harbor lint` finding(s)")
+    if not base and not extras:
+        note = "" if strict is not None else " (the stricter run could not be done)"
+        report.add("harbor_lint", "info", f"`harbor lint` found no problems{note}.")
