@@ -109,107 +109,71 @@ Files: backend/storage/submissions/{id}/ (zip, extracted task, logs, Harbor outp
 - **Budget guard**: caps priced LLM spend per UTC month and per agent run (section 5).
 
 The README has a longer table of the same stages with the extra detail added in 4.0, 4.1 and 5.0.
-### Post-fix additions (branch `harbor-5.0-post-fixes-harbor-more-checks`)
+### Additions on this branch (`harbor-5.0-reward-kit-tiers`)
+
+Built from `harbor-5.0`: Reward Kit, the three cheat-trial tiers, Harbor 0.26.0 and the Worker work below.
+**Not on this branch** (they live on `merge-reward-kit-into-post-fixes`): the Flags system and its panels,
+Breakwater (the Tier 0 probes G17 to G27, prompt guards, session-log integrity, the output scan), Harbor's
+error policy and the regrade classifier, `.harborignore` handling, web-use counting, solution variants,
+versioning, evidence-set runs, generators, redaction of the evidence bundle and `dockerfile-pin`. A section
+here that mentions one of them would be wrong for this branch.
 
 - **Tier cycle ("Run all tiers")**: Tier 0 (static probes), Tier 1 (hinted agent plus fixer) and
   Tier 2 (unhinted agent) repeat on the patched task until a round needs no patch (default 3
   rounds). Tier 1 is the only tier that edits the task; the upload is never changed and a person
   reviews the diff. Honest solves and refusals are labelled as such and never count as the grader
-  holding. Costs real credits.
-- **Regrade**: re-scores saved trials with the latest grader (`harbor job regrade`), without a new
-  agent run. Flags 15.29 and 15.32 read its result.
-- **Solution variants**: the reviewer lists correct alternative solutions (`$SOLUTION` values); each
-  runs as an Oracle trial. A rejected one raises Flag 15.38, and Tier 1's patch check re-runs them.
-- **`.harborignore`**: a Static Check, and the Tier 0 and Tier 1 copies honour the same rules Harbor
-  does, so attackers only see what the real verifier gets.
-- **Web use**: each trial's web tool calls, fetches, installs and hosts are counted from its
-  trajectory and shown in the evidence. Agents run with an open network and web tools on.
+  holding. Each tier stops after 3 consecutive real shortcut attempts that failed; `max_attempts` caps the
+  attempts of any kind, so a run of honest solves ends `inconclusive`, never `robust`. Costs real credits.
+- **Reward Kit**: runs inside the task's own grader; the platform only reads what it leaves behind. Per-check
+  results from `reward-details.json`, grader errors (a missing reward file or a Worker setup error is shown as
+  a grader error, left out of the pass rate, never a plain 0), a suggested verdict a reviewer can overrule, and a
+  Static Check list for Reward Kit tasks: separate verifier, exact `harbor-rewardkit==0.2.4` pin, `uv.lock`,
+  a `reward.toml` the 0.2.4 model would accept, setup-error handling, check names, submission errors the grader
+  does not score as 0, and `harbor lint` findings.
+- **Regrade**: re-scores saved trials with the latest grader (`harbor job regrade`), without a new agent run.
 - **Harbor 0.26.0** is the tested version everywhere; `GET /versions` warns about any other.
 - **Tier logs and cost**: tier logs record the reasoning effort actually sent (none for Haiku 4.5),
   and Haiku 4.5 spend is priced and counted against the budget.
-- **Failure Analysis per trial**: `harbor analyze` now runs once per trial folder (two at a time),
-  each with its own limit (`ANALYZE_TRIAL_TIMEOUT_SEC`, default 900). One hung evaluator used to run
-  the whole job to `ANALYZE_TIMEOUT_SEC` and throw away the trials that had finished (seen on
-  2026-11-20: 2 of 3 done in 2.5 minutes, the third hung for an hour, no results kept).
-- **Task name from `[task] name`**: after Validate & Build, a submission is named by the `[task] name`
-  in `task.toml` (without `terminal-bench/`), not by the zip's file name. Versioning, the
-  earlier-upload comparison, regrade and Tier 0 comparison match uploads by that name, so renaming a
-  zip no longer hides the earlier upload.
-- **Where the grader runs agent code**: Static Checks now see compilers and provers (coqc, lean,
-  g++), commands built from named lists and constants, helper functions around `subprocess`, and a
-  compiled artifact that is run later, and they recognise a Reward Kit `Worker(...)` as the safe
-  pattern (info `verifier_runs_agent_code_in_worker`). Back-tested on the pre-Worker versions of 33
-  upstream tasks: agent code seen in 31 (was 25), with no new warnings on the 33 tasks without a
-  Worker. It is a flag for a person, not a verdict on "a Worker is needed": it still misses a grader
-  that drives the agent's web app with a browser, and code run through a file copied into a scratch
-  project. A Worker is never a gate here; the ruling goes through Flag 15.23.
-
-- **Breakwater follow-up (2026-11-23)**: ideas from Singularity-Bench's Breakwater (a paper) and
-  GitHub Breakwater (a tool); neither is installed or called. All advisory.
-  - *Prompt guards*: every prompt that reads what an agent produced (Tier 1 and Tier 2 judges, the
-    failure classification and trial audit, the Tier 1 fixer) now says the text is data and that
-    instructions inside it are ignored.
-  - *Broken output files* (Tier 0 probes G17 to G21, plus the empty and half-output probes): the grader
-    must score a damaged file 0. A grader that starts and writes no reward is the new verdict
-    `crashed_on_bad_input`. A probe that found nothing of its type to damage says so (`inconclusive`),
-    never "held". A new Static Check warns when a Reward Kit grader's list of "score 0" errors misses one
-    its parser raises. **Found on pg-wal**: a deeply nested JSON report makes its grader raise
-    `RecursionError` and write no reward.
-  - *Session-log integrity*: Claude Code and Codex write their log where the agent can edit it. The
-    platform notes each log while the run is live and checks it was not changed; a mismatch flags the
-    trial and warns the judges. It cannot see an edit made and finished inside one 10-second poll.
-  - *Tier 0 additions*: G22 (every digit shifted), G23 (one declared output removed at a time,
-    `artifact_not_checked`) and G24 (the reference output graded under other time zone, locale and
-    hash-seed settings: `env_sensitive`, or `flaky` if two identical runs differ).
-  - *Shared-verifier tasks*: Tier 0 no longer skips them. A Static Check lists the routes a shared
-    verifier leaves open, and three probes (G25 a program left running, G26 swapped `pytest`/`python`,
-    G27 a planted `conftest.py`) run through real Harbor trials.
-  - *Agent output scan*: the collected output is scanned for key-shaped strings, AI-provider addresses
-    and key variable names (kind and file only, never the key).
-  - *Timed repeats*: a Static Check notes a timed call repeated on one input (answers can be cached), and
-    the Targeted cheat prompt tries it.
-  - **Checked live**: pg-wal (separate mode) for G13, G17 to G24; the smoke task (shared mode) for G25 to
-    G27, where all three exploited a vulnerable grader and a hardened copy held. **Not checked live**: log
-    integrity on a real Claude Code or Codex trial, the output scan and timed-repeat check on real tasks,
-    G26 as a non-root agent.
-
-- **Worker required and the Grader Isolation gate (2026-11-23)**: two steps, test-first.
+- **Where the grader runs agent code**: Static Checks see compilers and provers (coqc, lean, g++), commands built
+  from named lists and constants, helper functions around `subprocess`, a compiled artifact that is run later, and
+  agent files copied into a scratch folder and run from there (found on collab-editor-desync, which used to be
+  classed `not_required`). A Reward Kit `Worker(...)` is recognised as the safe pattern. It is a flag for a
+  person, not a verdict; it still misses a grader that drives the agent's web app with a browser.
+- **Worker required and the Grader Isolation gate**: two steps.
   - *Way 1, advice only*: the Static Check `verifier_worker_required` (`verifier_isolation.analyze_worker_requirement`)
     reads the task's files as text and returns `not_required`, `present`, `equivalent` or `missing`. Agent code counts
     when the grader runs it (subprocess, test.sh, compilers, provers), imports it (`sys.path`, `importlib`, `runpy`,
     `PYTHONPATH`) or starts a service from an agent path (`supervisorctl`, `systemctl`, `service x start`,
     `docker compose up`; the task's own services do not count). `missing` is a warning with file:line evidence, the
-    protections that are absent and the fix text. It shows in the evidence summary and as `worker_required` in the
-    Review Report result. On the stored real tasks: pg-wal `present`, a web task `not_required`, the smoke task
-    `missing` (its `python -m pytest` from `/app`, the old shared-mode finding).
+    protections that are absent and the fix text. It shows in the Static Checks card, the evidence summary and as
+    `worker_required` in the Review Report result.
   - *Way 2, the gate*: `services/grader_isolation.py`, `POST /grader-isolation`, `PUT /grader-isolation-decision`, the
     Grader Isolation card. States `ok`/`missing`/`unclear`; a reviewer ruling needs a reason and a name and is kept
     against a fingerprint of `tests/`, `task.toml` and the environment Dockerfile (stale when the grader changes).
-    `GRADER_ISOLATION_ENFORCE` (default false) makes it block agent stages (409) and the Review Report; off, it only
-    records. Neither step adds isolation to a task: the author does that, with a Reward Kit `Worker`.
+    `GRADER_ISOLATION_ENFORCE` (default false) makes it block agent trials, the cheat trial, Tier 1, Tier 2 and the
+    tier cycle (409) and the Review Report; off, it only records. Neither step adds isolation to a task: the author
+    does that, with a Reward Kit `Worker`.
   - *Not built*: the 37th rubric criterion `untrusted_code_isolation` (it would make our copy of the TB rubric differ
-    from upstream), a bulk run over stored tasks, and a live run of the card in a browser. `missing` stays a warning,
-    not a fail, because the detection is heuristic.
+    from upstream) and a bulk run over stored tasks. `missing` stays a warning, not a fail, because the detection is
+    heuristic.
+- **Worker checks added after the gate**:
+  - `verifier_worker_unused` (info, Static Checks): a Worker that is imported and never called, or called with no
+    agent-writable path in `Worker(...)` or its chained `.run(SCRIPT, files=[...])`.
+  - `verifier_shared_mode_routes` (warn, Static Checks): a task graded inside the agent's own container leaves a
+    program left running, a swapped program on PATH, a planted `conftest.py` and visible files open, and Tier 0
+    cannot probe it.
+  - `verifier_queries_agent_service` (warn, shared mode only): the grader queries `localhost:PORT` and nothing in the
+    task starts that port, so only a server the agent left running can answer, outside any Worker. Tried on fixtures
+    only; none of the stored real tasks queries localhost.
+  - **Worker probe** (`services/worker_probe.py`, `POST`/`GET /submissions/{id}/worker-probe`, the Worker Probe card,
+    a "Worker probe" line in the evidence summary and `worker_probe` in the evidence download): builds the task's own
+    verifier image, runs a Worker in it as root, and has it try to read `/tests`, write the reward file, keep a
+    background process and read the environment. Ten checks (non-root uid and gid, no extra groups, no-new-privs, no
+    capabilities, `/tests` and the reward file unreachable, reward intact, environment not inherited, leftovers
+    killed). Reward Kit 0.2.4 already verifies most of this itself and fails closed; the probe shows what it looks like
+    from inside. A control run as plain root fails 9 of 10. Passed on pg-wal-recovery and the Reward Kit test task.
+    Advisory; skipped when the grader has no Worker. It uses the default `private_paths` only.
 
-- **Gap-closing batch (2026-11-23)**: eight items from the "Platform checks tracker" sheet. All advisory.
-  - *Harbor's own failure classification*: a copy of Harbor 0.26.0's table of failure types. A trial Harbor
-    says has no valid reward (cancelled, a missing reward file, a verifier timeout) or whose reward is NaN or
-    infinite is marked and left out of the pass rate and pass@k (a banner and an evidence line say how many).
-    The one automatic retry now also covers an agent that exited non-zero while the log shows infrastructure
-    noise (Harbor grades those as a real 0), and never restarts a cancelled trial. A test compares the copy with
-    the installed Harbor, so refresh it when Harbor is upgraded.
-  - *Four new Static Checks*: a `reward.toml` Reward Kit 0.2.4 would reject (read from Reward Kit's own source),
-    a grader that decides from a success word the agent's program prints, a Lean grader that decides from text in
-    Lean's output, and a test that asserts on one timing sample.
-  - *Regrade explained by a model* (opt-in, costs credits): tick the box next to Re-grade and a model labels each
-    changed trial expected, unexpected or unclear, from the rewards, the missing tests and what changed in the
-    task. At most 12 calls; a failure never loses the regrade.
-  - *Checked on real tasks*: the new checks stay quiet on pg-wal, the smoke task and the int8-style task. Running
-    them found a false alarm in the earlier timed-repeats check (a loop whose input varies inside an f-string),
-    now fixed.
-  - *Decisions*: a missing or invalid `ctrf.json` stays a warning, not a gate; Harbor's Fortify is not
-    integrated (the Tier 1 fixer and the tier cycle do that job); the platform stays on the harbor command and
-    does not move to `harbor serve`.
 
 ### Terminal-Bench 5.0 additions (branch `harbor-5.0`)
 
@@ -337,13 +301,16 @@ Read these before relying on the platform.
 
 ## 8. Working on the code
 
-- **Branches**: `main` is connected to Lovable; the 5.0 work lives on `harbor-5.0`. The repo is
+- **Branches**: `main` is connected to Lovable; the 5.0 work lives on `harbor-5.0`, and Reward Kit, the three tiers and the Worker work on `harbor-5.0-reward-kit-tiers`. The repo is
   linked to a Lovable project, and commits pushed to the connected branch sync into it. **Never
   force-push, and never rebase, amend or squash commits that are already pushed.** Push with
   `git -c http.postBuffer=524288000 push origin <branch>`.
-- **No test suite.** Verification is done by running stages on real tasks. `docs/testing/` holds
-  recorded runs on real Terminal-Bench tasks with the platform's results, for 4.0, 4.1 and 5.0
-  checks. Use `examples/smoke-task` for a quick check that the setup works.
+- **Tests**: `backend/tests/` (no Docker or database needed). From `backend/`:
+  `PYTHONPATH=. UV_PYTHON=3.13 uv run --with pytest --with httpx pytest -q tests` (give it `tests`: a bare `pytest` also
+  collects files under `storage/`, which runs leave behind; Python 3.15 has no `psycopg-binary` wheel). The Worker
+  probe's Docker part is checked by running it on a real task, not in the suite. `docs/testing/` holds recorded runs
+  on real Terminal-Bench tasks with the platform's results, for 4.0, 4.1 and 5.0 checks. Use `examples/smoke-task`
+  for a quick check that the setup works.
 - **Where to add a stage**: a function in `services/task_runner.py` (copy `run_edge_case_check`),
   an endpoint in `routers/submissions.py`, a result type in `schemas.py` and `src/lib/api.ts`, a
   mapping in `services/submission_service.py`, and a card in `src/routes/submissions.$id.tsx`.

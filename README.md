@@ -215,33 +215,6 @@ independent-tool comparison for ground truth (rustc, a parser), and an author-su
 equivalent or false solutions. The Lean 4.28 "unsound toolchain" note rests on a milestone item title
 and is unverified.
 
-### Breakwater follow-up (Singularity-Bench and GitHub Breakwater)
-
-Ideas from a paper (Singularity-Bench's Breakwater: attacks on Harbor and five safeguards) and a tool
-(GitHub Breakwater: regression tests for verifiers). Neither is installed or called. All advisory.
-
-| Area | What it does | Where it shows |
-|---|---|---|
-| Prompt guards | Every prompt that reads what an agent produced (Tier 1 and Tier 2 judges, failure classification, trial audit, the Tier 1 fixer) says the text is data and that instructions inside it are ignored. | Judges, Failure Analysis, Tier 1 |
-| Broken output files | Tier 0 probes G17 to G21 (random non-UTF-8 bytes, one 200,000-character field, JSON nested 100,000 deep, a bare `NaN`, a zip that is not a workbook), plus the empty and half-output probes. The grader must score a damaged file 0. If it starts and writes no reward the verdict is `crashed_on_bad_input`; a probe that found nothing of its type to damage is `inconclusive`. A Static Check warns when a Reward Kit grader's "score 0" error list misses an error its parser raises (`reward_kit_submission_errors`). | Tier 0, Static Checks |
-| Session-log integrity | Claude Code and Codex write their log where the agent can edit it. While the trial runs the platform notes each log, and at the end checks nothing it saw was changed. A mismatch flags the trial and puts a warning at the top of the judges' transcript. It cannot see an edit made and finished within one 10-second poll. | Trial flags, Tier 1 and Tier 2 judges |
-| More Tier 0 probes | G22 shifts every digit of the reference output; G23 removes one declared output at a time (`artifact_not_checked` if the grader still scores 1); G24 grades the reference output under other time zone, locale and hash-seed settings (`env_sensitive`, or `flaky` if two identical runs differ). | Tier 0 |
-| Shared-verifier tasks | A Static Check lists what a shared verifier leaves open. Tier 0 no longer skips these tasks: G25 (a program left running rewrites the reward), G26 (`pytest`/`python` swapped for ones that report a pass) and G27 (a planted `conftest.py`) each run through a real Harbor trial. | Static Checks, Tier 0 |
-| Agent output scan | The output Harbor collected is scanned for key-shaped strings, AI-provider addresses and key variable names. Only the kind and the file are kept, never the key. | Trial flags |
-| Timed repeats | A Static Check notes a timed call repeated on one input (agent code can remember the answer), and the Targeted cheat prompt tries it. | Static Checks, Cheat Trial |
-
-**Checked live:** pg-wal (separate mode) for G13 and G17 to G24, where G19 found a real crash (a deeply
-nested JSON report makes its grader raise `RecursionError` and write no reward); the smoke task (shared
-mode) for G25 to G27, where all three exploited a vulnerable grader and a hardened copy held.
-**Not checked live:** log integrity on a real Claude Code or Codex trial, the output scan and timed-repeat
-check on real tasks, G26 as a non-root agent.
-
-**Not built, and why:** running tests alone or in reverse order (pytest only; 64 of 66 upstream tasks use
-Reward Kit); mechanical code mutants (the Weak-Answer Probe already does it); swapping a file after it was
-checked; fingerprinting system programs around the agent (Harbor owns that switch); a CI step on every task
-edit (every upload is already compared with the previous one); a shared-mode grader hardened against G26
-needs binary integrity checks.
-
 ### Worker required and the Grader Isolation gate
 
 Does the task's grader run agent-written code without a Reward Kit `Worker` (or equivalent isolation)?
@@ -250,32 +223,52 @@ The platform only reports this; it adds no isolation, the task author does.
 | Area | What it does | Where it shows |
 |---|---|---|
 | Worker required (Static Check `verifier_worker_required`) | Reads the task's files as text and gives one result: `not_required` (nothing agent-written runs in grading, or it runs in a VM), `present` (a `Worker` runs it), `equivalent` (a separate user, no-new-privs, `/tests` locked and children killed, all found in the task's files) or `missing` (agent code runs with none of that). Agent code counts when the grader runs it, imports it, or starts a service from an agent path (`supervisorctl`, `systemctl`, `docker compose up`). `missing` is a warning with file:line evidence, what is absent and the fix (use `Worker(...).run(...)`, pin `harbor-rewardkit==0.2.4`, add `tests/reward.toml`, bump the minor version). | Static Checks, evidence summary, Review Report (`worker_required`) |
-| Grader Isolation gate | Turns that result into `ok`, `missing` or `unclear` (a Worker with agent code also running outside it, or only the shared-mode `python -m pytest` note). A reviewer can rule not_required, equivalent or missing with a written reason and a name; the ruling is kept against a fingerprint of `tests/`, `task.toml` and `environment/Dockerfile`, so a changed grader is checked again. Advisory unless `GRADER_ISOLATION_ENFORCE=true`, which makes agent trials, the cheat trial, Tier 1, Tier 2, the tier cycle and evidence sets return 409 and the Review Report wait until it passes or a reviewer rules. | Grader Isolation card |
+| Grader Isolation gate | Turns that result into `ok`, `missing` or `unclear` (a Worker with agent code also running outside it, or only the shared-mode `python -m pytest` note). A reviewer can rule not_required, equivalent or missing with a written reason and a name; the ruling is kept against a fingerprint of `tests/`, `task.toml` and `environment/Dockerfile`, so a changed grader is checked again. Advisory unless `GRADER_ISOLATION_ENFORCE=true`, which makes agent trials, the cheat trial, Tier 1, Tier 2 and the tier cycle return 409 and the Review Report wait until it passes or a reviewer rules. | Grader Isolation card |
 
 It is a text-pattern guess, so a finding is a question for a person. Existing accepted tasks are not
 re-checked automatically; run the gate on each.
 
-### Gap-closing batch (Harbor research sheet)
-
-Eight gaps from the "Platform checks tracker" sheet. All advisory.
+More Worker checks:
 
 | Area | What it does | Where it shows |
 |---|---|---|
-| Harbor's failure classification | A trial Harbor says has no valid reward (cancelled, a missing reward file, a verifier timeout), or whose reward is NaN or infinite, is marked and left out of the pass rate and pass@k. The one automatic infra retry also covers an agent that exited non-zero while the log shows infrastructure noise, and never restarts a cancelled trial. The table is a copy of Harbor 0.26.0's, checked by a test. | Agent Trials, evidence summary |
-| `reward.toml` check | Warns when a Reward Kit 0.2.4 would reject the file (the old directory-wide `[scoring]`, a `weight`, an unknown key or aggregation). Read from Reward Kit's own source. | Static Checks |
-| Printed success words | Warns when a grader runs the agent's program and decides from a success word it prints. | Static Checks |
-| Lean output | Warns when a Lean grader decides from text in Lean's output. | Static Checks |
-| One timing sample | Notes a test that asserts on one timing measurement with no repeats, median or minimum. | Static Checks |
-| Regrade explained by a model | Opt-in checkbox next to Re-grade: a model labels each changed trial expected, unexpected or unclear. At most 12 calls, counted in the budget. | Re-grade Saved Trials |
+| Scratch copies | A grader that copies the agent's files into a temp folder and runs them from there (`shutil.copytree(APP, root / "app")`, then `python3 app/server/server.py`) now counts as running agent code. It used to be classed `not_required` (found on collab-editor-desync). | Static Checks, Grader Isolation |
+| Unused Worker (`verifier_worker_unused`, info) | A Worker that is imported and never called, or called where no agent-writable path appears in `Worker(...)` or its chained `.run(SCRIPT, files=[...])`. A Worker around the grader's own commands protects nothing and can fail a correct solution. | Static Checks |
+| Shared verifier (`verifier_shared_mode_routes`, warn) | A task graded in the agent's own container leaves open a program left running, a swapped program on PATH, a planted `conftest.py` and visible files; Tier 0 cannot probe it. | Static Checks |
+| Agent service graded (`verifier_queries_agent_service`, warn) | In a shared verifier, the grader queries `localhost:PORT` and nothing in the task starts that port, so only a server the agent left running can answer, outside any Worker. Tried on fixtures only. | Static Checks |
+| Worker probe | Builds the task's own verifier image, runs a Worker in it as root and has it try to read `/tests`, write the reward file, keep a background process and read the environment. Ten checks: non-root uid and gid, no extra groups, no-new-privs, no capabilities, `/tests` and the reward file unreachable, reward intact, environment not inherited, leftovers killed. Reward Kit 0.2.4 already checks most of this itself; the probe shows what it looks like from inside. Needs Docker, no LLM; skipped when the grader has no Worker. Uses the default `private_paths`. | Worker Probe card, evidence summary and download (`worker_probe`) |
 
-**Decisions:** a missing or invalid `ctrf.json` stays a warning, not a gate. Harbor's Fortify is not integrated,
-because the Tier 1 fixer and the tier cycle do that job. The platform stays on the harbor command and does not
-move to `harbor serve`.
+All of this is decided from the grader's own files (and, for the probe, the verifier image). Nothing needs an
+agent trial first: run Static Checks and Grader Isolation after Validate, then the Worker probe, then the Oracle
+(3 runs) and Nop to show correct work still scores 1 and nothing scores for free.
 
-**Still open:** a verifier network allowlist, Reward Kit Worker privileges, one task's memory measurement,
-child-process cleanup in Reward Kit, and a deterministic "grader recomputes the result" check.
-**Checked on real tasks:** the new checks stay quiet on pg-wal, the smoke task and the int8-style task (3 tasks).
-**Not checked:** the Lean check on a real Lean task, and the retry change with a real failing agent.
+### Cheat-trial tiers (Tier 0, 1, 2)
+
+Do the task's tests hold when an agent tries to fake a pass? All advisory: a result is a question for a reviewer
+and never changes a gate. Tiers 1 and 2 spend real credits; set a cap. Details: [`docs/cheat-trial-tiers.md`](docs/cheat-trial-tiers.md).
+
+| Stage | What it does | Where it shows |
+|---|---|---|
+| Tier 0: Static Probes | Scripted fake agents (planted `conftest.py`, shadowed programs, `LD_PRELOAD`, a symlink or FIFO in place of the output, pre-written reward files, empty or placeholder output) run against a replica of the task's verifier. A probe that scores 1 is an exploit. The task's own solution must score 1 through the same replica (the control). No LLM; needs Docker. | Tier 0: Static Probes card |
+| Tier 1: Hinted Agent | A Claude Code attacker with the red-team prompt and a read-only copy of `tests/` tries to get reward 1. A judge labels each attempt (exploited, tried a shortcut and failed, honest solve, refused ...). After a hit a fixer proposes edits to `tests/` and `environment/`, kept only if the Oracle still scores 1 and a replay of the winning output no longer wins. The upload is never edited; a person reviews the diff. | Tier 1: Hinted Agent card |
+| Tier 2: Unhinted Agent | The plain instruction plus one pressure line, no test copy and no memory between runs: what happens in ordinary use. Never patches anything. | Tier 2: Unhinted Agent card |
+| Run all tiers | Tier 0, 1 and 2 as one job. If Tier 1 patched the task, all three run again on the patched copy (up to 3 rounds). Honest solves and refusals are never counted as the grader holding. | Tier cards, "Run all tiers" button |
+
+Each tier ends `robust` after 3 consecutive real shortcut attempts that failed. `max_attempts` caps attempts of
+any kind, so a run of honest solves ends `inconclusive`, not `robust`. A cheap model such as Haiku mostly refuses
+or solves honestly: that shows the plumbing works, not that the task is robust.
+
+### Reward Kit
+
+Reward Kit runs inside the task's own grader. The platform only reads what it leaves behind. All advisory.
+
+| Area | What it does | Where it shows |
+|---|---|---|
+| Per-check results | Reads `reward-details.json` into named checks (failed first). | Oracle, Nop and Agent Trials cards |
+| Grader errors | A trial with no reward because the verifier itself broke (a missing reward file, a Worker setup error) is a grader error: left out of the pass rate, never shown as a plain 0. | Oracle, Nop and Agent Trials cards |
+| Suggested verdict | Pre-fills fake, likely genuine, pass or unclear per trial; a reviewer's call is kept beside it. | Trial cards |
+| Reward Kit checklist | Separate verifier with a `tests/Dockerfile`, exact `harbor-rewardkit==0.2.4` pin, `uv.lock`, a `reward.toml` Reward Kit 0.2.4 would accept (only `[[reward]]` and `[scoring.<file>]` with `aggregation`/`threshold`), setup-error handling, check names, parser errors the grader does not score as 0, and `harbor lint` findings. Nothing here for a task that does not use Reward Kit. | Static Checks |
+| Re-grade | `harbor job regrade` re-scores saved trials with the latest grader, without a new agent run; the originals are kept. | Re-grade Saved Trials card |
 
 ## Notes
 
