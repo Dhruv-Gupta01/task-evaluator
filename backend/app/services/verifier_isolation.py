@@ -734,6 +734,40 @@ def analyze_worker_requirement(task_root: Path) -> dict:
     return {"result": "missing", "evidence": everything, "absent": absent, "also_unprotected": [], "note": ""}
 
 
+_WORKER_IMPORT_RE = re.compile(r"from\s+rewardkit[\w.]*\s+import[^\n]*\bWorker\b|\brewardkit\.Worker\b")
+
+
+def check_worker_unused(t: _Task, report) -> None:
+    """A Worker that protects nothing: imported and never called, or called where no agent-writable path
+    appears in the call. Info only, from the grader's text (a Worker around the grader's own commands
+    fails correct work for no gain, and an unused import gives a false "uses Worker" label)."""
+    dirs = t.agent_dirs
+    imported, calls = [], []
+    for rel, text in t.tests_py:
+        if _WORKER_IMPORT_RE.search(text):
+            imported.append(rel)
+        names = _agent_names(text, dirs)
+        for line, call in _calls(text, re.compile(r"\bWorker\(")):
+            # the agent's file usually goes to the chained .run(SCRIPT, files=[...]), not to Worker(...)
+            start = text.find(call, max(0, sum(len(x) + 1 for x in text.splitlines()[: line - 1]) - 1))
+            rest = text[start + len(call): start + len(call) + 800]
+            chained = next((c for _, c in _calls(rest, re.compile(r"^\s*\.run\("))), "") if re.match(r"\s*\.run\(", rest) else ""
+            calls.append((f"{rel}:{line}", _mentions_agent(call + " " + chained, dirs, names)))
+    if imported and not calls:
+        report.add(
+            "verifier_worker_unused", "info",
+            f"Worker is imported ({_listed(imported)}) but never called, so nothing runs through it. A reviewer reading "
+            "'uses Worker' would assume the task is protected; call it around the agent-produced command or remove the import.",
+        )
+    elif calls and not any(mentions for _, mentions in calls):
+        report.add(
+            "verifier_worker_unused", "info",
+            f"Worker is called ({_listed([w for w, _ in calls])}) but no agent-writable path appears in the call. If it only "
+            "wraps the grader's own commands it protects nothing and can fail a correct solution (no /tests access, no root); "
+            "check that each call runs something the agent produced. (Heuristic: a path held in a helper may be missed.)",
+        )
+
+
 def check_worker_required(t: _Task, report) -> None:
     a = analyze_worker_requirement(t.root)
     where = _listed(a["evidence"])
@@ -952,6 +986,7 @@ def run_isolation_checks(task_root: Path, report) -> None:
         check_agent_code_in_process,
         check_agent_code_privileges,
         check_worker_required,
+        check_worker_unused,
         check_answer_evaluation,
         check_source_scanning,
         check_verdict_channels,
