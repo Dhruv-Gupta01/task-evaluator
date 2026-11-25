@@ -172,6 +172,89 @@ def check_reward_reset(t: _Task, report) -> None:
         report.add("verifier_reward_reset", "info", "test.sh clears the reward files before grading.")
 
 
+def check_shared_mode_routes(t: _Task, report) -> None:
+    """A shared verifier grades inside the container the agent worked in. Tier 0 skips such tasks, so these
+    routes (all seen in Singularity-Bench's attacks on plain Harbor) are not probed for them."""
+    if t.separate or not t.test_sh:
+        return
+    report.add(
+        "verifier_shared_mode_routes", "warn",
+        "Shared verifier: grading runs in the same container the agent used, so routes a separate verifier "
+        "closes stay open. (1) A program the agent left running can outlive the agent phase and rewrite the "
+        "reward or answer the grader's calls. (2) A fake program placed on PATH, a planted conftest.py, or a "
+        "sitecustomize.py in the working folder is picked up by the grader's own commands. (3) Files the "
+        "agent writes anywhere in the container are visible to the grader. Tier 0's probes cannot test a "
+        "shared-mode task (it is skipped), so none of this is exercised. Prefer `environment_mode = "
+        "\"separate\"` with a tests/Dockerfile and a declared artifacts list; if the task has to stay shared, "
+        "run the grader with absolute program paths, a cleaned PATH, `python -I`, and check for stray "
+        "processes first.",
+    )
+
+_LOCAL_PORT_RE = re.compile(r"(?:localhost|127\.0\.0\.1|0\.0\.0\.0)\s*[:,]\s*[\"']?\s*(\d{2,5})\b|(?:localhost|127\.0\.0\.1)[\"']\s*,\s*(\d{2,5})\b")
+_LAUNCHES_SERVER_RE = re.compile(
+    r"\bsubprocess\.(?:Popen|run)\(|\bos\.(?:system|popen|spawn\w*)\(|\buvicorn\b|\bgunicorn\b|\bflask\s+run\b|"
+    r"\bhttp\.server\b|\bnohup\b|\bsupervisorctl\b|\bsystemctl\b|\bdocker\s+compose\b|\bnode\s+\S+\.js\b|"
+    r"\bpython[\d.]*\s+\S*(?:server|app|main)\S*\.py\b|&\s*$",
+    re.M,
+)
+
+
+def _task_provides_ports(t: _Task) -> set[str]:
+    """Ports the task's own environment sets up (EXPOSE, a compose service or published port, supervisor config)."""
+    provided: set[str] = set()
+    env = t.root / "environment"
+    for path in env.rglob("*") if env.is_dir() else []:
+        if not path.is_file() or path.stat().st_size > 400_000:
+            continue
+        name = path.name.lower()
+        if not (name == "dockerfile" or name.startswith(("docker-compose", "compose")) or name.endswith((".conf", ".ini", ".sh", ".yaml", ".yml"))):
+            continue
+        try:
+            text = path.read_text(errors="ignore")
+        except OSError:
+            continue
+        for m in re.finditer(r"^\s*EXPOSE\s+([^\n]+)", text, re.M):
+            provided.update(re.findall(r"\d{2,5}", m.group(1)))
+        provided.update(re.findall(r"[\"']?(\d{2,5}):\d{2,5}[\"']?", text))
+        provided.update(re.findall(r"\b(?:port|PORT)\s*[=:]\s*(\d{2,5})", text))
+    return provided
+
+
+def check_agent_service_graded(t: _Task, report) -> None:
+    """A shared-verifier grader queries a localhost service that nothing in the task starts: the only thing
+    that can answer is a program the agent left running. That program keeps running as the agent's user
+    during grading, outside any Worker (a Worker wraps a command the grader starts, not a server the grader
+    only sends requests to). Separate verifiers start from a fresh container, so a leftover server cannot be
+    there; only shared-mode tasks are checked. Heuristic: needs a human."""
+    if t.separate or not t.test_sh:
+        return
+    texts = [("tests/test.sh", t.test_sh)] + list(t.tests_py)
+    queried: dict[str, str] = {}
+    for rel, text in texts:
+        for line, body in _code_lines(text):
+            for m in _LOCAL_PORT_RE.finditer(body):
+                port = m.group(1) or m.group(2)
+                queried.setdefault(port, f"{rel}:{line}")
+    if not queried:
+        return
+    if any(_LAUNCHES_SERVER_RE.search(text) for _, text in texts):
+        return  # the grader starts something itself; what it runs is the other checks' business
+    provided = _task_provides_ports(t)
+    missing = {port: where for port, where in queried.items() if port not in provided}
+    if not missing:
+        return
+    ports = ", ".join(f"localhost:{port} ({where})" for port, where in sorted(missing.items()))
+    report.add(
+        "verifier_queries_agent_service", "warn",
+        f"The grader queries {ports} but nothing in the task starts a service on that port (no EXPOSE, compose service, "
+        "or launch in the grader), so it can only be a server the agent started and left running. In a shared verifier "
+        "that program keeps running as the agent's user while the grader grades, outside any Worker: it can answer "
+        "from a prepared file instead of doing the work, or rewrite the reward. Start the service from the grader "
+        "(unprivileged, from a copy of the agent's files), or use a separate verifier "
+        "(`[verifier] environment_mode = \"separate\"`). (Heuristic: needs a human to confirm.)",
+    )
+
+
 # ---- agent code inside the grader ------------------------------------------
 
 _PY_IMPORT_RE = re.compile(
@@ -983,6 +1066,8 @@ def run_isolation_checks(task_root: Path, report) -> None:
     t = _load(task_root)
     for check in (
         check_reward_reset,
+        check_shared_mode_routes,
+        check_agent_service_graded,
         check_agent_code_in_process,
         check_agent_code_privileges,
         check_worker_required,
