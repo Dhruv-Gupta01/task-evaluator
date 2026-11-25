@@ -468,6 +468,104 @@ def _runner_helpers(text: str) -> set[str]:
     return found
 
 
+# ---- agent files copied into a scratch folder and run from there --------------------------------
+# Found on collab-editor-desync: `shutil.copytree(APP, root / "app")`, a fixture that hands `root` to
+# the tests, and `python3 app/server/server.py` started with `cwd=work` through a helper. Nothing in it
+# names /app next to the command, so the paths above never matched.
+
+_COPY_OPENER = re.compile(r"\bshutil\.(?:copytree|copy2|copy|copyfile|move)\(")
+
+
+def _top_level_args(call: str) -> list[str]:
+    inner = call[call.index("(") + 1: call.rfind(")")] if "(" in call else ""
+    args, depth, current = [], 0, ""
+    for ch in inner:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            args.append(current.strip())
+            current = ""
+            continue
+        current += ch
+    args.append(current.strip())
+    return args
+
+
+def _function_bodies(text: str) -> dict[str, str]:
+    bodies = {}
+    for m in re.finditer(r"^def\s+(\w+)\(([^)]*)\)[^\n]*:\n(.*?)(?=^(?:def |class |@)|\Z)", text, re.M | re.S):
+        bodies[m.group(1)] = m.group(3)
+    return bodies
+
+
+def _scratch_names(text: str, names: set[str], dirs: tuple[str, ...]) -> set[str]:
+    """Variables holding a scratch copy of agent files, and fixtures that return one."""
+    scratch: set[str] = set()
+    for _, call in _calls(text, _COPY_OPENER):
+        args = _top_level_args(call)
+        if len(args) >= 2 and _mentions_agent(args[0], dirs, names):
+            first = re.search(r"[A-Za-z_]\w*", args[1])
+            if first:
+                scratch.add(first.group(0))
+    if not scratch:
+        return scratch
+    for fn, body in _function_bodies(text).items():
+        if any(re.search(rf"\b(?:yield|return)\s+{re.escape(v)}\b", body) for v in scratch):
+            scratch.add(fn)
+    return scratch
+
+
+def _runner_helpers_any_param(text: str) -> set[str]:
+    """Functions that pass one of their own parameters on as a subprocess command, whichever position
+    the command is in (def run(work, argv, data): Popen(argv, ...))."""
+    found = set()
+    for m in re.finditer(r"^def\s+(\w+)\(([^)]*)\)", text, re.M):
+        params = [p.split(":")[0].split("=")[0].strip().lstrip("*") for p in m.group(2).split(",") if p.strip()]
+        body = text[m.end(): m.end() + 1500].split("\ndef ", 1)[0]
+        if any(re.search(rf"{_SUBPROCESS_RE.pattern}\s*{re.escape(p)}\b", body) for p in params):
+            found.add(m.group(1))
+    return found
+
+
+def _drops_privileges(call: str, text: str) -> bool:
+    """The call itself, or a function it uses (up to three levels, run -> as_nobody), drops privileges."""
+    if _PY_DROP_RE.search(call) or _DROP_CONST_RE.search(call):
+        return True
+    bodies = _function_bodies(text)
+    seen, frontier = set(), {call}
+    for _ in range(3):
+        nxt = set()
+        for snippet in frontier:
+            for fn in re.findall(r"\b([A-Za-z_]\w*)\s*\(", snippet):
+                if fn in bodies and fn not in seen:
+                    seen.add(fn)
+                    if _PY_DROP_RE.search(bodies[fn]) or _DROP_CONST_RE.search(bodies[fn]):
+                        return True
+                    nxt.add(bodies[fn])
+        frontier = nxt
+    return False
+
+
+def _scratch_runs(rel: str, text: str, names: set[str], dirs: tuple[str, ...], lists: dict[str, str]) -> list[tuple[str, bool, str]]:
+    scratch = _scratch_names(text, names, dirs)
+    if not scratch:
+        return []
+    helpers = _runner_helpers_any_param(text)
+    opener = re.compile(_SUBPROCESS_RE.pattern + (r"|\b(?:" + "|".join(map(re.escape, helpers)) + r")\(" if helpers else ""))
+    out = []
+    for line, call in _calls(text, opener):
+        if not any(re.search(rf"\b{re.escape(v)}\b", call) for v in scratch):
+            continue
+        # expand a command constant (PY = ["python3", ...]) used as NAME + [...]
+        expanded = re.sub(r"\b([A-Za-z_]\w*)\s*\+\s*\[", lambda m: (lists[m.group(1)][2:-2] + ", ") if m.group(1) in lists else m.group(0), call)
+        words = [_launcher_name(w.strip("\"' ")) for w in re.findall(r"[\"'][^\"']+[\"']|\b\w+\b", expanded)]
+        if any(_starts_command(w, dirs) for w in words):
+            out.append((f"{rel}:{line}", _drops_privileges(call, text), call))
+    return out
+
+
 def _agent_runs(t: _Task) -> list[tuple[str, bool, str]]:
     """(where, privilege dropped?, call text) for each place the verifier runs agent-written code."""
     runs: list[tuple[str, bool, str]] = []
@@ -483,6 +581,8 @@ def _agent_runs(t: _Task) -> list[tuple[str, bool, str]]:
                 names and _PROVER_RE.search(" ".join((_list_tokens(call) or [])[:4]).replace(",", " "))
             ):
                 runs.append((f"{rel}:{line}", bool(_PY_DROP_RE.search(call) or _DROP_CONST_RE.search(call)), call))
+        seen = {w for w, _, _ in runs}
+        runs.extend(r for r in _scratch_runs(rel, text, names, dirs, lists) if r[0] not in seen)
     cwd = t.workdir
     for i, line in _shell_lines(t.test_sh):
         if line.lstrip().startswith("#"):
