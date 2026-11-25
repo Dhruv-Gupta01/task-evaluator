@@ -1356,3 +1356,31 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
             "Content-Disposition": f'attachment; filename="{submission_id}-evidence.json"'
         },
     )
+
+
+@router.post("/submissions/{submission_id}/worker-probe", status_code=202)
+async def trigger_worker_probe(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """Runs a Worker in the task's own verifier image and checks what it can reach (uid, no-new-privs,
+    capabilities, /tests, the reward file, environment, leftover processes). Docker, no LLM. Skipped when
+    the grader has no Worker. Advisory; the result is at GET /submissions/{id}/worker-probe."""
+    _, task_root = _task_root_for(submission_id, db)
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="worker_probe", run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind="worker_probe", run_index=0)
+        db.add(run)
+    run.status = "pending"
+    db.commit()
+    await task_queue.submit(f"{submission_id}:worker_probe", task_runner.run_worker_probe_stage(submission_id))
+    return {"status": "started"}
+
+
+@router.get("/submissions/{submission_id}/worker-probe")
+def get_worker_probe(submission_id: str, db: Session = Depends(get_db)) -> dict:
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="worker_probe", run_index=0).one_or_none()
+    if run is None:
+        return {"status": "not-run", "checks": [], "skipped": False, "note": ""}
+    try:
+        detail = json.loads(run.logs or "{}")
+    except ValueError:
+        detail = {}
+    return {"status": run.status, **detail}

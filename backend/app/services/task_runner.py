@@ -3176,3 +3176,39 @@ async def run_rubric_check(submission_id: str, rubric: str = "tb") -> None:
         db.commit()
     finally:
         db.close()
+
+
+async def run_worker_probe_stage(submission_id: str) -> None:
+    """Advisory: builds the task's verifier image and runs a Worker in it to see what it can and cannot do
+    (services/worker_probe.py). Needs Docker, no LLM. Run kind "worker_probe"; a task without a Worker is
+    skipped (passed, skipped)."""
+    from app.services import worker_probe
+
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+        run = _get_or_create_run(db, submission_id, "worker_probe", 0)
+        run.status = "running"
+        run.reward = None
+        run.logs = None
+        run.started_at = datetime.now(UTC)
+        db.commit()
+        try:
+            result = await asyncio.to_thread(
+                worker_probe.run_worker_probe, Path(submission.extracted_path), settings.docker_platform or None
+            )
+        except Exception:
+            run.status = "failed"
+            run.logs = json.dumps({"error": traceback.format_exc()[-1500:], "checks": [], "skipped": False})
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+            return
+        run.status = result["status"]
+        run.reward = 1 if result["status"] == "passed" else 0
+        run.logs = json.dumps(result)
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    finally:
+        db.close()
