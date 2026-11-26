@@ -1783,10 +1783,10 @@ async def run_tb_static_checks_stage(submission_id: str) -> None:
             db.commit()
             return
 
-        run.status = "passed" if report.fail_count == 0 else "failed"
-        run.reward = 1 if report.fail_count == 0 else 0
+        run.status, run.reward = tb_static_checks.stage_outcome(report)
         run.logs = json.dumps(
             {
+                "incomplete": report.skip_count > 0,
                 "pass_count": report.pass_count,
                 "fail_count": report.fail_count,
                 "skip_count": report.skip_count,

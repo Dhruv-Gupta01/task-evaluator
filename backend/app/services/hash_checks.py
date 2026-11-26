@@ -145,7 +145,7 @@ def check_hashed_answers(task_root: Path, report) -> None:
             "hash_answers", "fail",
             "No hashed expected answer under tests/. Every exact expected answer must be stored as a SHA-256 digest "
             "under a name ending `_sha256` (must match) or `_not_sha256` (must not match), and the grader must compare "
-            "digests (docs/hash-rules.md). A task that cannot hash needs a reviewer's exemption.",
+            "digests (docs/hash-rules.md). There is no exemption: a task that cannot hash has to be changed.",
         )
     else:
         must = sum(e.must_match for e in entries)

@@ -42,6 +42,7 @@ __pycache__/
 
 # Local runtime state / generated artifacts
 backend/storage/
+backend/.tools/
 
 # per-profile env files hold API keys
 backend/.env.bootcamp

@@ -40,7 +40,7 @@ set `SOLUTION` under `[solution.env]`: it overrides the value being tested.
 
 ### 3. Bump the version
 
-A `solution/` change is a patch version bump.
+A `solution/` change is a patch version bump. Write it as `version` under `[task]` in `task.toml`.
 
 ## What the platform checks
 

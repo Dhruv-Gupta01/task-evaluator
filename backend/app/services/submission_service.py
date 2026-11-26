@@ -1290,7 +1290,8 @@ def build_summary_markdown(
             f"- TB Static Checks: {_fmt_status(schema.tb_static_checks.status)}"
             + (
                 f" ({json.loads(schema.tb_static_checks.logs)['pass_count']} pass, "
-                f"{json.loads(schema.tb_static_checks.logs)['fail_count']} fail)"
+                f"{json.loads(schema.tb_static_checks.logs)['fail_count']} fail, "
+                f"{json.loads(schema.tb_static_checks.logs).get('skip_count', 0)} not run)"
                 if schema.tb_static_checks.logs
                 else ""
             )

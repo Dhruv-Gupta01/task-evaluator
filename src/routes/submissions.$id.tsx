@@ -904,7 +904,7 @@ function SubmissionDetail() {
                     }`}
                   >
                     {report.pass_count} pass, {report.fail_count} fail
-                    {report.skip_count ? `, ${report.skip_count} not run (a tool is missing)` : ""}
+                    {report.skip_count ? `, ${report.skip_count} not run (a tool is missing, so the stage does not pass)` : ""}
                     {report.vendor?.commit && (
                       <span className="block text-muted-foreground">
                         Rule set: upstream{" "}

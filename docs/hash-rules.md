@@ -132,7 +132,7 @@ Check comments, other data files and generator scripts under `tests/`.
 
 ### Step 5. Bump the version
 
-A `tests/` change is a minor version bump in `task.toml`.
+A `tests/` change is a minor version bump. Write it as `version` under `[task]` in `task.toml`.
 
 ### What the platform then checks
 
@@ -160,10 +160,10 @@ exemption: the task has to be revised.
 
 | Step | What it checks | Result if it fails |
 |---|---|---|
-| 1. Static check | at least one `_sha256` entry exists, or an approved exemption | block |
+| 1. Static check | at least one `_sha256` or `_not_sha256` entry exists | Static Checks fail |
 | 2. Search for plain answers | values that look like expected answers still in clear text | warning only |
-| 3. Oracle and Nop | the reference solution scores 1 and doing nothing scores 0 | block |
-| 4. Damaged-hash test | each entry really decides the score (below) | block |
+| 3. Oracle and Nop | the reference solution scores 1 and doing nothing scores 0 | a failed Oracle holds back later stages; Nop holds back nothing |
+| 4. Damaged-hash test | each entry really decides the score (below) | the hash proof fails |
 
 ### The damaged-hash test
 

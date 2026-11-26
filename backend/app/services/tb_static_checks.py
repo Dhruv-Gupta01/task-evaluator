@@ -20,6 +20,8 @@ _TASK_NAME_RE = re.compile(r"^([^/]+)/(.+)$")
 
 _CHECKS_DIR = Path(__file__).resolve().parent.parent.parent / "vendor" / "tb_checks" / "scripts"
 _TIMEOUT_SEC = 30
+# where scripts/install_dockerfile_pin.py puts the CLI check-image-digests needs
+TOOLS_BIN = Path(__file__).resolve().parents[2] / ".tools" / "bin"
 
 
 @dataclass
@@ -56,6 +58,16 @@ class TbStaticCheckReport:
             if r.output and (not r.passed or _WARN_LINE_RE.search(r.output)):
                 lines.append(r.output.strip())
         return "\n".join(lines)
+
+
+def stage_outcome(report: TbStaticCheckReport) -> tuple[str, int | None]:
+    """(status, reward) for the stage. A check that could not run is never counted as a pass: the stage
+    passes only when every check ran and none failed; with no failure but a check not run, reward is None."""
+    if report.fail_count:
+        return "failed", 0
+    if report.skip_count:
+        return "failed", None
+    return "passed", 1
 
 
 _WARN_LINE_RE = re.compile(r"^WARN ", re.M)
@@ -244,13 +256,15 @@ def _script_env(tmp: Path) -> dict[str, str]:
     PyYAML), and isolated mode skips the user site, so a machine whose python3
     has PyYAML only as a user install (or not at all) failed that check on
     every compose file with "No module named 'yaml'". The backend's
-    interpreter has PyYAML (a declared dependency)."""
+    interpreter has PyYAML (a declared dependency). backend/.tools/bin comes next,
+    so check-image-digests finds the dockerfile-pin the install script put there."""
     shim = tmp / "python-shim"
     shim.mkdir()
     python3 = shim / "python3"
     python3.write_text(f'#!/bin/sh\nexec "{Path(sys.executable).as_posix()}" "$@"\n')
     python3.chmod(0o755)
-    return {**os.environ, "PATH": f"{shim}{os.pathsep}{os.environ.get('PATH', '')}"}
+    path = os.pathsep.join([str(shim), str(TOOLS_BIN), os.environ.get("PATH", "")])
+    return {**os.environ, "PATH": path}
 
 
 def _run_scripts(task_root: Path, clean_path: Path, report: TbStaticCheckReport, env: dict[str, str]) -> None:
