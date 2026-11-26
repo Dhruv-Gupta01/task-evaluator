@@ -827,7 +827,8 @@ async def run_oracle_trials(submission_id: str, n: int, stress: bool = False) ->
                     jobs_dir,
                     f"{kind.replace('_', '-')}-{uuid.uuid4().hex[:8]}",
                     timeout_sec,
-                    extra_note=note,
+                    extra_note=f"(SOLUTION={run.solution})\n{note}".strip() if run.solution else note,
+                    agent_env={"SOLUTION": run.solution} if run.solution else None,
                 )
             finally:
                 await asyncio.to_thread(docker_orchestrator.stop_cpu_load, load_id)
@@ -2487,6 +2488,26 @@ def _tier_effort_meta(agent: str, hacker_model: str | None, requested: str | Non
     }
 
 
+async def _tier1_gate(candidate: Path, gate_dir: Path, timeout_sec: float) -> tuple[bool, str]:
+    """Tier 1's patch check: every declared solution must still score 1 on the patched task, so a patch cannot
+    be accepted that only keeps the first solution working."""
+    from app.services import solution_variants
+
+    values = solution_variants.declared_values(candidate) or [None]
+    for value in values:
+        outcome = await harbor_runner.run_single(
+            candidate, "oracle", gate_dir, f"gate-{uuid.uuid4().hex[:8]}", timeout_sec,
+            agent_env={solution_variants.ENV: value} if value is not None else None,
+        )
+        shutil.rmtree(gate_dir, ignore_errors=True)
+        label = f"SOLUTION={value}: " if value is not None else ""
+        if outcome.reward is None:
+            return False, f"{label}the Oracle produced no reward on the patched task"
+        if outcome.reward < 1.0:
+            return False, f"{label}Oracle reward {outcome.reward:g} on the patched task. {_failure_excerpt(outcome.logs)}"
+    return True, f"every declared solution scored 1 on the patched task ({len(values)})"
+
+
 async def run_tier1_stage(
     submission_id: str,
     agent: str | None = None,
@@ -2653,15 +2674,7 @@ async def run_tier1_stage(
             return {**(proposal or {}), "cost_usd": llm_cost(calls)}
 
         async def gate(candidate: Path) -> tuple[bool, str]:
-            outcome = await harbor_runner.run_single(
-                candidate, "oracle", base / "gate", f"gate-{uuid.uuid4().hex[:8]}", _oracle_timeout_sec(config)
-            )
-            shutil.rmtree(base / "gate", ignore_errors=True)
-            if outcome.reward is None:
-                return False, "the Oracle produced no reward on the patched task"
-            if outcome.reward >= 1.0:
-                return True, f"Oracle reward {outcome.reward:g} on the patched task"
-            return False, f"Oracle reward {outcome.reward:g} on the patched task. {_failure_excerpt(outcome.logs)}"
+            return await _tier1_gate(candidate, base / "gate", _oracle_timeout_sec(config))
 
         def progress(state: dict) -> None:
             db.refresh(run)
@@ -3263,53 +3276,3 @@ async def run_hash_proof_stage(submission_id: str) -> None:
         db.commit()
     finally:
         db.close()
-
-
-async def run_solution_variants_stage(submission_id: str, runs: int = 3) -> None:
-    """Each declared correct solution as its own Oracle trial (`--ae SOLUTION=<value>`), `runs` times, one at a
-    time. Passes only when every run of every value scores 1. Not a Gate 1 run and not part of the task-version
-    comparison (only an environment variable differs). Run kind "solution_variants", logs {values, note}."""
-    from app.services import solution_variants
-
-    db = SessionLocal()
-    try:
-        submission = db.get(Submission, submission_id)
-        if submission is None or submission.extracted_path is None:
-            return
-        run = _get_or_create_run(db, submission_id, "solution_variants", 0)
-        run.status, run.reward, run.logs = "running", None, None
-        run.started_at = datetime.now(UTC)
-        db.commit()
-        task_root = Path(submission.extracted_path)
-        values = [{"value": v, "status": "pending", "rewards": []} for v in solution_variants.declared_values(task_root)]
-
-        def save(status: str, note: str = "") -> None:
-            run.status = status
-            run.logs = json.dumps({"values": values, "runs_per_value": runs, "note": note})
-            db.commit()
-
-        try:
-            timeout_sec = _oracle_timeout_sec(_get_task_config(submission))
-            jobs = task_root.parent / "runs" / "solution_variants"
-            for item in values:
-                item["status"] = "running"
-                for index in range(runs):
-                    outcome = await harbor_runner.run_single(
-                        task_root, "oracle", jobs, f"solution-{uuid.uuid4().hex[:8]}", timeout_sec,
-                        agent_env={solution_variants.ENV: item["value"]},
-                        extra_note=f"(solution variant: SOLUTION={item['value']}, run {index + 1})",
-                    )
-                    item["rewards"].append(outcome.reward)
-                    save("running")
-                item["status"] = "passed" if all(r == 1 for r in item["rewards"]) else "failed"
-            passed = len(values) >= solution_variants.MIN_VALUES and all(v["status"] == "passed" for v in values)
-            run.reward = 1 if passed else 0
-            run.finished_at = datetime.now(UTC)
-            save("passed" if passed else "failed")
-        except Exception:
-            run.reward = None
-            run.finished_at = datetime.now(UTC)
-            save("failed", traceback.format_exc()[-1500:])
-    finally:
-        db.close()
-

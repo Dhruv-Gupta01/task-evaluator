@@ -47,7 +47,6 @@ import { GraderIsolationPanel } from "@/components/GraderIsolationPanel";
 import { WorkerProbePanel } from "@/components/WorkerProbePanel";
 import { HashProofPanel } from "@/components/HashProofPanel";
 import { AiRulingPanel } from "@/components/AiRulingPanel";
-import { SolutionVariantsPanel } from "@/components/SolutionVariantsPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -105,7 +104,6 @@ function SubmissionDetail() {
         isActive(d.answer_exposure.status) ||
         isActive(d.worker_probe?.status ?? "not-run") ||
         isActive(d.hash_proof?.status ?? "not-run") ||
-        isActive(d.solution_variants?.status ?? "not-run") ||
         isActive(d.tier0.status) ||
         isActive(d.tier1.status) ||
         isActive(d.tier2.status) ||
@@ -154,7 +152,7 @@ function SubmissionDetail() {
   const mOracle = useMutation({
     mutationFn: () => api.oracle(id, oracleN),
     onSuccess: () => {
-      toast.success(`${oracleN} oracle run(s) started`);
+      toast.success(`Oracle started: every declared solution, ${oracleN} times each`);
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -162,7 +160,7 @@ function SubmissionDetail() {
   const mOracleStress = useMutation({
     mutationFn: () => api.oracle(id, oracleN, true),
     onSuccess: () => {
-      toast.success(`${oracleN} oracle run(s) under CPU load started`);
+      toast.success(`Oracle under CPU load started: ${oracleN} runs per solution`);
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -568,17 +566,17 @@ function SubmissionDetail() {
         {/* Oracle */}
         <StageCard
           title="Run Oracle"
-          description="Run the oracle solution against tests, N times. Every run is kept — appended to whatever's already there, never overwritten — since 3 consecutive reward=1 runs is what Gate 1 actually needs, not just the latest one."
+          description="Runs every correct solution the task declares (at least 2), N times each. Every run is kept. The gate opens only when each solution scores 1 at least 3 times and no run fails; Nop, Sufficiency and Agent Trials stay closed until then."
           status={data.oracle.status}
         >
           <div className="flex flex-wrap items-center gap-2">
-            <label className="text-sm text-muted-foreground">N =</label>
+            <label className="text-sm text-muted-foreground">Runs per solution =</label>
             <Input
               type="number"
-              min={1}
-              max={50}
+              min={3}
+              max={10}
               value={oracleN}
-              onChange={(e) => setOracleN(Math.min(50, Math.max(1, Number(e.target.value) || 1)))}
+              onChange={(e) => setOracleN(Math.min(10, Math.max(3, Number(e.target.value) || 3)))}
               className="w-20"
             />
             <RunButton
@@ -598,6 +596,28 @@ function SubmissionDetail() {
             >
               Run under CPU load
             </Button>
+          </div>
+
+          <div className="rounded-md border border-border p-2.5 text-xs" data-testid="oracle-solutions">
+            <p className="font-medium">Correct solutions (at least 2 required)</p>
+            {(data.oracle.solutions ?? []).length === 0 && (
+              <p className="text-red-600">None declared in task.toml (docs/oracle-solutions.md).</p>
+            )}
+            {(data.oracle.solutions ?? []).map((sol) => (
+              <p
+                key={sol.value}
+                className={
+                  sol.passed ? "text-emerald-600" : sol.runs ? "text-red-600" : "text-muted-foreground"
+                }
+              >
+                SOLUTION={sol.value}: {sol.passed_runs} of {sol.runs} runs passed
+              </p>
+            ))}
+            {data.build.status !== "not-run" && data.oracle.solutions_note && (
+              <p className="mt-1 text-muted-foreground">
+                Gate closed: {data.oracle.solutions_note}
+              </p>
+            )}
           </div>
 
           {data.oracle.flaky_note && (
@@ -631,7 +651,10 @@ function SubmissionDetail() {
                 {data.oracle.runs.map((r) => (
                   <li key={r.index} className="px-3 py-2">
                     <div className="flex items-center justify-between text-sm">
-                      <span className="font-mono">Run #{r.index}</span>
+                      <span className="font-mono">
+                        Run #{r.index}
+                        {r.solution ? ` · SOLUTION=${r.solution}` : ""}
+                      </span>
                       {r.verifier?.grader_error ? (
                         <GraderErrorBadge />
                       ) : (
@@ -704,19 +727,6 @@ function SubmissionDetail() {
           )}
         </StageCard>
 
-        <StageCard
-          title="Solution Variants"
-          description="At least two different correct solutions are required. Each one the task declares is run as an Oracle trial, 3 times, and every run must score 1."
-          status={data.solution_variants.status}
-        >
-          <SolutionVariantsPanel
-            id={id}
-            data={data.solution_variants}
-            built={data.build.status === "passed"}
-            onChange={invalidate}
-          />
-        </StageCard>
-
         {/* Nop */}
         <StageCard
           title="Run Nop"
@@ -730,8 +740,8 @@ function SubmissionDetail() {
             onClick={() => mNop.mutate()}
             running={data.nop.status === "running"}
             pending={mNop.isPending}
-            disabled={!buildReady}
-            disabledReason="Build the image first"
+            disabled={!buildReady || data.oracle.all_passed !== true}
+            disabledReason="The Oracle must pass first: every solution, 3 times"
           />
           <VerifierLine rawReward={data.nop.raw_reward} verifier={data.nop.verifier} />
           <TrialInsight
@@ -1057,8 +1067,8 @@ function SubmissionDetail() {
             onClick={() => mSufficiency.mutate()}
             running={data.sufficiency.status === "running" || data.sufficiency.status === "pending"}
             pending={mSufficiency.isPending}
-            disabled={!validated}
-            disabledReason="Validate the submission first"
+            disabled={!validated || data.oracle.all_passed !== true}
+            disabledReason="The Oracle must pass first: every solution, 3 times"
           />
           {data.sufficiency.passed != null && (
             <div
@@ -1497,8 +1507,8 @@ function SubmissionDetail() {
               onClick={() => mCheatTrial.mutate()}
               running={isActive(data.cheat_trial.status)}
               pending={mCheatTrial.isPending}
-              disabled={!buildReady}
-              disabledReason="Build the image first"
+              disabled={!buildReady || data.oracle.all_passed !== true}
+              disabledReason="The Oracle must pass first: every solution, 3 times"
             />
           </div>
           {Number(cheatCostCap) > 0 &&
@@ -1549,7 +1559,7 @@ function SubmissionDetail() {
             </div>
           )}
           <div className="flex flex-wrap items-center gap-2">
-            <label className="text-sm text-muted-foreground">N =</label>
+            <label className="text-sm text-muted-foreground">Runs per solution =</label>
             <Input
               type="number"
               min={1}
@@ -1638,8 +1648,8 @@ function SubmissionDetail() {
               onClick={() => mAgent.mutate()}
               running={data.agent_trials.status === "running"}
               pending={mAgent.isPending}
-              disabled={!buildReady}
-              disabledReason="Build the image first"
+              disabled={!buildReady || data.oracle.all_passed !== true}
+              disabledReason="The Oracle must pass first: every solution, 3 times"
             />
           </div>
 

@@ -290,10 +290,11 @@ Rules for authors: [`docs/oracle-solutions.md`](docs/oracle-solutions.md).
 
 | Check | What it does | Where it shows |
 |---|---|---|
-| `oracle_solutions` | **Fails** a task that does not declare two correct solutions in `[metadata] oracle_solutions`, whose `solution/` never reads `$SOLUTION`, or whose values run identical code | Static Checks |
-| Solution Variants | Runs each declared value as an Oracle trial 3 times; every run must score 1 | Solution Variants card, evidence |
+| `oracle_solutions` | **Fails** a task that does not declare two correct solutions in `[metadata] oracle_solutions` or whose `solution/` never reads `$SOLUTION` | Static Checks |
+| `identical_solutions` | **Fails** two solutions that are the same code | Static Checks |
+| Run Oracle | Runs every declared solution (at least 3 times each). The gate opens only when all pass; Nop, Sufficiency, Agent Trials and the later stages stay closed until then | Run Oracle card, evidence |
 
-Nothing blocks agent runs on these yet, and the Oracle gate is unchanged.
+A task with one solution is refused. Tier 1 accepts a patch only if every declared solution still scores 1.
 
 ## Notes
 
@@ -311,11 +312,10 @@ Nothing blocks agent runs on these yet, and the Oracle gate is unchanged.
   empty on a normal network.
 - **Adding trials without replacing the old ones**: `POST /submissions/{id}/agent-trials?n=3&append=true`
   (API only; the UI button replaces).
-- **Oracle runs N times, always kept**: the Run Oracle card has an N field (default 3). Every click
-  appends N more runs to whatever's already there and shows each one's own status/reward/logs — the
-  old behavior silently overwrote the single previous run, which meant you could never actually see
-  whether the 3 consecutive runs Gate 1 wants had all passed, only the most recent one. "passed" on
-  the card means every run so far has reward=1, not just the latest.
+- **Oracle runs every declared solution, and keeps every run**: the Run Oracle card has a "Runs per
+  solution" field (default and minimum 3). Every click appends runs and shows each one's solution, status,
+  reward and logs. "passed" means every declared solution scored 1 at least 3 times and no run so far
+  failed.
 - **Task version consistency check**: every Oracle, Nop and Agent Trials run records the
   `task_checksum` Harbor's own `result.json` reports for the exact task directory it ran against.
   The first one seen on a submission becomes its canonical checksum; a red banner appears on the

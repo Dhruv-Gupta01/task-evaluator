@@ -13,6 +13,7 @@ from app.models import Run, Submission
 from app.routers import submissions as router
 from tests.test_verifier_isolation_detection import _task
 from tests.test_worker_required import RUN_AS_ROOT
+from tests._fixtures import pass_oracle
 
 QUIET = 'def test_x():\n    assert open("/app/out.txt").read() == "1"\n'
 
@@ -43,7 +44,8 @@ def test_the_gate_is_not_run_until_asked(env):
 
 
 def test_running_it_records_missing_and_does_not_block_by_default(env, monkeypatch):
-    client, _, _ = env
+    client, task, Session = env
+    pass_oracle(task, Session)
     monkeypatch.setattr(router.settings, "grader_isolation_enforce", False)
     body = client.post("/submissions/s1/grader-isolation").json()
     assert body["state"] == "missing" and body["status"] == "failed" and body["blocks"] is False
@@ -52,7 +54,8 @@ def test_running_it_records_missing_and_does_not_block_by_default(env, monkeypat
 
 
 def test_when_enforced_it_blocks_agents_and_only_revising_the_task_clears_it(env, monkeypatch):
-    client, task, _ = env
+    client, task, Session = env
+    pass_oracle(task, Session)
     monkeypatch.setattr(router.settings, "grader_isolation_enforce", True)
     blocked = client.post("/submissions/s1/agent-trials?n=1")
     assert blocked.status_code == 409 and "Grader Isolation is missing" in blocked.json()["detail"]
@@ -64,7 +67,8 @@ def test_when_enforced_it_blocks_agents_and_only_revising_the_task_clears_it(env
 
 
 def test_a_clean_task_passes_and_is_never_blocked(env, monkeypatch):
-    client, task, _ = env
+    client, task, Session = env
+    pass_oracle(task, Session)
     monkeypatch.setattr(router.settings, "grader_isolation_enforce", True)
     (task / "tests" / "test_x.py").write_text(QUIET)
     assert client.post("/submissions/s1/grader-isolation").json()["status"] == "passed"

@@ -31,7 +31,7 @@ def _add_missing_llm_spend_columns() -> None:
 def _add_missing_run_columns() -> None:
     """Same for runs: the verifier-report columns, nullable, no data loss."""
     with engine.begin() as conn:
-        for name, sql_type in (("raw_reward", "DOUBLE PRECISION"), ("verifier_json", "TEXT")):
+        for name, sql_type in (("raw_reward", "DOUBLE PRECISION"), ("verifier_json", "TEXT"), ("solution", "VARCHAR")):
             conn.execute(text(f"ALTER TABLE runs ADD COLUMN IF NOT EXISTS {name} {sql_type}"))
 
 

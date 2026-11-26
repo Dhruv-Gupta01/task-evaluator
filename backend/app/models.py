@@ -53,6 +53,8 @@ class Run(Base):
     # it (services/verifier_report.py, JSON). Both null for rows recorded
     # before these existed and for stages that are not Harbor trials.
     raw_reward: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # which declared solution an Oracle run used (SOLUTION=<value>); null for every other row
+    solution: Mapped[str | None] = mapped_column(String, nullable=True)
     verifier_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     logs: Mapped[str | None] = mapped_column(Text, nullable=True)
     container_id: Mapped[str | None] = mapped_column(String, nullable=True)

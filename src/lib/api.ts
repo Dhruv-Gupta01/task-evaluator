@@ -89,6 +89,7 @@ export interface BuildResult {
 }
 
 export interface TrialResult {
+  solution?: string | null;
   index: number;
   reward: 0 | 1 | null;
   raw_reward?: number | null;
@@ -144,6 +145,8 @@ export interface AgentTrialsResult {
 // Oracle can be run N times, always appended to the ones already there (Gate
 // 1 needs 3 *consecutive* 1.0 runs). "passed" only once every run passed.
 export interface OracleRunsResult {
+  solutions?: { value: string; runs: number; passed_runs: number; passed: boolean }[];
+  solutions_note?: string | null;
   status: StageStatus;
   n: number;
   runs: TrialResult[];
@@ -905,15 +908,6 @@ export interface HashProofResult {
   note: string;
 }
 
-// Each declared correct solution run as an Oracle trial; at least two are required.
-export interface SolutionVariantsResult {
-  status: StageStatus;
-  values: { value: string; status: string; rewards: (number | null)[] }[];
-  runs_per_value: number;
-  note: string;
-  declared: string[];
-}
-
 export interface Submission {
   id: string;
   task_name: string;
@@ -936,7 +930,6 @@ export interface Submission {
   grader_isolation: GraderIsolationResult;
   worker_probe: WorkerProbeResult;
   hash_proof: HashProofResult;
-  solution_variants: SolutionVariantsResult;
   ai_detection: AiDetectionResult;
   answer_exposure: AnswerExposureResult;
   tier0: Tier0Result;
@@ -1178,10 +1171,6 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(handle<unknown>),
-  solutionVariants: (id: string) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/solution-variants`, { method: "POST" }).then(
-      handle<unknown>,
-    ),
   hashProof: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/hash-proof`, { method: "POST" }).then(
       handle<unknown>,

@@ -37,7 +37,7 @@ from app.schemas import (
     StageStatus,
     GraderIsolationResult,
     HashProofResult,
-    SolutionVariantsResult,
+    OracleSolution,
     WorkerProbeCheck,
     WorkerProbeResult,
     StaticChecksResult,
@@ -134,7 +134,7 @@ def _suggested_verdict(run: Run, verifier: dict | None) -> dict | None:
 def _trial(r: Run, expected_tests: int | None) -> TrialResult:
     verifier = _verifier(r, expected_tests)
     return TrialResult(
-        index=r.run_index, reward=r.reward, raw_reward=r.raw_reward, verifier=verifier,
+        index=r.run_index, solution=r.solution, reward=r.reward, raw_reward=r.raw_reward, verifier=verifier,
         suggested_verdict=_suggested_verdict(r, verifier), logs=r.logs, task_checksum=r.task_checksum,
     )
 
@@ -205,6 +205,33 @@ def _fragile_findings(submission: Submission) -> list[str]:
     return [r["name"] for r in results if r.get("name") in _FRAGILE_CHECKS and r.get("severity") == "warn"]
 
 
+def _oracle_solutions(submission: Submission, oracle_runs: list[Run]) -> tuple[list[OracleSolution], str | None]:
+    """Per declared solution: how many runs it has and passed. The note says what keeps the gate closed."""
+    root = Path(submission.extracted_path) if submission.extracted_path else None
+    if root is None or not root.is_dir():
+        return [], "the task files are not available"
+    out = []
+    for value in solution_variants.declared_values(root):
+        mine = [r for r in oracle_runs if r.solution == value]
+        good = sum(1 for r in mine if r.reward == 1)
+        out.append(OracleSolution(value=value, runs=len(mine), passed_runs=good,
+                                  passed=good >= solution_variants.MIN_RUNS and good == len(mine)))
+    found = solution_variants.oracle_problems(root)
+    if found:
+        return out, "; ".join(found)
+    short = [f"SOLUTION={s.value}: {s.passed_runs} of {max(s.runs, solution_variants.MIN_RUNS)} runs passed" for s in out if not s.passed]
+    return out, "; ".join(short) or None
+
+
+def _oracle_solution_lines(schema) -> list[str]:
+    oracle = schema.oracle
+    if not oracle.solutions and not oracle.solutions_note:
+        return []
+    per = "; ".join(f"SOLUTION={s.value}: {s.passed_runs} of {s.runs} runs passed" for s in oracle.solutions)
+    line = f"- Oracle solutions (at least 2 required): {per or 'none declared'}"
+    return [line + (f" -- gate closed: {oracle.solutions_note}" if oracle.all_passed is not True and oracle.solutions_note else "")]
+
+
 def _oracle_runs_result(submission: Submission) -> OracleRunsResult:
     oracle_runs = sorted(
         (r for r in submission.runs if r.kind == "oracle"), key=lambda r: r.run_index
@@ -214,9 +241,11 @@ def _oracle_runs_result(submission: Submission) -> OracleRunsResult:
     stress_runs = [_trial(r, expected) for r in stress]
     stress_note = _stress_note(oracle_runs, stress)
     n = len(oracle_runs)
+    solutions, solutions_note = _oracle_solutions(submission, oracle_runs)
     if n == 0:
         return OracleRunsResult(
-            status="not-run", n=0, runs=[], all_passed=None, stress_runs=stress_runs, stress_note=stress_note
+            status="not-run", n=0, runs=[], all_passed=None, stress_runs=stress_runs, stress_note=stress_note,
+            solutions=solutions, solutions_note=solutions_note,
         )
 
     statuses = {r.status for r in oracle_runs}
@@ -224,18 +253,32 @@ def _oracle_runs_result(submission: Submission) -> OracleRunsResult:
 
     all_passed = None
     if all_terminal:
-        all_passed = all(r.reward == 1 for r in oracle_runs)
+        all_passed = (
+            all(r.reward == 1 for r in oracle_runs)
+            and solutions_note is None
+            and len(solutions) >= solution_variants.MIN_VALUES
+        )
         status: StageStatus = "passed" if all_passed else "failed"
     else:
         status = "running"
 
     # G.1: a mix of 1s and 0s means the solution or the verifier is not deterministic.
+    # judged per declared solution: one solution failing every time is a failure, not flakiness
     scored = [r.reward for r in oracle_runs if r.status in _TERMINAL and r.reward is not None]
-    flaky = None if not scored else (0 in scored and 1 in scored)
+    by_solution: dict[str | None, list[int]] = {}
+    for r in oracle_runs:
+        if r.status in _TERMINAL and r.reward is not None:
+            by_solution.setdefault(r.solution, []).append(r.reward)
+    mixed = {k: v for k, v in by_solution.items() if 0 in v and 1 in v}
+    flaky = None if not scored else bool(mixed)
     flaky_note = None
     if flaky:
+        which = "; ".join(
+            (f"SOLUTION={k}: " if k else "") + f"{v.count(0)} of {len(v)} Oracle runs scored 0 while the others scored 1"
+            for k, v in mixed.items()
+        )
         flaky_note = (
-            f"{scored.count(0)} of {len(scored)} Oracle runs scored 0 while the others scored 1: the reference "
+            f"{which}: the reference "
             "solution or the verifier is flaky, and an agent trial can fail for the same reason. Run "
             f"{_SUGGESTED_ORACLE_RUNS} or more Oracle runs and a stress run before trusting the gate."
         )
@@ -255,7 +298,7 @@ def _oracle_runs_result(submission: Submission) -> OracleRunsResult:
     return OracleRunsResult(
         status=status, n=n, runs=[_trial(r, expected) for r in oracle_runs], all_passed=all_passed,
         flaky=flaky, flaky_note=flaky_note, stress_runs=stress_runs, stress_note=stress_note,
-        expected_tests=expected, grader_errors=grader_errors,
+        expected_tests=expected, grader_errors=grader_errors, solutions=solutions, solutions_note=solutions_note,
     )
 
 
@@ -574,19 +617,6 @@ def _hash_proof_result(run: Run | None) -> HashProofResult:
         return HashProofResult(status="failed", verdict="error", note="the stored result could not be read")
 
 
-def _solution_variants_result(submission: Submission) -> SolutionVariantsResult:
-    root = Path(submission.extracted_path) if submission.extracted_path else None
-    declared = solution_variants.declared_values(root) if root else []
-    run = _get_run(submission, "solution_variants")
-    if run is None:
-        return SolutionVariantsResult(status="not-run", declared=declared)
-    try:
-        detail = json.loads(run.logs) if run.logs else {}
-        return SolutionVariantsResult(status=run.status, declared=declared, **detail)  # type: ignore[arg-type]
-    except (ValueError, TypeError):
-        return SolutionVariantsResult(status="failed", note="the stored result could not be read", declared=declared)
-
-
 def _regrade_result(run: Run | None) -> RegradeResult:
     if run is None:
         return RegradeResult(status="not-run", logs=None)
@@ -636,7 +666,6 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         grader_isolation=_grader_isolation_result(submission),
         worker_probe=_worker_probe_result(_get_run(submission, "worker_probe")),
         hash_proof=_hash_proof_result(_get_run(submission, "hash_proof")),
-        solution_variants=_solution_variants_result(submission),
         ai_detection=_ai_detection_result(submission),
         answer_exposure=_answer_exposure_result(_get_run(submission, "answer_exposure")),
         tier0=_tier0_result(_get_run(submission, "tier0_probes")),
@@ -1155,14 +1184,6 @@ def _ai_detection_line(schema) -> str:
     return line
 
 
-def _solution_variants_line(schema) -> str:
-    result = schema.solution_variants
-    if result.status == "not-run":
-        return f"- Solution variants: not run yet ({len(result.declared)} declared; at least 2 are required)"
-    parts = [f"SOLUTION={v.value} {v.status} ({', '.join('-' if r is None else f'{r:g}' for r in v.rewards)})" for v in result.values]
-    return f"- Solution variants: {result.status}" + (f" -- {'; '.join(parts)}" if parts else "")
-
-
 def build_summary_markdown(
     schema: SubmissionSchema, total_cost_usd: float | None, cost_report: dict | None = None
 ) -> str:
@@ -1254,7 +1275,7 @@ def build_summary_markdown(
         _worker_line(schema),
         _worker_probe_line(schema),
         _hash_proof_line(schema),
-        _solution_variants_line(schema),
+        *_oracle_solution_lines(schema),
         _ai_detection_line(schema),
         (
             f"- Static Checks: {_fmt_status(schema.static_checks.status)}"

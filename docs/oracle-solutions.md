@@ -46,14 +46,21 @@ A `solution/` change is a patch version bump.
 
 | Step | Passes when |
 |---|---|
-| Static Checks (`oracle_solutions`) | at least two values are declared, `solution/` reads `$SOLUTION`, and the values do not run identical code |
-| Solution Variants card ("Run all solutions") | every declared value scores 1 on every one of 3 runs |
+| Static Checks (`oracle_solutions`) | at least two values are declared and `solution/` reads `$SOLUTION` |
+| Static Checks (`identical_solutions`) | no two solutions are the same code (comments, blank lines and indentation ignored) |
+| Run Oracle | every declared solution scores 1 at least 3 times and no run fails |
+
+**The Oracle is a gate for what follows.** Nop, Sufficiency, Agent Trials, the cheat trial, the probes, the
+tiers and the hash proof stay closed until it passes. A task with only one solution is not allowed: there is no
+exemption.
+
+When Tier 1 patches a task, every declared solution must still score 1 on the patched copy.
 
 ## What "different" means
 
 Two different approaches: another algorithm, library, order of steps, or an equally valid output form that the
 instruction allows. A copy with a changed comment or variable name is not a second solution. The platform
-catches only identical code; it cannot judge how different two scripts really are.
+checks for identical code only, so renamed or reordered code is not detected.
 
 ## If a correct second solution scores 0
 

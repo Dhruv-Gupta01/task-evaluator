@@ -71,6 +71,7 @@ class BuildResult(BaseModel):
 
 class TrialResult(BaseModel):
     index: int
+    solution: str | None = None  # Oracle runs: which declared solution (SOLUTION=<value>)
     reward: int | None = None
     raw_reward: float | None = None
     verifier: VerifierReport | None = None
@@ -122,6 +123,13 @@ class AgentTrialsResult(BaseModel):
     grader_errors: int = 0
 
 
+class OracleSolution(BaseModel):
+    value: str
+    runs: int
+    passed_runs: int
+    passed: bool
+
+
 class OracleRunsResult(BaseModel):
     """Oracle can be run N times, always appended to the ones already there
     (Gate 1 needs 3 *consecutive* 1.0 runs, so history matters -- unlike Nop,
@@ -143,6 +151,9 @@ class OracleRunsResult(BaseModel):
     stress_runs: list[TrialResult] = []
     stress_note: str | None = None
     expected_tests: int | None = None
+    # one entry per solution the task declares; solutions_note says why the gate cannot open
+    solutions: list[OracleSolution] = []
+    solutions_note: str | None = None
     # Runs where the grader itself broke. The gate stays unpassed (it cannot be judged), but
     # these are not a verdict on the solution: rerun them.
     grader_errors: int = 0
@@ -403,21 +414,6 @@ class HashProofResult(BaseModel):
     note: str = ""
 
 
-class SolutionValueResult(BaseModel):
-    value: str
-    status: str  # pending | running | passed | failed
-    rewards: list[float | None] = []
-
-
-class SolutionVariantsResult(BaseModel):
-    """Each declared correct solution run as an Oracle trial; passed only when every run scored 1."""
-    status: StageStatus
-    values: list[SolutionValueResult] = []
-    runs_per_value: int = 0
-    note: str = ""
-    declared: list[str] = []
-
-
 class GraderIsolationResult(BaseModel):
     """The Grader Isolation gate (way 2 of the Worker flag). `state` is ok / missing / unclear;
     `analysis` is the way-1 result (not_required, present, equivalent, missing). Advisory unless `enforced`.
@@ -497,7 +493,6 @@ class SubmissionSchema(BaseModel):
     grader_isolation: GraderIsolationResult = GraderIsolationResult(status="not-run")
     worker_probe: WorkerProbeResult = WorkerProbeResult(status="not-run")
     hash_proof: HashProofResult = HashProofResult(status="not-run")
-    solution_variants: SolutionVariantsResult = SolutionVariantsResult(status="not-run")
     ai_detection: AiDetectionResult
     answer_exposure: AnswerExposureResult
     tier0: Tier0Result

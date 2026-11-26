@@ -4,15 +4,9 @@ import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from app.models import Run
 from app.services import task_runner
+from tests._fixtures import pass_oracle
 from tests.test_grader_isolation_api import env  # noqa: F401  (fixture)
-
-
-def oracle_passed(Session):
-    with Session() as db:
-        db.add(Run(submission_id="s1", kind="oracle", run_index=0, status="passed", reward=1, finished_at=datetime.now(UTC)))
-        db.commit()
 
 
 def test_not_run_until_asked_and_refused_before_the_oracle_passes(env):
@@ -22,15 +16,15 @@ def test_not_run_until_asked_and_refused_before_the_oracle_passes(env):
 
 
 def test_asking_after_a_passing_oracle_queues_it(env):
-    client, _, Session = env
-    oracle_passed(Session)
+    client, task, Session = env
+    pass_oracle(task, Session)
     assert client.post("/submissions/s1/hash-proof").json() == {"status": "started"}
     assert client.get("/submissions/s1").json()["hash_proof"]["status"] == "pending"
 
 
 def test_the_stage_stores_each_entry_and_the_summary_names_the_unused_one(env, monkeypatch):
     client, task, Session = env
-    oracle_passed(Session)
+    pass_oracle(task, Session)
     (task / "tests" / "expected.json").write_text(json.dumps({"a_sha256": "a" * 64, "decoy_sha256": "b" * 64}))
     monkeypatch.setattr(task_runner, "SessionLocal", Session)
     monkeypatch.setattr(task_runner, "_get_task_config", lambda s: None)

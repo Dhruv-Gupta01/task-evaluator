@@ -429,9 +429,10 @@ def _hashed_answers(task_root: Path, report) -> None:
 
 
 def _oracle_solutions(task_root: Path, report) -> None:
-    from app.services.solution_variants import check_oracle_solutions
+    from app.services.solution_variants import check_identical_solutions, check_oracle_solutions
 
     check_oracle_solutions(task_root, report)
+    check_identical_solutions(task_root, report)
 
 
 def run_static_checks(task_root: Path) -> StaticCheckReport:

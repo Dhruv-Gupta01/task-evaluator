@@ -16,6 +16,7 @@ from pathlib import Path
 ENV = "SOLUTION"
 KEY = "oracle_solutions"
 MIN_VALUES, MAX_VALUES = 2, 10
+MIN_RUNS = 3  # each solution must score 1 this many times before the Oracle gate opens
 _VALUE_RE = re.compile(r"[A-Za-z0-9_.\-]{1,40}")
 _READS_RE = re.compile(r"\$\{?SOLUTION\b|environ(?:\.get)?[\[(]\s*['\"]SOLUTION['\"]|getenv\(\s*['\"]SOLUTION['\"]")
 _ARM_RE = re.compile(r"^\s*\(?([A-Za-z0-9_.\-\"'| ]+)\)(.*?);;", re.M | re.S)
@@ -85,9 +86,40 @@ def problems(task_root: Path) -> list[str]:
         found.append("solution/solve.sh must read $SOLUTION to pick which solution to run")
     if ENV in ((_toml(task_root).get("solution") or {}).get("env") or {}):
         found.append("remove SOLUTION from [solution.env]: Harbor lets it override the value being tested")
-    if len(values) >= MIN_VALUES and (same := _identical_values(task_root, values)):
-        found.append(f"SOLUTION={same[0]} and SOLUTION={same[1]} run the same code, so they are not two different solutions")
     return found
+
+
+def identical(task_root: Path) -> list[str]:
+    """Where two solutions are the same code (comments, blank lines and indentation ignored): two declared values
+    that run the same commands, or two script files under solution/ with the same content. Renamed variables or
+    reordered lines are not caught; identical code is all this check claims."""
+    found = []
+    values = declared_values(task_root)
+    if len(values) >= MIN_VALUES and (same := _identical_values(task_root, values)):
+        found.append(f"SOLUTION={same[0]} and SOLUTION={same[1]} run the same code")
+    solution = task_root / "solution"
+    seen: dict[str, str] = {}
+    for path in sorted(solution.rglob("*")) if solution.is_dir() else []:
+        if not path.is_file() or path.suffix not in (".sh", ".py") or path.stat().st_size > 1_000_000:
+            continue
+        code = _code(path.read_text(errors="ignore"))
+        if not code:
+            continue
+        rel = path.relative_to(task_root).as_posix()
+        if code in seen:
+            found.append(f"{seen[code]} and {rel} are the same code")
+        else:
+            seen[code] = rel
+    return found
+
+
+def check_identical_solutions(task_root: Path, report) -> None:
+    found = identical(task_root)
+    if found:
+        report.add("identical_solutions", "fail",
+                   "; ".join(found) + ". Two copies of one solution are not two solutions (docs/oracle-solutions.md).")
+    else:
+        report.add("identical_solutions", "info", "No two solutions are the same code. Renamed or reordered code is not detected.")
 
 
 def check_oracle_solutions(task_root: Path, report) -> None:
@@ -97,6 +129,11 @@ def check_oracle_solutions(task_root: Path, report) -> None:
     else:
         report.add(
             "oracle_solutions", "info",
-            f"Declared correct solutions: {', '.join(declared_values(task_root))}. Run them on the Solution variants card; "
-            "each must score 1. Whether they are really different approaches is not something this check can tell.",
+            f"Declared correct solutions: {', '.join(declared_values(task_root))}. The Oracle runs each at least {MIN_RUNS} times; "
+            "every run must score 1.",
         )
+
+
+def oracle_problems(task_root: Path) -> list[str]:
+    """Everything that stops this task's Oracle from being a gate at all."""
+    return problems(task_root) + identical(task_root)

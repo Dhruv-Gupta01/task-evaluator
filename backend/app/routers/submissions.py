@@ -98,16 +98,20 @@ def _require_built_submission(submission_id: str, db: Session) -> Submission:
 async def trigger_oracle(
     submission_id: str, n: int = 3, stress: bool = False, db: Session = Depends(get_db)
 ) -> dict[str, str]:
-    """Runs n oracle trials, sequentially, always appended to any earlier
-    ones on this submission (Gate 1 needs 3 *consecutive* 1.0 runs, so every
-    run's own result stays visible, not just the latest). stress=true runs
-    them under CPU load (kind "oracle_stress"); those never count for
-    the gate."""
-    if n < 1 or n > settings.max_agent_trials:
+    """Runs every solution the task declares (`[metadata] oracle_solutions`, at least two) n times each,
+    sequentially, appended to any earlier runs (every run's own result stays visible). The gate needs every
+    solution to score 1 at least 3 times and no run to fail. A task with fewer than two, or with identical
+    ones, is refused. stress=true runs them under CPU load (kind "oracle_stress"); those never count."""
+    if n < solution_variants.MIN_RUNS or n > settings.max_agent_trials:
         raise HTTPException(
-            status_code=400, detail=f"n must be between 1 and {settings.max_agent_trials}"
+            status_code=400, detail=f"n must be between {solution_variants.MIN_RUNS} and {settings.max_agent_trials} (runs per solution)"
         )
-    _require_built_submission(submission_id, db)
+    submission = _require_built_submission(submission_id, db)
+    task_root = Path(submission.extracted_path)
+    found = solution_variants.oracle_problems(task_root)
+    if found:
+        raise HTTPException(status_code=400, detail="; ".join(found) + " (docs/oracle-solutions.md)")
+    values = solution_variants.declared_values(task_root)
     kind = "oracle_stress" if stress else "oracle"
 
     last = (
@@ -115,18 +119,34 @@ async def trigger_oracle(
         .filter_by(submission_id=submission_id, kind=kind)
         .scalar()
     )
-    first_index = 0 if last is None else last + 1
-    for run_index in range(first_index, first_index + n):
-        db.add(Run(submission_id=submission_id, kind=kind, run_index=run_index, status="pending"))
+    index = 0 if last is None else last + 1
+    total = 0
+    for value in values:
+        for _ in range(n):
+            db.add(Run(submission_id=submission_id, kind=kind, run_index=index, status="pending", solution=value))
+            index, total = index + 1, total + 1
     db.commit()
 
-    await task_queue.submit(f"{submission_id}:{kind}", task_runner.run_oracle_trials(submission_id, n, stress))
+    await task_queue.submit(f"{submission_id}:{kind}", task_runner.run_oracle_trials(submission_id, total, stress))
     return {"status": "started"}
+
+
+def _require_oracle_passed(submission_id: str, db: Session) -> None:
+    """Later stages stay closed until every declared solution passes the Oracle."""
+    submission = db.get(Submission, submission_id)
+    if submission is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if submission_service.to_schema(submission).oracle.all_passed is not True:
+        raise HTTPException(
+            status_code=400,
+            detail="the Oracle has not passed: every declared solution must score 1 at least 3 times before this stage opens",
+        )
 
 
 @router.post("/submissions/{submission_id}/nop", status_code=202)
 async def trigger_nop(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
     _require_built_submission(submission_id, db)
+    _require_oracle_passed(submission_id, db)
     await task_queue.submit(f"{submission_id}:nop", task_runner.run_nop(submission_id))
     return {"status": "started"}
 
@@ -177,6 +197,7 @@ async def trigger_agent_trials(
             status_code=400, detail=f"n must be between 1 and {settings.max_agent_trials}"
         )
     _require_built_submission(submission_id, db)
+    _require_oracle_passed(submission_id, db)
     _require_grader_isolation(submission_id, db)
     _raise_if_over_budget(db, budget.exceeded_message(db))
 
@@ -210,6 +231,7 @@ async def trigger_sufficiency(
 ) -> dict[str, str]:
     """`runs` (1 to 3) independent judge calls; the majority decides and
     disagreement is reported. Cost grows with the number of runs."""
+    _require_oracle_passed(submission_id, db)
     if not 1 <= runs <= 3:
         raise HTTPException(status_code=400, detail="runs must be 1, 2 or 3")
     _raise_if_over_budget(db, budget.judge_exceeded_message(db))
@@ -461,6 +483,7 @@ async def trigger_cheat_trial(
         raise HTTPException(status_code=400, detail="max_cost_usd must be between 0 and 10000")
     _raise_if_over_budget(db, budget.exceeded_message(db))
     _require_built_submission(submission_id, db)
+    _require_oracle_passed(submission_id, db)
     _require_grader_isolation(submission_id, db)
 
     db.query(Run).filter_by(submission_id=submission_id, kind="cheat_trial").delete()
@@ -1058,7 +1081,6 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
         },
         "worker_probe": schema.worker_probe.model_dump(),
         "hash_proof": schema.hash_proof.model_dump(),
-        "solution_variants": schema.solution_variants.model_dump(),
         "answer_exposure": {
             "status": schema.answer_exposure.status,
             "not_run": schema.answer_exposure.status == "not-run",
@@ -1200,26 +1222,3 @@ def set_ai_detection_decision(submission_id: str, body: AiDetectionDecision, db:
     db.commit()
     db.refresh(submission)
     return submission_service._ai_detection_result(submission).model_dump()
-
-
-@router.post("/submissions/{submission_id}/solution-variants", status_code=202)
-async def trigger_solution_variants(submission_id: str, runs: int = 3, db: Session = Depends(get_db)) -> dict[str, str]:
-    """Runs every correct solution the task declares (`[metadata] oracle_solutions`) as an Oracle trial,
-    `runs` times each (1..5). Needs Build. Every run must score 1."""
-    submission, task_root = _task_root_for(submission_id, db)
-    if not 1 <= runs <= 5:
-        raise HTTPException(status_code=400, detail="runs must be between 1 and 5")
-    if submission.build_status != "passed":
-        raise HTTPException(status_code=400, detail="Build must pass first")
-    found = solution_variants.problems(task_root)
-    if found:
-        raise HTTPException(status_code=400, detail="; ".join(found))
-    run = db.query(Run).filter_by(submission_id=submission_id, kind="solution_variants", run_index=0).one_or_none()
-    if run is None:
-        run = Run(submission_id=submission_id, kind="solution_variants", run_index=0)
-        db.add(run)
-    run.status, run.logs = "pending", None
-    db.commit()
-    await task_queue.submit(f"{submission_id}:solution_variants", task_runner.run_solution_variants_stage(submission_id, runs))
-    return {"status": "started"}
-
