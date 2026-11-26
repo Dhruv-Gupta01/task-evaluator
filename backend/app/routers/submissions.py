@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.models import LlmSpend, Run, Submission
 from app.schemas import SubmissionListItem, SubmissionSchema, UploadResponse
-from app.services import budget, grader_isolation, submission_diff, submission_service, task_runner, versions
+from app.services import ai_audit, budget, grader_isolation, submission_diff, submission_service, task_runner, versions
 from app.workers import task_queue
 
 router = APIRouter()
@@ -374,52 +374,6 @@ async def trigger_regrade(
     _queue_row(db, submission_id, "regrade")
     await task_queue.submit(f"{submission_id}:regrade", task_runner.run_regrade(submission_id, kind, source))
     return {"status": "started"}
-
-
-class TrialVerdict(BaseModel):
-    stage: str  # oracle | nop | agent
-    index: int
-    ruling: str  # fake | genuine | unsure
-    adjudicator: str
-    note: str = ""
-
-
-_TRIAL_VERDICT_STAGES = ("oracle", "nop", "agent")
-_TRIAL_VERDICT_RULINGS = ("fake", "genuine", "unsure")
-
-
-@router.put("/submissions/{submission_id}/trial-verdict")
-def set_trial_verdict(submission_id: str, body: TrialVerdict, db: Session = Depends(get_db)) -> dict:
-    """A named reviewer's call on one finished trial: `fake` (the grader or environment was at
-    fault, not the agent), `genuine` (the agent really failed) or `unsure`. It confirms or
-    changes the platform's suggested verdict, is kept with the submission and shown beside
-    it, and never changes a gate or a pass rate."""
-    if db.get(Submission, submission_id) is None:
-        raise HTTPException(status_code=404, detail="submission not found")
-    if body.stage not in _TRIAL_VERDICT_STAGES:
-        raise HTTPException(status_code=400, detail=f"stage must be one of {', '.join(_TRIAL_VERDICT_STAGES)}")
-    if body.ruling not in _TRIAL_VERDICT_RULINGS:
-        raise HTTPException(status_code=400, detail=f"ruling must be one of {', '.join(_TRIAL_VERDICT_RULINGS)}")
-    if not body.adjudicator.strip():
-        raise HTTPException(status_code=400, detail="name the person making the call")
-    if not 0 <= body.index <= 1000 or len(body.note) > 2000 or len(body.adjudicator) > 200:
-        raise HTTPException(status_code=400, detail="index, adjudicator or note is out of range")
-    if db.query(Run).filter_by(submission_id=submission_id, kind=body.stage, run_index=body.index).one_or_none() is None:
-        raise HTTPException(status_code=404, detail="no such trial")
-    run = db.query(Run).filter_by(submission_id=submission_id, kind="trial_verdict", run_index=0).one_or_none()
-    if run is None:
-        run = Run(submission_id=submission_id, kind="trial_verdict", run_index=0, status="passed")
-        db.add(run)
-    verdicts = submission_service._reviewer_decisions(run)
-    verdicts[f"{body.stage}:{body.index}"] = {
-        "ruling": body.ruling,
-        "adjudicator": body.adjudicator.strip(),
-        "note": body.note,
-        "at": datetime.now(UTC).isoformat(),
-    }
-    run.logs = json.dumps(verdicts)
-    db.commit()
-    return verdicts
 
 
 @router.post("/submissions/{submission_id}/failure-analysis", status_code=202)
@@ -874,49 +828,7 @@ def get_changes(submission_id: str, against: str | None = None, db: Session = De
     return {"against": earlier.id, "against_uploaded_at": earlier.uploaded_at.isoformat(), **result}
 
 
-class ReviewerDecision(BaseModel):
-    key: str
-    decision: str  # grader_wrong | agent_wrong | hard_not_ambiguous | unsure
-    note: str = ""
-
-
-_DECISIONS = ("grader_wrong", "agent_wrong", "hard_not_ambiguous", "unsure")
-
-
-@router.put("/submissions/{submission_id}/reviewer-decision")
-def set_reviewer_decision(
-    submission_id: str, body: ReviewerDecision, db: Session = Depends(get_db)
-) -> dict:
-    """Records a reviewer's ruling on a contested flag (key identifies the flag,
-    e.g. the trials in a cluster). Kept with the submission; never changes a gate."""
-    if db.get(Submission, submission_id) is None:
-        raise HTTPException(status_code=404, detail="submission not found")
-    if body.decision not in _DECISIONS:
-        raise HTTPException(status_code=400, detail=f"decision must be one of {', '.join(_DECISIONS)}")
-    if not body.key or len(body.key) > 500 or len(body.note) > 2000:
-        raise HTTPException(status_code=400, detail="key or note is empty or too long")
-    run = db.query(Run).filter_by(submission_id=submission_id, kind="reviewer_decision", run_index=0).one_or_none()
-    if run is None:
-        run = Run(submission_id=submission_id, kind="reviewer_decision", run_index=0, status="passed")
-        db.add(run)
-    decisions = submission_service._reviewer_decisions(run)
-    decisions[body.key] = {
-        "decision": body.decision,
-        "note": body.note,
-        "at": datetime.now(UTC).isoformat(),
-    }
-    run.logs = json.dumps(decisions)
-    db.commit()
-    return decisions
-
-
 # ---- Grader Isolation gate (way 2 of the Worker flag) ----------------------------------------
-
-class GraderIsolationDecision(BaseModel):
-    result: str  # not_required | equivalent | missing
-    reason: str
-    adjudicator: str
-
 
 def _task_root_for(submission_id: str, db: Session) -> tuple[Submission, Path]:
     submission = db.get(Submission, submission_id)
@@ -944,37 +856,9 @@ def _store_grader_isolation(db: Session, submission_id: str, task_root: Path) ->
 def run_grader_isolation(submission_id: str, db: Session = Depends(get_db)) -> dict:
     """The Grader Isolation gate: does agent-written code run in the verifier without a Worker or
     equivalent isolation? Static, no Docker or LLM, a second or two. Advisory unless
-    GRADER_ISOLATION_ENFORCE is on. A reviewer ruling made on the same grader files is kept."""
+    GRADER_ISOLATION_ENFORCE is on. A failing result can only be cleared by revising the task."""
     submission, task_root = _task_root_for(submission_id, db)
     _store_grader_isolation(db, submission_id, task_root)
-    db.refresh(submission)
-    return submission_service._grader_isolation_result(submission).model_dump()
-
-
-@router.put("/submissions/{submission_id}/grader-isolation-decision")
-def set_grader_isolation_decision(
-    submission_id: str, body: GraderIsolationDecision, db: Session = Depends(get_db)
-) -> dict:
-    """A reviewer's ruling on the gate (not_required, equivalent or missing) with a written reason and a
-    name. It is kept against a fingerprint of tests/, task.toml and the environment Dockerfile, so a
-    changed grader is checked again. Run the gate first."""
-    submission, task_root = _task_root_for(submission_id, db)
-    error = grader_isolation.override_error(body.result, body.reason, body.adjudicator)
-    if error:
-        raise HTTPException(status_code=400, detail=error)
-    if db.query(Run).filter_by(submission_id=submission_id, kind="grader_isolation", run_index=0).one_or_none() is None:
-        _store_grader_isolation(db, submission_id, task_root)
-    run = db.query(Run).filter_by(submission_id=submission_id, kind="grader_isolation_decision", run_index=0).one_or_none()
-    if run is None:
-        run = Run(submission_id=submission_id, kind="grader_isolation_decision", run_index=0, status="passed")
-        db.add(run)
-    history = submission_service._reviewer_decisions(run).get("history", [])
-    entry = {
-        "result": body.result, "reason": body.reason.strip(), "adjudicator": body.adjudicator.strip(),
-        "fingerprint": grader_isolation.fingerprint(task_root), "at": datetime.now(UTC).isoformat(),
-    }
-    run.logs = json.dumps({"current": entry, "history": [*history, entry]})
-    db.commit()
     db.refresh(submission)
     return submission_service._grader_isolation_result(submission).model_dump()
 
@@ -997,128 +881,12 @@ def _require_grader_isolation(submission_id: str, db: Session) -> None:
             detail=(
                 f"Grader Isolation is {result.state}: agent code may run in the verifier without a Worker "
                 f"({', '.join(result.evidence[:3]) or 'see the card'}). Fix the task, or a reviewer rules on it "
-                "(PUT /grader-isolation-decision), before agents run."
+                "(revise the task), before agents run."
             ),
         )
 
 
-class Tier0Decision(BaseModel):
-    probe_id: str
-    ruling: str  # legitimate | exploit | accepted_risk | unsure
-    adjudicator: str
-    note: str = ""
-
-
-_TIER0_RULINGS = ("legitimate", "exploit", "accepted_risk", "unsure")
-
-
-class Tier1Decision(BaseModel):
-    attempt: int
-    ruling: str  # exploit | not_exploit | unsure
-    adjudicator: str
-    note: str = ""
-
-
-_TIER1_RULINGS = ("exploit", "not_exploit", "unsure")
-
-
-class Tier2Decision(BaseModel):
-    attempt: int
-    ruling: str  # exploit | not_exploit | unsure
-    adjudicator: str
-    note: str = ""
-
-
-_TIER2_RULINGS = ("exploit", "not_exploit", "unsure")
 _TIER2_TASK_COPIES = ("hardened", "upload")
-
-
-@router.put("/submissions/{submission_id}/tier0-decision")
-def set_tier0_decision(submission_id: str, body: Tier0Decision, db: Session = Depends(get_db)) -> dict:
-    """Records a named person's ruling on a Tier 0 finding (protocol section 5: not every
-    successful probe is a cheat, and the verdict belongs in the record with who made it).
-    `legitimate` = a valid alternative the task should accept, `exploit` = a real hole,
-    `accepted_risk` = known and left alone. Kept with the submission; never changes a gate."""
-    if db.get(Submission, submission_id) is None:
-        raise HTTPException(status_code=404, detail="submission not found")
-    if body.ruling not in _TIER0_RULINGS:
-        raise HTTPException(status_code=400, detail=f"ruling must be one of {', '.join(_TIER0_RULINGS)}")
-    if not body.adjudicator.strip():
-        raise HTTPException(status_code=400, detail="name the person making the ruling")
-    if not body.probe_id or len(body.probe_id) > 40 or len(body.note) > 2000 or len(body.adjudicator) > 200:
-        raise HTTPException(status_code=400, detail="probe_id, adjudicator or note is empty or too long")
-    run = db.query(Run).filter_by(submission_id=submission_id, kind="tier0_decision", run_index=0).one_or_none()
-    if run is None:
-        run = Run(submission_id=submission_id, kind="tier0_decision", run_index=0, status="passed")
-        db.add(run)
-    decisions = submission_service._reviewer_decisions(run)
-    decisions[body.probe_id] = {
-        "ruling": body.ruling,
-        "adjudicator": body.adjudicator.strip(),
-        "note": body.note,
-        "at": datetime.now(UTC).isoformat(),
-    }
-    run.logs = json.dumps(decisions)
-    db.commit()
-    return decisions
-
-
-@router.put("/submissions/{submission_id}/tier1-decision")
-def set_tier1_decision(submission_id: str, body: Tier1Decision, db: Session = Depends(get_db)) -> dict:
-    """A named person's ruling on one Tier 1 attempt, overruling the judge's label: `exploit`
-    (a real shortcut), `not_exploit` (the reward was earned), `unsure`. Kept with the
-    submission and shown beside the judge's verdict; it does not restart or change the loop."""
-    if db.get(Submission, submission_id) is None:
-        raise HTTPException(status_code=404, detail="submission not found")
-    if body.ruling not in _TIER1_RULINGS:
-        raise HTTPException(status_code=400, detail=f"ruling must be one of {', '.join(_TIER1_RULINGS)}")
-    if not body.adjudicator.strip():
-        raise HTTPException(status_code=400, detail="name the person making the ruling")
-    if not 1 <= body.attempt <= 1000 or len(body.note) > 2000 or len(body.adjudicator) > 200:
-        raise HTTPException(status_code=400, detail="attempt, adjudicator or note is out of range")
-    run = db.query(Run).filter_by(submission_id=submission_id, kind="tier1_decision", run_index=0).one_or_none()
-    if run is None:
-        run = Run(submission_id=submission_id, kind="tier1_decision", run_index=0, status="passed")
-        db.add(run)
-    decisions = submission_service._reviewer_decisions(run)
-    decisions[str(body.attempt)] = {
-        "ruling": body.ruling,
-        "adjudicator": body.adjudicator.strip(),
-        "note": body.note,
-        "at": datetime.now(UTC).isoformat(),
-    }
-    run.logs = json.dumps(decisions)
-    db.commit()
-    return decisions
-
-
-@router.put("/submissions/{submission_id}/tier2-decision")
-def set_tier2_decision(submission_id: str, body: Tier2Decision, db: Session = Depends(get_db)) -> dict:
-    """A named person's ruling on one Tier 2 run, overruling the judge's label: `exploit` (a
-    real shortcut), `not_exploit` (the reward was earned), `unsure`. Kept with the submission and
-    shown beside the judge's verdict; it does not restart or change the loop."""
-    if db.get(Submission, submission_id) is None:
-        raise HTTPException(status_code=404, detail="submission not found")
-    if body.ruling not in _TIER2_RULINGS:
-        raise HTTPException(status_code=400, detail=f"ruling must be one of {', '.join(_TIER2_RULINGS)}")
-    if not body.adjudicator.strip():
-        raise HTTPException(status_code=400, detail="name the person making the ruling")
-    if not 1 <= body.attempt <= 1000 or len(body.note) > 2000 or len(body.adjudicator) > 200:
-        raise HTTPException(status_code=400, detail="attempt, adjudicator or note is out of range")
-    run = db.query(Run).filter_by(submission_id=submission_id, kind="tier2_decision", run_index=0).one_or_none()
-    if run is None:
-        run = Run(submission_id=submission_id, kind="tier2_decision", run_index=0, status="passed")
-        db.add(run)
-    decisions = submission_service._reviewer_decisions(run)
-    decisions[str(body.attempt)] = {
-        "ruling": body.ruling,
-        "adjudicator": body.adjudicator.strip(),
-        "note": body.note,
-        "at": datetime.now(UTC).isoformat(),
-    }
-    run.logs = json.dumps(decisions)
-    db.commit()
-    return decisions
 
 
 @router.post("/submissions/{submission_id}/static-checks", status_code=202)
@@ -1265,7 +1033,6 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
             "not_run": schema.edge_cases.status == "not-run",
             "report": _json_or_raw(schema.edge_cases.logs),
         },
-        "reviewer_decisions": schema.reviewer_decisions,
         "rubric_check": {
             "status": schema.rubric_check.status,
             "not_run": schema.rubric_check.status == "not-run",
@@ -1300,21 +1067,18 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
             "status": schema.tier0.status,
             "not_run": schema.tier0.status == "not-run",
             "report": _json_or_raw(schema.tier0.logs),
-            "rulings": schema.tier0_decisions,
         },
         "tier1": {
             "status": schema.tier1.status,
             "not_run": schema.tier1.status == "not-run",
             "report": _json_or_raw(schema.tier1.logs),
             "counts": submission_service.attempt_counts(schema.tier1.logs),
-            "rulings": schema.tier1_decisions,
         },
         "tier2": {
             "status": schema.tier2.status,
             "not_run": schema.tier2.status == "not-run",
             "report": _json_or_raw(schema.tier2.logs),
             "counts": submission_service.attempt_counts(schema.tier2.logs),
-            "rulings": schema.tier2_decisions,
         },
         # Tier 0, 1 and 2 repeated on the patched task until a round needs no patch (every round kept).
         "tier_cycle": {
@@ -1334,7 +1098,6 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
             "report": _json_or_raw(schema.regrade.logs),
         },
         # A reviewer's genuine-or-fake call per trial, beside the platform's suggestion in verifier_reports.
-        "trial_verdicts": schema.trial_verdicts,
         # Installed package versions in the built image (and its task files).
         "image_inventory": {
             "status": schema.image_inventory.status,
@@ -1404,3 +1167,35 @@ async def trigger_hash_proof(submission_id: str, db: Session = Depends(get_db)) 
     db.commit()
     await task_queue.submit(f"{submission_id}:hash_proof", task_runner.run_hash_proof_stage(submission_id))
     return {"status": "started"}
+
+
+class AiDetectionDecision(BaseModel):
+    ruling: str  # approved | disapproved
+    adjudicator: str
+    reason: str
+
+
+@router.put("/submissions/{submission_id}/ai-detection-decision")
+def set_ai_detection_decision(submission_id: str, body: AiDetectionDecision, db: Session = Depends(get_db)) -> dict:
+    """The only manual ruling on the platform: a named person approves (the check passes) or disapproves
+    (it fails) the AI Detection result, with a reason. Needs the check to have run. Kept with history."""
+    submission, task_root = _task_root_for(submission_id, db)
+    error = ai_audit.decision_error(body.ruling, body.adjudicator, body.reason)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    detection = db.query(Run).filter_by(submission_id=submission_id, kind="ai_detection", run_index=0).one_or_none()
+    if detection is None or detection.status not in ("passed", "failed"):
+        raise HTTPException(status_code=400, detail="run AI Detection first")
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="ai_audit_decision", run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind="ai_audit_decision", run_index=0, status="passed")
+        db.add(run)
+    try:
+        history = json.loads(run.logs or "{}").get("history", [])
+    except ValueError:
+        history = []
+    decision = ai_audit.entry(body.ruling, body.adjudicator, body.reason, ai_audit.fingerprint(task_root))
+    run.logs = json.dumps({"current": decision, "history": [*history, decision]})
+    db.commit()
+    db.refresh(submission)
+    return submission_service._ai_detection_result(submission).model_dump()

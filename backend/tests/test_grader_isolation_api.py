@@ -1,4 +1,4 @@
-"""The Grader Isolation gate through the API: run, ruling, schema, and blocking only when enforced."""
+"""The Grader Isolation gate through the API: run, schema, and blocking only when enforced."""
 from datetime import UTC, datetime
 
 import pytest
@@ -51,35 +51,16 @@ def test_running_it_records_missing_and_does_not_block_by_default(env, monkeypat
     assert client.post("/submissions/s1/agent-trials?n=1").status_code == 202  # advisory: not blocked
 
 
-def test_when_enforced_it_blocks_agents_until_a_reviewer_rules(env, monkeypatch):
-    client, _, _ = env
+def test_when_enforced_it_blocks_agents_and_only_revising_the_task_clears_it(env, monkeypatch):
+    client, task, _ = env
     monkeypatch.setattr(router.settings, "grader_isolation_enforce", True)
     blocked = client.post("/submissions/s1/agent-trials?n=1")
     assert blocked.status_code == 409 and "Grader Isolation is missing" in blocked.json()["detail"]
     for path in ("tier1", "tier2", "tiers", "cheat-trial"):
         assert client.post(f"/submissions/s1/{path}").status_code == 409, path
-    ruling = client.put("/submissions/s1/grader-isolation-decision", json={
-        "result": "not_required", "reason": "tests/render.py is the task's own, not agent code", "adjudicator": "Dhruv"})
-    assert ruling.status_code == 200 and ruling.json()["state"] == "ok" and ruling.json()["source"] == "reviewer"
+    (task / "tests" / "test_x.py").write_text(QUIET)
+    assert client.post("/submissions/s1/grader-isolation").json()["status"] == "passed"
     assert client.post("/submissions/s1/agent-trials?n=1").status_code == 202
-
-
-def test_a_ruling_needs_a_reason_and_a_name(env):
-    client, _, _ = env
-    for body in ({"result": "equivalent", "reason": "", "adjudicator": "D"},
-                 {"result": "equivalent", "reason": "x", "adjudicator": ""},
-                 {"result": "fine", "reason": "x", "adjudicator": "D"}):
-        assert client.put("/submissions/s1/grader-isolation-decision", json=body).status_code == 400
-
-
-def test_changing_the_grader_makes_the_ruling_stale_and_the_gate_returns(env, monkeypatch):
-    client, task, _ = env
-    monkeypatch.setattr(router.settings, "grader_isolation_enforce", True)
-    client.put("/submissions/s1/grader-isolation-decision", json={"result": "not_required", "reason": "ok", "adjudicator": "D"})
-    (task / "tests" / "test_x.py").write_text(RUN_AS_ROOT + "# edited\n")
-    body = client.post("/submissions/s1/grader-isolation").json()
-    assert body["override_stale"] is True and body["state"] == "missing" and body["blocks"] is True
-    assert client.post("/submissions/s1/agent-trials?n=1").status_code == 409
 
 
 def test_a_clean_task_passes_and_is_never_blocked(env, monkeypatch):

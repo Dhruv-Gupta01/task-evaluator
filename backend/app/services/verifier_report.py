@@ -544,7 +544,7 @@ def cluster_failures(reports: list[tuple[int, float | None, dict | None]]) -> di
         if len(firsts) == 1 and all(ctrf["failed_names"] for _, ctrf in failing):
             notes.append(
                 f"all {k} failing trials first failed at `{next(iter(firsts))}`: possibly an over-strict "
-                "grader or a rule the instruction does not state (contested, needs a human: check that test "
+                "grader or a rule the instruction does not state (check that test "
                 "and the instruction behind it; the later failures may just follow from it)"
             )
     return {

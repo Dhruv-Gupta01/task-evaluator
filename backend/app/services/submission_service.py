@@ -6,7 +6,7 @@ from pathlib import Path
 
 from app.config import get_settings
 from app.models import LlmSpend, Run, Submission
-from app.services import grader_isolation, image_inventory, verifier_report, versions
+from app.services import ai_audit, grader_isolation, image_inventory, verifier_report, versions
 from app.services.harbor_runner import CODEX_BAKE_NOTE_MARKER
 from app.services.task_config import TaskConfig
 from app.services.tier2 import memory as tier2_memory
@@ -446,10 +446,26 @@ def _tb_static_checks_result(run: Run | None) -> TbStaticChecksResult:
     return TbStaticChecksResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
 
 
-def _ai_detection_result(run: Run | None) -> AiDetectionResult:
+def _ai_detection_result(submission: Submission) -> AiDetectionResult:
+    run = _get_run(submission, "ai_detection")
     if run is None:
         return AiDetectionResult(status="not-run", logs=None)
-    return AiDetectionResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
+    stored = {}
+    audit = _get_run(submission, "ai_audit_decision")
+    if audit is not None and audit.logs:
+        try:
+            stored = json.loads(audit.logs)
+        except ValueError:
+            stored = {}
+    status, stale, decision = run.status, False, stored.get("current")
+    if run.status in ("passed", "failed"):
+        root = Path(submission.extracted_path) if submission.extracted_path else None
+        current = ai_audit.fingerprint(root) if root and root.is_dir() else None
+        status, stale = ai_audit.effective(run.status, decision, current)
+    return AiDetectionResult(
+        status=status, logs=run.logs, detected_status=run.status,  # type: ignore[arg-type]
+        decision=decision, decision_stale=stale, history=stored.get("history", []),
+    )
 
 
 def _variant_probe_result(run: Run | None) -> VariantProbeResult:
@@ -512,38 +528,23 @@ def _fresh_build_result(run: Run | None) -> FreshBuildResult:
     return FreshBuildResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
 
 
-def _reviewer_decisions(run: Run | None) -> dict:
-    if run is None or not run.logs:
-        return {}
-    try:
-        data = json.loads(run.logs)
-    except ValueError:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
 def _grader_isolation_result(submission: Submission) -> GraderIsolationResult:
     run = _get_run(submission, "grader_isolation")
     enforced = bool(get_settings().grader_isolation_enforce)
     if run is None or not run.logs or not submission.extracted_path:
         return GraderIsolationResult(status="not-run", enforced=enforced)
     try:
-        evaluation = json.loads(run.logs)
-        decisions = _reviewer_decisions(_get_run(submission, "grader_isolation_decision"))
-        out = grader_isolation.apply_override(
-            evaluation, decisions.get("current"), grader_isolation.fingerprint(Path(submission.extracted_path))
-        )
-    except (ValueError, OSError, AttributeError):
+        out = json.loads(run.logs)
+        state = out["state"]
+    except (ValueError, TypeError, KeyError):
         return GraderIsolationResult(status="failed", note="the stored result could not be read", enforced=enforced)
     return GraderIsolationResult(
-        status=grader_isolation.gate_status(out["state"]),  # type: ignore[arg-type]
-        state=out["state"], analysis=out.get("analysis"), source=out["source"],
+        status=grader_isolation.gate_status(state),  # type: ignore[arg-type]
+        state=state, analysis=out.get("analysis"),
         evidence=out.get("evidence", []), absent=out.get("absent", []),
         also_unprotected=out.get("also_unprotected", []), note=out.get("note", ""),
-        override=out["override"], override_stale=out["override_stale"],
-        enforced=enforced, blocks=grader_isolation.blocks(out["state"], enforced),
+        enforced=enforced, blocks=grader_isolation.blocks(state, enforced),
     )
-
 
 def _worker_probe_result(run: Run | None) -> WorkerProbeResult:
     if run is None:
@@ -616,22 +617,17 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         variant_probe=_variant_probe_result(_get_run(submission, "variant_probe")),
         weak_probe=_weak_probe_result(_get_run(submission, "weak_probe")),
         edge_cases=_edge_cases_result(_get_run(submission, "edge_cases")),
-        reviewer_decisions=_reviewer_decisions(_get_run(submission, "reviewer_decision")),
         static_checks=_static_checks_result(_get_run(submission, "static_checks")),
         tb_static_checks=_tb_static_checks_result(_get_run(submission, "tb_static_checks")),
         grader_isolation=_grader_isolation_result(submission),
         worker_probe=_worker_probe_result(_get_run(submission, "worker_probe")),
         hash_proof=_hash_proof_result(_get_run(submission, "hash_proof")),
-        ai_detection=_ai_detection_result(_get_run(submission, "ai_detection")),
+        ai_detection=_ai_detection_result(submission),
         answer_exposure=_answer_exposure_result(_get_run(submission, "answer_exposure")),
         tier0=_tier0_result(_get_run(submission, "tier0_probes")),
-        tier0_decisions=_reviewer_decisions(_get_run(submission, "tier0_decision")),
         tier1=_tier1_result(_get_run(submission, "tier1_loop")),
-        tier1_decisions=_reviewer_decisions(_get_run(submission, "tier1_decision")),
         tier2=_tier2_result(_get_run(submission, "tier2_loop")),
-        tier2_decisions=_reviewer_decisions(_get_run(submission, "tier2_decision")),
         tier_cycle=_tier_cycle_result(_get_run(submission, "tier_cycle")),
-        trial_verdicts=_reviewer_decisions(_get_run(submission, "trial_verdict")),
         regrade=_regrade_result(_get_run(submission, "regrade")),
         image_inventory=_image_inventory_result(_get_run(submission, "image_inventory")),
         fresh_build=_fresh_build_result(_get_run(submission, "fresh_build")),
@@ -1131,6 +1127,19 @@ def _hash_proof_line(schema) -> str:
     return head + (f"; not shown: {', '.join(bad[:6])}" if bad else "") + " [does not show every answer is hashed; a reviewer confirms]"
 
 
+def _ai_detection_line(schema) -> str:
+    ai = schema.ai_detection
+    if ai.status == "not-run":
+        return "- AI Detection: not run yet"
+    line = f"- AI Detection: {ai.status}"
+    d = ai.decision
+    if d and not ai.decision_stale:
+        line += f" -- {d['ruling']} by {d['adjudicator']} ({d['reason']}); the detector said {ai.detected_status}"
+    elif d:
+        line += f" -- the ruling by {d['adjudicator']} no longer applies (the files changed)"
+    return line
+
+
 def build_summary_markdown(
     schema: SubmissionSchema, total_cost_usd: float | None, cost_report: dict | None = None
 ) -> str:
@@ -1222,6 +1231,7 @@ def build_summary_markdown(
         _worker_line(schema),
         _worker_probe_line(schema),
         _hash_proof_line(schema),
+        _ai_detection_line(schema),
         (
             f"- Static Checks: {_fmt_status(schema.static_checks.status)}"
             + (

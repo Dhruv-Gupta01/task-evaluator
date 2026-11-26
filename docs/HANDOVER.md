@@ -65,6 +65,8 @@ Files: backend/storage/submissions/{id}/ (zip, extracted task, logs, Harbor outp
 
 ## 3. Features
 
+**Nothing can be contested, except AI Detection.** A check passes or fails, and a task that fails is revised and uploaded again. The one manual ruling is on AI Detection: a named person approves it (it passes) or disapproves it (it fails), with a reason (`PUT /submissions/{id}/ai-detection-decision`). The ruling is kept with its history and stops applying when `instruction.md` or `solution/solve.sh` changes.
+
 ### Gates (the task must pass these)
 
 | Stage | What it does |
@@ -97,8 +99,7 @@ Files: backend/storage/submissions/{id}/ (zip, extracted task, logs, Harbor outp
 ### Around the stages
 
 - **Changes banner**: compares an upload with the latest earlier upload of the same task name
-  (amber when tests were removed). **Reviewer decision** records a person's ruling on a contested
-  failure cluster; it never changes a gate (see known issue 1).
+  (amber when tests were removed).
 - **Task version check**: every Oracle, Nop and agent run records the task checksum Harbor
   reports. A red banner appears if runs on one submission used different task copies.
 - **Verifier report**: per-test results, flags where reward and tests disagree, time and memory
@@ -126,7 +127,7 @@ here that mentions one of them would be wrong for this branch.
   attempts of any kind, so a run of honest solves ends `inconclusive`, never `robust`. Costs real credits.
 - **Reward Kit**: runs inside the task's own grader; the platform only reads what it leaves behind. Per-check
   results from `reward-details.json`, grader errors (a missing reward file or a Worker setup error is shown as
-  a grader error, left out of the pass rate, never a plain 0), a suggested verdict a reviewer can overrule, and a
+  a grader error, left out of the pass rate, never a plain 0), a suggested verdict (shown only; it cannot be changed), and a
   Static Check list for Reward Kit tasks: separate verifier, exact `harbor-rewardkit==0.2.4` pin, `uv.lock`,
   a `reward.toml` the 0.2.4 model would accept, setup-error handling, check names, submission errors the grader
   does not score as 0, and `harbor lint` findings.
@@ -147,9 +148,8 @@ here that mentions one of them would be wrong for this branch.
     `docker compose up`; the task's own services do not count). `missing` is a warning with file:line evidence, the
     protections that are absent and the fix text. It shows in the Static Checks card, the evidence summary and as
     `worker_required` in the Review Report result.
-  - *Way 2, the gate*: `services/grader_isolation.py`, `POST /grader-isolation`, `PUT /grader-isolation-decision`, the
-    Grader Isolation card. States `ok`/`missing`/`unclear`; a reviewer ruling needs a reason and a name and is kept
-    against a fingerprint of `tests/`, `task.toml` and the environment Dockerfile (stale when the grader changes).
+  - *Way 2, the gate*: `services/grader_isolation.py`, `POST /grader-isolation`, the
+    Grader Isolation card. States `ok`/`missing`/`unclear`; nobody can overrule it, so a task that does not pass is revised.
     `GRADER_ISOLATION_ENFORCE` (default false) makes it block agent trials, the cheat trial, Tier 1, Tier 2 and the
     tier cycle (409) and the Review Report; off, it only records. Neither step adds isolation to a task: the author
     does that, with a Reward Kit `Worker`.
@@ -269,9 +269,6 @@ image per submission. Clean up with `docker image prune -a` and by deleting old 
 
 Read these before relying on the platform.
 
-1. **Reviewer decision cannot save from the browser.** The backend allows only GET and POST
-   across origins, and the UI calls PUT. Confirmed: the preflight request returns 400. The fix is
-   adding `"PUT"` to `allow_methods` in `backend/app/main.py`.
 2. **Single machine only.** The platform needs a local Docker daemon, keeps its job queue in
    memory and stores absolute paths in the database. It cannot run on AWS Lambda, Fargate, Cloud
    Run or Runpod pods. A cloud plan exists (`docs/cloud-deployment-plan.md`: one Docker VM, a login

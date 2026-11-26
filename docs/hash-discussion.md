@@ -3,6 +3,9 @@
 A record of the discussion of 2026-11-26, from the first request to what was built. The rules for task authors
 are in [`hash-rules.md`](hash-rules.md).
 
+> **Later decision (2026-11-26):** nothing on the platform can be contested except AI Detection. The reviewer
+> exemption and sign-off mentioned below will not be built; a task that fails is revised.
+
 ## 1. The goal
 
 Hashing expected answers should be **compulsory** for every task on the platform. An agent that gets sight of a

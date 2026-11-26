@@ -1985,7 +1985,7 @@ Trials with reward 1 get "passed".
 
 Then group failed trials that chose the same alternative reading of the task. Two or more trials \
 making the same alternative choice is a sign of ambiguity, but it can be a false alarm when the task \
-simply needs domain knowledge, so describe it as contested, never as broken.
+simply needs domain knowledge, so describe it as a sign that the instruction may need revising, never as proof that it is broken.
 
 Respond with ONLY JSON:
 {"trials": [{"trial": "<trial_name>", "class": "real_bug|instruction_gap|infrastructure|passed", \
@@ -2043,7 +2043,7 @@ async def _classify_failures(db, submission_id: str, job_dirs: list[Path], resul
         return None
     for cluster in data.get("clusters") or []:
         if isinstance(cluster, dict):
-            cluster["label"] = "contested, needs a domain expert"
+            cluster["label"] = "check the instruction and revise it if the reading is reasonable"
     return data
 
 

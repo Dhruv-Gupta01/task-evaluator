@@ -27,20 +27,16 @@ import {
   type SubmissionChanges,
   type VariantProbe,
   type EdgeCases,
-  type ReviewerDecision,
   type AnswerExposure,
   type Tier0,
   type Tier0ProbeResult,
-  type Tier0Ruling,
   type Tier1,
   type Tier1Attempt,
-  type Tier1Ruling,
   type Tier2,
   type Tier2Attempt,
   type ImageInventory,
   type FreshBuild,
   type SuggestedVerdict,
-  type TrialVerdictRuling,
   type RegradeReport,
   type TierCycleReport,
   type TierCycleStage,
@@ -50,6 +46,7 @@ import { LogPanel } from "@/components/LogPanel";
 import { GraderIsolationPanel } from "@/components/GraderIsolationPanel";
 import { WorkerProbePanel } from "@/components/WorkerProbePanel";
 import { HashProofPanel } from "@/components/HashProofPanel";
+import { AiRulingPanel } from "@/components/AiRulingPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -128,17 +125,6 @@ function SubmissionDetail() {
     staleTime: 5 * 60 * 1000,
     retry: false,
   });
-  // A reviewer confirms or changes the platform's suggested genuine-or-fake call on a trial.
-  const [trialAdjudicator, setTrialAdjudicator] = useState("");
-  const mTrialVerdict = useMutation({
-    mutationFn: (body: { stage: "oracle" | "nop" | "agent"; index: number; ruling: string }) =>
-      api.setTrialVerdict(id, { ...body, adjudicator: trialAdjudicator }),
-    onSuccess: () => {
-      toast.success("Verdict recorded");
-      invalidate();
-    },
-    onError: (e: Error) => toast.error(e.message),
-  });
   // Score saved trials again with the current grader, without running the agent.
   const [regradeKind, setRegradeKind] = useState<"agent" | "oracle">("agent");
   const [regradeSource, setRegradeSource] = useState<"previous" | "self">("previous");
@@ -201,17 +187,14 @@ function SubmissionDetail() {
   const [cheatN, setCheatN] = useState("3");
   const [tier0Repeats, setTier0Repeats] = useState("1");
   const [tier0Harbor, setTier0Harbor] = useState(true);
-  const [tier0Adjudicator, setTier0Adjudicator] = useState("");
   const [tier1MaxAttempts, setTier1MaxAttempts] = useState("10");
   // Empty = the server's TIER1_MAX_COST_USD.
   const [tier1Cost, setTier1Cost] = useState("");
   const [tier1Model, setTier1Model] = useState("default");
-  const [tier1Adjudicator, setTier1Adjudicator] = useState("");
   const [tier2MaxAttempts, setTier2MaxAttempts] = useState("8");
   const [tier2Cost, setTier2Cost] = useState("");
   const [tier2Model, setTier2Model] = useState("default");
   const [tier2Copy, setTier2Copy] = useState("default");
-  const [tier2Adjudicator, setTier2Adjudicator] = useState("");
   const [cheatCostCap, setCheatCostCap] = useState("");
   // The TB rubric adds the refusals, near_miss, difficulty_crux and low_timeout criteria that
   // Harbor's own two-criterion rubric lacks, so it is pre-selected (Default is still in the dropdown).
@@ -302,15 +285,6 @@ function SubmissionDetail() {
     },
     onError: (e: Error) => toast.error(e.message),
   });
-  const mTier0Decision = useMutation({
-    mutationFn: (body: { probe_id: string; ruling: string; note: string }) =>
-      api.tier0Decision(id, { ...body, adjudicator: tier0Adjudicator }),
-    onSuccess: () => {
-      toast.success("Ruling recorded");
-      invalidate();
-    },
-    onError: (e: Error) => toast.error(e.message),
-  });
   const mTier1 = useMutation({
     mutationFn: () =>
       api.tier1(id, {
@@ -320,15 +294,6 @@ function SubmissionDetail() {
       }),
     onSuccess: () => {
       toast.success("Tier 1 started");
-      invalidate();
-    },
-    onError: (e: Error) => toast.error(e.message),
-  });
-  const mTier1Decision = useMutation({
-    mutationFn: (body: { attempt: number; ruling: string }) =>
-      api.tier1Decision(id, { ...body, adjudicator: tier1Adjudicator, note: "" }),
-    onSuccess: () => {
-      toast.success("Ruling recorded");
       invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -369,15 +334,6 @@ function SubmissionDetail() {
     },
     onError: (e: Error) => toast.error(e.message),
   });
-  const mTier2Decision = useMutation({
-    mutationFn: (body: { attempt: number; ruling: string }) =>
-      api.tier2Decision(id, { ...body, adjudicator: tier2Adjudicator, note: "" }),
-    onSuccess: () => {
-      toast.success("Ruling recorded");
-      invalidate();
-    },
-    onError: (e: Error) => toast.error(e.message),
-  });
   const mAnswerExposure = useMutation({
     mutationFn: () => api.answerExposure(id),
     onSuccess: () => {
@@ -400,11 +356,6 @@ function SubmissionDetail() {
       toast.success("Fresh build started");
       invalidate();
     },
-    onError: (e: Error) => toast.error(e.message),
-  });
-  const mDecision = useMutation({
-    mutationFn: (b: { key: string } & ReviewerDecision) => api.setReviewerDecision(id, b),
-    onSuccess: invalidate,
     onError: (e: Error) => toast.error(e.message),
   });
   const { data: changes } = useQuery({
@@ -693,13 +644,6 @@ function SubmissionDetail() {
                       index={r.index}
                       verifier={r.verifier}
                       verdict={r.suggested_verdict}
-                      ruling={data.trial_verdicts?.[`oracle:${r.index}`]}
-                      adjudicator={trialAdjudicator}
-                      setAdjudicator={setTrialAdjudicator}
-                      onRule={(ruling) =>
-                        mTrialVerdict.mutate({ stage: "oracle", index: r.index, ruling })
-                      }
-                      pending={mTrialVerdict.isPending}
                     />
                     {r.logs && (
                       <div className="mt-2">
@@ -780,11 +724,6 @@ function SubmissionDetail() {
             index={0}
             verifier={data.nop.verifier}
             verdict={data.nop.suggested_verdict}
-            ruling={data.trial_verdicts?.["nop:0"]}
-            adjudicator={trialAdjudicator}
-            setAdjudicator={setTrialAdjudicator}
-            onRule={(ruling) => mTrialVerdict.mutate({ stage: "nop", index: 0, ruling })}
-            pending={mTrialVerdict.isPending}
           />
           <LogPanel logs={data.nop.logs} title="Nop logs" />
         </StageCard>
@@ -1070,6 +1009,7 @@ function SubmissionDetail() {
               );
             })()}
           <AiLayersOverview rubricCheck={data.rubric_check} aiDetection={data.ai_detection} />
+          <AiRulingPanel id={id} data={data.ai_detection} onChange={invalidate} />
         </StageCard>
 
         {/* Instruction Sufficiency */}
@@ -1333,11 +1273,6 @@ function SubmissionDetail() {
           </div>
           <Tier0View
             logs={data.tier0.logs}
-            rulings={data.tier0_decisions ?? {}}
-            adjudicator={tier0Adjudicator}
-            setAdjudicator={setTier0Adjudicator}
-            onRule={(probe_id, ruling, note) => mTier0Decision.mutate({ probe_id, ruling, note })}
-            ruling={mTier0Decision.isPending}
           />
         </StageCard>
 
@@ -1389,11 +1324,6 @@ function SubmissionDetail() {
           </div>
           <Tier1View
             logs={data.tier1.logs}
-            rulings={data.tier1_decisions ?? {}}
-            adjudicator={tier1Adjudicator}
-            setAdjudicator={setTier1Adjudicator}
-            onRule={(attempt, ruling) => mTier1Decision.mutate({ attempt, ruling })}
-            ruling={mTier1Decision.isPending}
           />
         </StageCard>
 
@@ -1456,11 +1386,6 @@ function SubmissionDetail() {
           </div>
           <Tier2View
             logs={data.tier2.logs}
-            rulings={data.tier2_decisions ?? {}}
-            adjudicator={tier2Adjudicator}
-            setAdjudicator={setTier2Adjudicator}
-            onRule={(attempt, ruling) => mTier2Decision.mutate({ attempt, ruling })}
-            ruling={mTier2Decision.isPending}
           />
         </StageCard>
 
@@ -1780,13 +1705,6 @@ function SubmissionDetail() {
                       index={t.index}
                       verifier={t.verifier}
                       verdict={t.suggested_verdict}
-                      ruling={data.trial_verdicts?.[`agent:${t.index}`]}
-                      adjudicator={trialAdjudicator}
-                      setAdjudicator={setTrialAdjudicator}
-                      onRule={(ruling) =>
-                        mTrialVerdict.mutate({ stage: "agent", index: t.index, ruling })
-                      }
-                      pending={mTrialVerdict.isPending}
                     />
                     {t.logs && (
                       <div className="mt-2">
@@ -1888,8 +1806,6 @@ function SubmissionDetail() {
           </div>
           <AnalysisView
             logs={data.failure_analysis.logs}
-            decisions={data.reviewer_decisions}
-            onDecide={(b) => mDecision.mutate(b)}
           />
         </StageCard>
 
@@ -1992,30 +1908,11 @@ function tier0VerdictLabel(v: string): string {
   );
 }
 
-const RULINGS = [
-  { value: "legitimate", label: "Legitimate alternative (the task should accept it)" },
-  { value: "exploit", label: "Real exploit (must be fixed)" },
-  { value: "accepted_risk", label: "Known, left alone" },
-  { value: "unsure", label: "Unsure" },
-];
-
 function Tier0Row({
   r,
-  ruling,
-  adjudicator,
-  setAdjudicator,
-  onRule,
-  ruling_pending,
 }: {
   r: Tier0ProbeResult;
-  ruling?: Tier0Ruling;
-  adjudicator: string;
-  setAdjudicator: (v: string) => void;
-  onRule: (probe_id: string, ruling: string, note: string) => void;
-  ruling_pending: boolean;
 }) {
-  const [choice, setChoice] = useState("legitimate");
-  const [note, setNote] = useState("");
   const attention = TIER0_ATTENTION.includes(r.verdict);
   const unproven = r.verdict === "held" && r.positive_control_ok === false;
   return (
@@ -2084,52 +1981,6 @@ function Tier0Row({
               <li key={i}>{n}</li>
             ))}
         </ul>
-      )}
-      {ruling && (
-        <div className="mt-2 rounded border border-border bg-background/60 p-2">
-          Ruled <b>{RULINGS.find((x) => x.value === ruling.ruling)?.label ?? ruling.ruling}</b> by{" "}
-          {ruling.adjudicator} on {ruling.at.slice(0, 10)}
-          {ruling.note ? `: ${ruling.note}` : ""}
-        </div>
-      )}
-      {attention && (
-        <details className="mt-2">
-          <summary className="cursor-pointer text-muted-foreground">
-            {ruling ? "Change the ruling" : "Record a ruling"}
-          </summary>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <select
-              className="rounded-md border bg-background px-2 py-1"
-              value={choice}
-              onChange={(e) => setChoice(e.target.value)}
-            >
-              {RULINGS.map((x) => (
-                <option key={x.value} value={x.value}>
-                  {x.label}
-                </option>
-              ))}
-            </select>
-            <Input
-              className="h-8 w-44"
-              placeholder="Your name (required)"
-              value={adjudicator}
-              onChange={(e) => setAdjudicator(e.target.value)}
-            />
-            <Input
-              className="h-8 w-64"
-              placeholder="Why (optional)"
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-            />
-            <Button
-              size="sm"
-              disabled={ruling_pending || !adjudicator.trim()}
-              onClick={() => onRule(r.probe_id, choice, note)}
-            >
-              Save
-            </Button>
-          </div>
-        </details>
       )}
     </div>
   );
@@ -2283,16 +2134,8 @@ const TIER2_VERDICT: Record<string, { label: string; cls: string }> = {
 
 function Tier2AttemptRow({
   a,
-  ruling,
-  adjudicator,
-  onRule,
-  pending,
 }: {
   a: Tier2Attempt;
-  ruling?: Tier1Ruling;
-  adjudicator: string;
-  onRule: (attempt: number, ruling: string) => void;
-  pending: boolean;
 }) {
   const v = TIER2_VERDICT[a.verdict] ?? { label: a.verdict, cls: "border-border" };
   return (
@@ -2320,49 +2163,14 @@ function Tier2AttemptRow({
           {a.judge_reasoning}
         </div>
       )}
-      {a.reward != null && a.reward >= 1 && (
-        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-          {ruling ? (
-            <span>
-              Ruled <b>{ruling.ruling.replace("_", " ")}</b> by {ruling.adjudicator}
-            </span>
-          ) : (
-            <span className="text-muted-foreground">
-              {adjudicator.trim() ? "Rule on this run:" : "Name yourself below to rule:"}
-            </span>
-          )}
-          {["exploit", "not_exploit", "unsure"].map((r) => (
-            <Button
-              key={r}
-              size="sm"
-              variant="outline"
-              className="h-6 px-2 text-xs"
-              disabled={pending || !adjudicator.trim()}
-              onClick={() => onRule(a.index, r)}
-            >
-              {r.replace("_", " ")}
-            </Button>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
 
 function Tier2View({
   logs,
-  rulings,
-  adjudicator,
-  setAdjudicator,
-  onRule,
-  ruling,
 }: {
   logs?: string;
-  rulings: Record<string, Tier1Ruling>;
-  adjudicator: string;
-  setAdjudicator: (v: string) => void;
-  onRule: (attempt: number, ruling: string) => void;
-  ruling: boolean;
 }) {
   const parsed = parseJson<Tier2>(logs);
   if (!logs) return null;
@@ -2442,22 +2250,10 @@ function Tier2View({
           {parsed.reason && parsed.status !== "robust" && ` ${parsed.reason}.`}
         </div>
       )}
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <label className="text-muted-foreground">Your name (for rulings)</label>
-        <Input
-          className="h-7 w-44"
-          value={adjudicator}
-          onChange={(e) => setAdjudicator(e.target.value)}
-        />
-      </div>
       {attempts.map((a) => (
         <Tier2AttemptRow
           key={a.index}
           a={a}
-          ruling={rulings[String(a.index)]}
-          adjudicator={adjudicator}
-          onRule={onRule}
-          pending={ruling}
         />
       ))}
     </div>
@@ -2466,16 +2262,8 @@ function Tier2View({
 
 function Tier1AttemptRow({
   a,
-  ruling,
-  adjudicator,
-  onRule,
-  pending,
 }: {
   a: Tier1Attempt;
-  ruling?: Tier1Ruling;
-  adjudicator: string;
-  onRule: (attempt: number, ruling: string) => void;
-  pending: boolean;
 }) {
   const v = TIER1_VERDICT[a.verdict] ?? { label: a.verdict, cls: "border-border" };
   return (
@@ -2508,49 +2296,14 @@ function Tier1AttemptRow({
           {a.judge_reasoning}
         </div>
       )}
-      {a.reward != null && a.reward >= 1 && (
-        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-          {ruling ? (
-            <span>
-              Ruled <b>{ruling.ruling.replace("_", " ")}</b> by {ruling.adjudicator}
-            </span>
-          ) : (
-            <span className="text-muted-foreground">
-              {adjudicator.trim() ? "Overrule the judge:" : "Name yourself below to overrule:"}
-            </span>
-          )}
-          {["exploit", "not_exploit", "unsure"].map((r) => (
-            <Button
-              key={r}
-              size="sm"
-              variant="outline"
-              className="h-6 px-2 text-xs"
-              disabled={pending || !adjudicator.trim()}
-              onClick={() => onRule(a.index, r)}
-            >
-              {r.replace("_", " ")}
-            </Button>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
 
 function Tier1View({
   logs,
-  rulings,
-  adjudicator,
-  setAdjudicator,
-  onRule,
-  ruling,
 }: {
   logs?: string;
-  rulings: Record<string, Tier1Ruling>;
-  adjudicator: string;
-  setAdjudicator: (v: string) => void;
-  onRule: (attempt: number, ruling: string) => void;
-  ruling: boolean;
 }) {
   const parsed = parseJson<Tier1>(logs);
   if (!logs) return null;
@@ -2593,22 +2346,10 @@ function Tier1View({
           {parsed.reason && parsed.status !== "robust" && ` ${parsed.reason}.`}
         </div>
       )}
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <label className="text-muted-foreground">Your name (for rulings)</label>
-        <Input
-          className="h-7 w-44"
-          value={adjudicator}
-          onChange={(e) => setAdjudicator(e.target.value)}
-        />
-      </div>
       {attempts.map((a) => (
         <Tier1AttemptRow
           key={a.index}
           a={a}
-          ruling={rulings[String(a.index)]}
-          adjudicator={adjudicator}
-          onRule={onRule}
-          pending={ruling}
         />
       ))}
       {(parsed.fixes ?? []).length > 0 && (
@@ -2644,18 +2385,8 @@ function Tier1View({
 
 function Tier0View({
   logs,
-  rulings,
-  adjudicator,
-  setAdjudicator,
-  onRule,
-  ruling,
 }: {
   logs?: string;
-  rulings: Record<string, Tier0Ruling>;
-  adjudicator: string;
-  setAdjudicator: (v: string) => void;
-  onRule: (probe_id: string, ruling: string, note: string) => void;
-  ruling: boolean;
 }) {
   const parsed = parseJson<Tier0>(logs);
   if (!logs) return null;
@@ -2688,11 +2419,6 @@ function Tier0View({
     <Tier0Row
       key={r.probe_id}
       r={r}
-      ruling={rulings[r.probe_id]}
-      adjudicator={adjudicator}
-      setAdjudicator={setAdjudicator}
-      onRule={onRule}
-      ruling_pending={ruling}
     />
   );
   return (
@@ -3099,57 +2825,10 @@ function VariantProbeView({ logs }: { logs?: string }) {
   );
 }
 
-function ContestedDecision({
-  clusterKey,
-  decisions,
-  onDecide,
-}: {
-  clusterKey: string;
-  decisions?: Record<string, ReviewerDecision>;
-  onDecide?: (b: { key: string } & ReviewerDecision) => void;
-}) {
-  const current = decisions?.[clusterKey];
-  const [note, setNote] = useState(current?.note ?? "");
-  return (
-    <div className="mt-1 flex flex-wrap items-center gap-2 text-foreground">
-      <span className="text-xs">Reviewer decision</span>
-      <Select
-        value={current?.decision ?? ""}
-        onValueChange={(v) =>
-          onDecide?.({ key: clusterKey, decision: v as ReviewerDecision["decision"], note })
-        }
-      >
-        <SelectTrigger className="h-7 w-52 text-xs">
-          <SelectValue placeholder="Not decided" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="grader_wrong">The grader is wrong</SelectItem>
-          <SelectItem value="agent_wrong">The agents were wrong</SelectItem>
-          <SelectItem value="hard_not_ambiguous">Hard, not ambiguous</SelectItem>
-          <SelectItem value="unsure">Unsure</SelectItem>
-        </SelectContent>
-      </Select>
-      <Input
-        value={note}
-        onChange={(e) => setNote(e.target.value)}
-        onBlur={() =>
-          current && note !== current.note && onDecide?.({ key: clusterKey, decision: current.decision, note })
-        }
-        placeholder="Note"
-        className="h-7 w-56 text-xs"
-      />
-    </div>
-  );
-}
-
 function AnalysisView({
   logs,
-  decisions,
-  onDecide,
 }: {
   logs?: string;
-  decisions?: Record<string, ReviewerDecision>;
-  onDecide?: (b: { key: string } & ReviewerDecision) => void;
 }) {
   if (!logs) return null;
   let parsed: FailureAnalysis | null = null;
@@ -3200,11 +2879,6 @@ function AnalysisView({
               className="mt-2 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs text-amber-700 dark:text-amber-400"
             >
               {c.trials.length} trials made the same alternative choice ({c.label}): {c.reading}
-              <ContestedDecision
-                clusterKey={[...c.trials].sort().join("|")}
-                decisions={decisions}
-                onDecide={onDecide}
-              />
             </div>
           ))}
         </div>
@@ -3630,28 +3304,17 @@ function TrialInsight({
   index,
   verifier,
   verdict,
-  ruling,
-  adjudicator,
-  setAdjudicator,
-  onRule,
-  pending,
 }: {
   stage: "oracle" | "oracle_stress" | "nop" | "agent";
   index: number;
   verifier?: VerifierReport | null;
   verdict?: SuggestedVerdict | null;
-  ruling?: TrialVerdictRuling;
-  adjudicator?: string;
-  setAdjudicator?: (v: string) => void;
-  onRule?: (ruling: string) => void;
-  pending?: boolean;
 }) {
   const grader = verifier?.grader_error;
   const checks = [...(verifier?.checks ?? [])].sort((a, b) => Number(a.passed) - Number(b.passed));
   const failed = checks.filter((c) => !c.passed).length;
   if (!grader && checks.length === 0 && !verdict) return null;
   const style = verdict ? VERDICT_STYLE[verdict.verdict] : null;
-  const canRule = !!onRule && !!verdict && verdict.verdict !== "pass";
   return (
     <div
       className="mt-1 flex flex-col gap-1 text-xs"
@@ -3697,47 +3360,6 @@ function TrialInsight({
         <div className={`rounded border px-2 py-1 ${style.cls}`}>
           <b>Suggested: {style.label}.</b> {verdict.reason.replace(/[.\s]+$/, "")}.{" "}
           <span className="opacity-80">{verdict.action}</span>
-          {ruling && (
-            <div className="mt-1">
-              Reviewer: <b>{ruling.ruling}</b> ({ruling.adjudicator}, {ruling.at.slice(0, 10)})
-            </div>
-          )}
-          {canRule && (
-            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-foreground">
-              <span className="text-muted-foreground">
-                {ruling ? "Change it:" : "Confirm or change:"}
-              </span>
-              <Input
-                value={adjudicator ?? ""}
-                onChange={(e) => setAdjudicator?.(e.target.value)}
-                placeholder="your name"
-                className="h-6 w-32 text-xs"
-              />
-              {[
-                ["fake", "fake"],
-                ["genuine", "genuine"],
-                ["unsure", "unsure"],
-              ].map(([value, label]) => (
-                <Button
-                  key={value}
-                  size="sm"
-                  variant="outline"
-                  className="h-6 px-2 text-xs"
-                  title={
-                    value === "fake"
-                      ? "The grader or environment was at fault, not the agent"
-                      : value === "genuine"
-                        ? "The agent really failed"
-                        : "Not sure yet"
-                  }
-                  disabled={pending || !(adjudicator ?? "").trim()}
-                  onClick={() => onRule?.(value)}
-                >
-                  {label}
-                </Button>
-              ))}
-            </div>
-          )}
         </div>
       )}
     </div>

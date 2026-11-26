@@ -142,6 +142,8 @@ a few minutes). If one fails, see [Troubleshooting](#troubleshooting). To test a
 
 ## Stages in detail (4.0 and 4.1)
 
+**Nothing can be contested, except AI Detection.** A check passes or fails, and a task that fails is revised and uploaded again. The one manual ruling is on AI Detection: a named person approves it (it passes) or disapproves it (it fails), with a reason (`PUT /submissions/{id}/ai-detection-decision`). The ruling is kept with its history and stops applying when `instruction.md` or `solution/solve.sh` changes.
+
 The submission page runs top to bottom in three sections: **Before the agent trials**, **Agent
 trials**, **After the agent trials**. A button that depends on an earlier stage is greyed out and
 says what it is waiting for. Only Build, Oracle, Nop, Sufficiency and Agent Trials are gates (the Grader Isolation card
@@ -189,7 +191,7 @@ tokens and cost, and flags where the reward and the tests disagree.
 ### Other things on the page
 
 - **Changes banner**: compares an upload with the latest earlier upload of the same task name
-  (amber when tests were removed). **Reviewer decision** records a ruling on a contested cluster.
+  (amber when tests were removed).
 - **Download Evidence**: one JSON with the build log, Static Checks, Rubric Check, per-stage
   results, cost per stage and a summary. **(4.1)** Adds run limits, Oracle notes, Cheat Trial,
   Answer Exposure, Fresh Build, Image Contents and the verifier reports.
@@ -223,7 +225,7 @@ The platform only reports this; it adds no isolation, the task author does.
 | Area | What it does | Where it shows |
 |---|---|---|
 | Worker required (Static Check `verifier_worker_required`) | Reads the task's files as text and gives one result: `not_required` (nothing agent-written runs in grading, or it runs in a VM), `present` (a `Worker` runs it), `equivalent` (a separate user, no-new-privs, `/tests` locked and children killed, all found in the task's files) or `missing` (agent code runs with none of that). Agent code counts when the grader runs it, imports it, or starts a service from an agent path (`supervisorctl`, `systemctl`, `docker compose up`). `missing` is a warning with file:line evidence, what is absent and the fix (use `Worker(...).run(...)`, pin `harbor-rewardkit==0.2.4`, add `tests/reward.toml`, bump the minor version). | Static Checks, evidence summary, Review Report (`worker_required`) |
-| Grader Isolation gate | Turns that result into `ok`, `missing` or `unclear` (a Worker with agent code also running outside it, or only the shared-mode `python -m pytest` note). A reviewer can rule not_required, equivalent or missing with a written reason and a name; the ruling is kept against a fingerprint of `tests/`, `task.toml` and `environment/Dockerfile`, so a changed grader is checked again. Advisory unless `GRADER_ISOLATION_ENFORCE=true`, which makes agent trials, the cheat trial, Tier 1, Tier 2 and the tier cycle return 409 and the Review Report wait until it passes or a reviewer rules. | Grader Isolation card |
+| Grader Isolation gate | Turns that result into `ok`, `missing` or `unclear` (a Worker with agent code also running outside it, or only the shared-mode `python -m pytest` note). Nobody can overrule it: a task that does not pass is revised. Advisory unless `GRADER_ISOLATION_ENFORCE=true`, which makes agent trials, the cheat trial, Tier 1, Tier 2 and the tier cycle return 409 and the Review Report wait until it passes. | Grader Isolation card |
 
 It is a text-pattern guess, so a finding is a question for a person. Existing accepted tasks are not
 re-checked automatically; run the gate on each.
@@ -266,7 +268,7 @@ Reward Kit runs inside the task's own grader. The platform only reads what it le
 |---|---|---|
 | Per-check results | Reads `reward-details.json` into named checks (failed first). | Oracle, Nop and Agent Trials cards |
 | Grader errors | A trial with no reward because the verifier itself broke (a missing reward file, a Worker setup error) is a grader error: left out of the pass rate, never shown as a plain 0. | Oracle, Nop and Agent Trials cards |
-| Suggested verdict | Pre-fills fake, likely genuine, pass or unclear per trial; a reviewer's call is kept beside it. | Trial cards |
+| Suggested verdict | Pre-fills fake, likely genuine, pass or unclear per trial. | Trial cards |
 | Reward Kit checklist | Separate verifier with a `tests/Dockerfile`, exact `harbor-rewardkit==0.2.4` pin, `uv.lock`, a `reward.toml` Reward Kit 0.2.4 would accept (only `[[reward]]` and `[scoring.<file>]` with `aggregation`/`threshold`), setup-error handling, check names, parser errors the grader does not score as 0, and `harbor lint` findings. Nothing here for a task that does not use Reward Kit. | Static Checks |
 | Re-grade | `harbor job regrade` re-scores saved trials with the latest grader, without a new agent run; the originals are kept. | Re-grade Saved Trials card |
 

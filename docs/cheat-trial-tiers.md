@@ -56,7 +56,7 @@ What it contains today:
 - Comparison with the previous upload of the same task (`regression`, `fixed`, `changed`, `new`, `gone`).
 - A self-test that checks probe ids, controls and mutant anchors before anything runs.
 
-Verdicts: `exploited` (the only one that counts as an attack), `held`, `fail_open`, `false_zero`, `valid_accepted`, `relies_on_harbor`, `flaky`, `inconclusive`, `infra_failed`. A person can record a ruling per probe (`PUT /submissions/{id}/tier0-decision`); it never changes a gate.
+Verdicts: `exploited` (the only one that counts as an attack), `held`, `fail_open`, `false_zero`, `valid_accepted`, `relies_on_harbor`, `flaky`, `inconclusive`, `infra_failed`.
 
 ### Tier 1: hinted agent and fixer
 
@@ -126,7 +126,7 @@ The loop ends as `robust`, `unfixed`, `unpatchable`, `needs_review`, `inconclusi
 
 **Caps** (all configurable): 1800 s and `TIER1_ATTEMPT_COST_USD` per attempt, `TIER1_MAX_COST_USD` for the run, 10 attempts, 5 patches. Cost is tracked per role (hacker, judge, fixer) and recorded in `llm_spend`.
 
-A person can overrule a judge label with `PUT /submissions/{id}/tier1-decision`. That records the ruling beside it and does not restart the loop.
+A judge label cannot be overruled.
 
 ### Tier 2: unhinted agent
 
@@ -159,7 +159,6 @@ How the three tiers are meant to work together on one task. Items marked **built
       |   output: hardened copy + hardened.diff, or "robust"
       v
  PERSON   reviews every hardened.diff                                 [manual, required]
-      |   rules on contested cases (tier0/tier1/tier2 decisions)
       v
  TIER 2   unhinted agent on the hardened copy, Sonnet                 [built]
       |   output: realistic exploit rate
@@ -225,7 +224,7 @@ What these show so far:
 - **Hashing protects only high-entropy answers.** A hash of a small number (an xid, a count) can be brute-forced. Stored hashes also do nothing if the same answer can be obtained another way.
 - **"Reachable reference plus readable inputs" cannot be fixed from `tests/`.** The author has to generate inputs at grading time from a seed that is not shipped, or hold cases back.
 - **A static scan of the upstream tasks** found answers in `tests/` data in 21 of 66 tasks and an int8-like shape (a runnable reference plus fixed test data) clearly in one, `rs-archive-clone`. This is a heuristic. Only int8 and collab have been attacked by a real hacker.
-- **The judge is an LLM.** Labels can be wrong. The `tried_shortcut` guard and the neutral verdicts reduce the damage; named human rulings override.
+- **The judge is an LLM.** Labels can be wrong. The `tried_shortcut` guard and the neutral verdicts reduce the damage; there is no manual override.
 - **The hint is generous by design.** A Tier 1 hit means a verifier-aware attacker can win. It does not mean ordinary agents will.
 - **Tier 0 is a replica.** A task that Harbor treats differently could differ.
 - **Tier 1 and Tier 2 on the same hardened copy at the same time are not handled.**
@@ -251,10 +250,6 @@ POST /submissions/{id}/tier1?model=anthropic/claude-sonnet-4-5&max_attempts=8&ma
 POST /submissions/{id}/tier2?model=anthropic/claude-sonnet-4-5&max_attempts=8&max_cost_usd=5
 POST /submissions/{id}/tier2?task_copy=hardened      # run on Tier 1's hardened copy
 
-# human rulings (a named adjudicator is required)
-PUT  /submissions/{id}/tier0-decision
-PUT  /submissions/{id}/tier1-decision
-PUT  /submissions/{id}/tier2-decision
 
 # everything in one file
 GET  /submissions/{id}/evidence

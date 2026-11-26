@@ -155,24 +155,6 @@ def _expected_slug(task_root: Path) -> str:
     return task_root.name
 
 
-_CANARY_FAIL_RE = re.compile(r"^FAIL (\S+?):", re.M)
-
-
-def _label_contested_canary(output: str) -> str:
-    """Upstream proposes dropping the canary requirement for environment/ files
-    (issues #2200, #2210) because a canary in a file the agent can read leaks
-    into its context. Until the vendored copy is refreshed, a canary failure
-    that points only at environment/ files is marked contested, not hidden."""
-    failing = _CANARY_FAIL_RE.findall(output)
-    if failing and all("/environment/" in f for f in failing):
-        return (
-            "CONTESTED: every file named below is under environment/, and upstream is discussing "
-            "dropping the canary rule for those files. Treat this as a question for a reviewer, not a "
-            "clear failure.\n" + output
-        )
-    return output
-
-
 @lru_cache
 def _bash() -> str:
     """The bash to run the scripts with. On Windows a bare "bash" resolves to
@@ -296,8 +278,6 @@ def _run_scripts(task_root: Path, clean_path: Path, report: TbStaticCheckReport,
                 )
             )
             continue
-        if not passed and script.stem == "check-canary":
-            output = _label_contested_canary(output)
         if not passed and script.stem == "check-task-fields":
             output = _explain_task_fields(task_root, output)
         report.results.append(TbCheckResult(script.stem, passed, output))

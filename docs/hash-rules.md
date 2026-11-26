@@ -1,7 +1,7 @@
 # Hashed expected answers: rules for task authors
 
 **Status: the static check (step 1), the plain-answer warning (step 2) and the damaged-hash test (step 4) are built.
-Nothing blocks agent runs yet, and there is no reviewer exemption or sign-off (rule 5, step 5).**
+Nothing blocks agent runs yet, and there is no exemption: a task that fails is revised.**
 
 ## Why
 
@@ -49,13 +49,10 @@ A hash needs an exact match, so decide the form once and write it in the grader:
 
 The reference solution must still score 1 after you hash.
 
-### 5. When an answer cannot be hashed, say why
+### 5. When an answer cannot be hashed, revise the task
 
-Some comparisons cannot use a hash: a wide numeric tolerance, or a value computed while grading. Request
-an exemption that names the value and gives the reason. A reviewer approves it with their name.
-
-A task with nothing to hash (it only tests behaviour) also needs that approved exemption. It does not pass
-automatically.
+There are no exemptions. If a comparison cannot use a hash (a wide numeric tolerance, or a value computed while
+grading), change the task so that it can, for example by listing every accepted value (rule 3).
 
 ## How to convert a task
 
@@ -156,9 +153,8 @@ A `tests/` change is a minor version bump in `task.toml`.
 
 ### If your task cannot do this
 
-A time or number accepted within a wide tolerance, or a task that only runs the agent's code and tests its
-behaviour, has nothing suitable to hash. The platform has no exemption for these yet, so they show a failed
-Static Check. Nothing is blocked by it.
+A task with nothing to hash, or a comparison that cannot use a hash, fails Static Checks. There is no
+exemption: the task has to be revised.
 
 ## How a task is checked
 
@@ -168,7 +164,6 @@ Static Check. Nothing is blocked by it.
 | 2. Search for plain answers | values that look like expected answers still in clear text | warning only |
 | 3. Oracle and Nop | the reference solution scores 1 and doing nothing scores 0 | block |
 | 4. Damaged-hash test | each entry really decides the score (below) | block |
-| 5. Reviewer | no answer is left in plain text, and short answers are acceptable | block |
 
 ### The damaged-hash test
 
@@ -181,14 +176,13 @@ A list is damaged as a whole, because the reference solution uses only one of th
 
 ## What these rules do not guarantee
 
-- **That every answer is hashed.** No automatic check can tell a plain answer from a test input. Step 5 is
-  a person for that reason.
+- **That every answer is hashed.** No automatic check can tell a plain answer from a test input. No check settles this.
 - **That a hashed answer is hidden.** A short or predictable value (an id, a small number, a time on a
   known day) can be recovered by trying values until one matches. pg-wal-recovery's transaction ids were
   recovered from their fingerprints in milliseconds.
 - **That the agent cannot get the answer elsewhere**, for example from a reachable server that gives the
   answer for every test input.
-- **That a decoy was not used.** Hashing one unimportant value satisfies step 1; step 5 has to catch it.
+- **That a decoy was not used.** Hashing one unimportant value satisfies step 1; no automatic step catches it.
 
 ## Evidence so far
 

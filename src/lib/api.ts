@@ -375,14 +375,7 @@ export interface Tier0Comparison {
   verifier_changed?: boolean;
   unchanged_probes?: number;
   changes: { probe_id: string; before: string | null; after: string | null; kind: string }[];
-}
-export interface Tier0Ruling {
-  ruling: "legitimate" | "exploit" | "accepted_risk" | "unsure" | string;
-  adjudicator: string;
-  note: string;
-  at: string;
-}
-// Tier 1 (advisory): a hinted agent with a read-only copy of tests/ and notes on its earlier
+}// Tier 1 (advisory): a hinted agent with a read-only copy of tests/ and notes on its earlier
 // attempts tries to get reward 1 without doing the work; a judge labels each attempt, an LLM
 // fixer patches a hardened copy after a hit, and the loop ends after 3 failed cheating attempts
 // in a row. "passed" = robust; "failed" = something needs a human.
@@ -427,13 +420,6 @@ export interface Tier1Fix {
   gate?: string;
   note?: string;
 }
-export interface TrialVerdictRuling {
-  ruling: "fake" | "genuine" | "unsure" | string;
-  adjudicator: string;
-  note: string;
-  at: string;
-}
-
 // Saved trials scored again with the current grader, no agent run. `logs` is JSON (RegradeReport).
 export interface RegradeResult {
   status: StageStatus;
@@ -480,13 +466,6 @@ export interface VersionInfo {
   };
   reward_kit: { pinned_version: string };
   notes: string[];
-}
-
-export interface Tier1Ruling {
-  ruling: "exploit" | "not_exploit" | "unsure" | string;
-  adjudicator: string;
-  note: string;
-  at: string;
 }
 export interface Tier1 {
   agent?: string;
@@ -738,12 +717,6 @@ export interface VariantProbe {
   variants: VariantEntry[];
 }
 
-export interface ReviewerDecision {
-  decision: "grader_wrong" | "agent_wrong" | "hard_not_ambiguous" | "unsure";
-  note: string;
-  at?: string;
-}
-
 // What changed since an earlier upload of the same task.
 export interface SubmissionChanges {
   against: string | null;
@@ -832,6 +805,10 @@ export interface TbStaticCheckReport {
 // Terminal-Bench's own Layer 3 AI-usage detection -- calls the real
 // GPTZero API. Genuinely optional in Terminal-Bench's own workflow too.
 export interface AiDetectionResult {
+  // status is the effective one: a current ruling decides it
+  detected_status?: string | null;
+  decision?: { ruling: string; adjudicator: string; reason: string; at: string } | null;
+  decision_stale?: boolean;
   status: StageStatus;
   logs?: string;
 }
@@ -888,13 +865,10 @@ export interface GraderIsolationResult {
   status: StageStatus;
   state: "ok" | "missing" | "unclear" | null;
   analysis: "not_required" | "present" | "equivalent" | "missing" | null;
-  source: "detected" | "reviewer" | null;
   evidence: string[];
   absent: string[];
   also_unprotected: string[];
   note: string;
-  override: { result: string; reason: string; adjudicator: string; at: string } | null;
-  override_stale: boolean;
   enforced: boolean;
   blocks: boolean;
 }
@@ -948,7 +922,6 @@ export interface Submission {
   variant_probe: VariantProbeResult;
   weak_probe: WeakProbeResult;
   edge_cases: EdgeCasesResult;
-  reviewer_decisions: Record<string, ReviewerDecision>;
   static_checks: StaticChecksResult;
   tb_static_checks: TbStaticChecksResult;
   grader_isolation: GraderIsolationResult;
@@ -957,14 +930,10 @@ export interface Submission {
   ai_detection: AiDetectionResult;
   answer_exposure: AnswerExposureResult;
   tier0: Tier0Result;
-  tier0_decisions?: Record<string, Tier0Ruling>;
   tier1: Tier1Result;
-  tier1_decisions?: Record<string, Tier1Ruling>;
   tier2: Tier2Result;
-  tier2_decisions?: Record<string, Tier1Ruling>;
   tier_cycle?: TierCycleResult;
   // A reviewer's genuine-or-fake call per trial, key "<stage>:<index>" (oracle | nop | agent).
-  trial_verdicts?: Record<string, TrialVerdictRuling>;
   regrade?: RegradeResult;
   image_inventory: ImageInventoryResult;
   fresh_build: FreshBuildResult;
@@ -1114,15 +1083,6 @@ export const api = {
       method: "POST",
     }).then(handle<unknown>);
   },
-  tier0Decision: (
-    id: string,
-    body: { probe_id: string; ruling: string; adjudicator: string; note: string },
-  ) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/tier0-decision`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }).then(handle<unknown>),
   tier1: (id: string, opts: { maxAttempts?: number; maxCostUsd?: number; model?: string } = {}) => {
     const q = new URLSearchParams();
     if (opts.maxAttempts) q.set("max_attempts", String(opts.maxAttempts));
@@ -1133,15 +1093,6 @@ export const api = {
       method: "POST",
     }).then(handle<unknown>);
   },
-  tier1Decision: (
-    id: string,
-    body: { attempt: number; ruling: string; adjudicator: string; note: string },
-  ) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/tier1-decision`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }).then(handle<unknown>),
   tier2: (
     id: string,
     opts: { maxAttempts?: number; maxCostUsd?: number; model?: string; taskCopy?: string } = {},
@@ -1156,15 +1107,6 @@ export const api = {
       method: "POST",
     }).then(handle<unknown>);
   },
-  tier2Decision: (
-    id: string,
-    body: { attempt: number; ruling: string; adjudicator: string; note: string },
-  ) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/tier2-decision`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }).then(handle<unknown>),
   answerExposure: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/answer-exposure`, { method: "POST" }).then(
       handle<unknown>,
@@ -1187,30 +1129,9 @@ export const api = {
     fetch(`${API_BASE_URL}/submissions/${id}/regrade?kind=${kind}&source=${source}`, {
       method: "POST",
     }).then(handle<unknown>),
-  setTrialVerdict: (
-    id: string,
-    body: {
-      stage: "oracle" | "nop" | "agent";
-      index: number;
-      ruling: string;
-      adjudicator: string;
-      note?: string;
-    },
-  ) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/trial-verdict`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }).then(handle<Record<string, TrialVerdictRuling>>),
   versions: () => fetch(`${API_BASE_URL}/versions`).then(handle<VersionInfo>),
   changes: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/changes`).then(handle<SubmissionChanges>),
-  setReviewerDecision: (id: string, body: { key: string } & ReviewerDecision) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/reviewer-decision`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }).then(handle<unknown>),
   // Always sends the choice: the backend default is "tb", so leaving it out
   // would never select Harbor's own rubric.
   rubricCheck: (id: string, rubric: RubricChoice = "tb") =>
@@ -1238,19 +1159,15 @@ export const api = {
     fetch(`${API_BASE_URL}/submissions/${id}/grader-isolation`, { method: "POST" }).then(
       handle<GraderIsolationResult>,
     ),
-  graderIsolationDecision: (
+  aiDetectionDecision: (
     id: string,
-    body: {
-      result: "not_required" | "equivalent" | "missing";
-      reason: string;
-      adjudicator: string;
-    },
+    body: { ruling: "approved" | "disapproved"; adjudicator: string; reason: string },
   ) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/grader-isolation-decision`, {
+    fetch(`${API_BASE_URL}/submissions/${id}/ai-detection-decision`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }).then(handle<GraderIsolationResult>),
+    }).then(handle<unknown>),
   hashProof: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/hash-proof`, { method: "POST" }).then(
       handle<unknown>,

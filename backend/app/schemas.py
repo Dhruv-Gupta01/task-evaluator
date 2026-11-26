@@ -243,6 +243,12 @@ class TbStaticChecksResult(BaseModel):
 
 
 class AiDetectionResult(BaseModel):
+    # status is the effective one: a current ruling decides it; detected_status is the detector's own
+    detected_status: str | None = None
+    decision: dict | None = None
+    decision_stale: bool = False
+    history: list[dict] = []
+
     """Terminal-Bench's own Layer 3 AI-usage detection (vendor/tb_checks/
     scripts/check_ai_detection.py) -- calls the real GPTZero API. Advisory,
     and genuinely optional in Terminal-Bench's own workflow too. `logs` is
@@ -398,20 +404,16 @@ class HashProofResult(BaseModel):
 
 
 class GraderIsolationResult(BaseModel):
-    """The Grader Isolation gate (way 2 of the Worker flag). `state` is ok / missing / unclear after any
-    reviewer ruling; `analysis` is the way-1 result (not_required, present, equivalent, missing).
-    Advisory unless `enforced`. `override` is the reviewer's ruling (result, reason, adjudicator, at);
-    `override_stale` means the grader changed after it was made, so it no longer applies."""
+    """The Grader Isolation gate (way 2 of the Worker flag). `state` is ok / missing / unclear;
+    `analysis` is the way-1 result (not_required, present, equivalent, missing). Advisory unless `enforced`.
+    Nobody can overrule it: a failing result is cleared by revising the task."""
     status: StageStatus
     state: str | None = None
     analysis: str | None = None
-    source: str | None = None  # "detected" or "reviewer"
     evidence: list[str] = []
     absent: list[str] = []
     also_unprotected: list[str] = []
     note: str = ""
-    override: dict | None = None
-    override_stale: bool = False
     enforced: bool = False
     blocks: bool = False
 
@@ -475,7 +477,6 @@ class SubmissionSchema(BaseModel):
     variant_probe: VariantProbeResult
     weak_probe: WeakProbeResult
     edge_cases: EdgeCasesResult
-    reviewer_decisions: dict[str, dict] = {}
     static_checks: StaticChecksResult
     tb_static_checks: TbStaticChecksResult
     grader_isolation: GraderIsolationResult = GraderIsolationResult(status="not-run")
@@ -484,13 +485,9 @@ class SubmissionSchema(BaseModel):
     ai_detection: AiDetectionResult
     answer_exposure: AnswerExposureResult
     tier0: Tier0Result
-    tier0_decisions: dict[str, dict] = {}
     tier1: Tier1Result
-    tier1_decisions: dict[str, dict] = {}
     tier2: Tier2Result
-    tier2_decisions: dict[str, dict] = {}
     tier_cycle: TierCycleResult = TierCycleResult(status="not-run", logs=None)
-    trial_verdicts: dict[str, dict] = {}  # a reviewer's genuine-or-fake call per trial, key "<stage>:<index>"
     regrade: RegradeResult
     image_inventory: ImageInventoryResult
     fresh_build: FreshBuildResult
