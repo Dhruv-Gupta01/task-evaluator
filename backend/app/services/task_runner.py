@@ -3212,3 +3212,54 @@ async def run_worker_probe_stage(submission_id: str) -> None:
         db.commit()
     finally:
         db.close()
+
+
+async def run_hash_proof_stage(submission_id: str) -> None:
+    """The proof run for hashed answers (services/hash_checks.py, docs/hash-rules.md): damage one `_sha256`
+    entry at a time on a temporary copy and run the reference solution; an entry that does not change the
+    score is not used by the grader. Oracle trials one at a time, no LLM. Run kind "hash_proof"."""
+    from app.services import hash_checks
+
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+        run = _get_or_create_run(db, submission_id, "hash_proof", 0)
+        run.status = "running"
+        run.reward = None
+        run.logs = None
+        run.started_at = datetime.now(UTC)
+        db.commit()
+
+        task_root = Path(submission.extracted_path)
+        work = task_root.parent / "runs" / "hash_proof"
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True, exist_ok=True)
+        timeout_sec = _oracle_timeout_sec(_get_task_config(submission))
+
+        async def run_oracle(copy_root: Path, index: int) -> float | None:
+            outcome = await harbor_runner.run_single(
+                copy_root, "oracle", work / f"p{index}", f"hash-{uuid.uuid4().hex[:8]}", timeout_sec
+            )
+            return outcome.reward
+
+        def progress(state: dict) -> None:
+            run.logs = json.dumps(state)
+            db.commit()
+
+        try:
+            result = await hash_checks.run_proof(task_root, run_oracle, work, progress=progress)
+        except Exception:
+            run.status = "failed"
+            run.logs = json.dumps({"verdict": "error", "entries": [], "note": traceback.format_exc()[-1500:]})
+            run.finished_at = datetime.now(UTC)
+            db.commit()
+            return
+        run.status = result["status"]
+        run.reward = 1 if result["status"] == "passed" else 0
+        run.logs = json.dumps(result)
+        run.finished_at = datetime.now(UTC)
+        db.commit()
+    finally:
+        db.close()

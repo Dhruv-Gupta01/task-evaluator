@@ -422,6 +422,12 @@ def check_rubric(task_root: Path, report: StaticCheckReport) -> None:
         report.add("rubric_present", "info", "No separate rubric file (not required).")
 
 
+def _hashed_answers(task_root: Path, report) -> None:
+    from app.services.hash_checks import check_hashed_answers
+
+    check_hashed_answers(task_root, report)
+
+
 def run_static_checks(task_root: Path) -> StaticCheckReport:
     report = StaticCheckReport()
     check_instruction(task_root / "instruction.md", report)
@@ -445,4 +451,5 @@ def run_static_checks(task_root: Path) -> StaticCheckReport:
             check(task_root, report)
         except Exception as exc:  # advisory: one odd file must not break the stage
             report.add(check.__name__, "info", f"check could not run: {type(exc).__name__}")
+    _hashed_answers(task_root, report)
     return report

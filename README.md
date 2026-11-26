@@ -270,6 +270,18 @@ Reward Kit runs inside the task's own grader. The platform only reads what it le
 | Reward Kit checklist | Separate verifier with a `tests/Dockerfile`, exact `harbor-rewardkit==0.2.4` pin, `uv.lock`, a `reward.toml` Reward Kit 0.2.4 would accept (only `[[reward]]` and `[scoring.<file>]` with `aggregation`/`threshold`), setup-error handling, check names, parser errors the grader does not score as 0, and `harbor lint` findings. Nothing here for a task that does not use Reward Kit. | Static Checks |
 | Re-grade | `harbor job regrade` re-scores saved trials with the latest grader, without a new agent run; the originals are kept. | Re-grade Saved Trials card |
 
+### Hashed expected answers
+
+Rules for authors: [`docs/hash-rules.md`](docs/hash-rules.md). Why it works this way: [`docs/hash-discussion.md`](docs/hash-discussion.md).
+
+| Check | What it does | Where it shows |
+|---|---|---|
+| `hash_answers` | **Fails** a task with no `_sha256` / `_not_sha256` entry under `tests/` | Static Checks |
+| `tests_plain_answers` | Warns about values that look like plain answers (a person decides; "none seen" is not proof) | Static Checks |
+| Hash proof ("Verify hashing") | Damages one digest at a time and runs the Oracle; the score must fall. Needs a passing Oracle; Docker, no model | Static Checks card, evidence |
+
+Nothing blocks agent runs on these yet.
+
 ## Notes
 
 - **Docker platform**: every build and container run (Build, and Oracle/Nop/Agent Trials via

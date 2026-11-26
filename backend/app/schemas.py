@@ -378,6 +378,25 @@ class WorkerProbeResult(BaseModel):
     error: str | None = None
 
 
+class HashProofEntry(BaseModel):
+    name: str
+    file: str
+    must_match: bool
+    result: str  # used | not_used | unconfirmed | no_result | not_run
+    note: str = ""
+
+
+class HashProofResult(BaseModel):
+    """The proof run for hashed answers (services/hash_checks.py). `verdict`: all_used (the only pass),
+    unused_hash, needs_review, no_hashes or error."""
+    status: StageStatus
+    verdict: str = ""
+    entries: list[HashProofEntry] = []
+    runs: int = 0
+    total: int = 0
+    note: str = ""
+
+
 class GraderIsolationResult(BaseModel):
     """The Grader Isolation gate (way 2 of the Worker flag). `state` is ok / missing / unclear after any
     reviewer ruling; `analysis` is the way-1 result (not_required, present, equivalent, missing).
@@ -461,6 +480,7 @@ class SubmissionSchema(BaseModel):
     tb_static_checks: TbStaticChecksResult
     grader_isolation: GraderIsolationResult = GraderIsolationResult(status="not-run")
     worker_probe: WorkerProbeResult = WorkerProbeResult(status="not-run")
+    hash_proof: HashProofResult = HashProofResult(status="not-run")
     ai_detection: AiDetectionResult
     answer_exposure: AnswerExposureResult
     tier0: Tier0Result

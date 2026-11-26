@@ -36,6 +36,7 @@ from app.schemas import (
     StageResult,
     StageStatus,
     GraderIsolationResult,
+    HashProofResult,
     WorkerProbeCheck,
     WorkerProbeResult,
     StaticChecksResult,
@@ -560,6 +561,17 @@ def _worker_probe_result(run: Run | None) -> WorkerProbeResult:
     )
 
 
+def _hash_proof_result(run: Run | None) -> HashProofResult:
+    if run is None:
+        return HashProofResult(status="not-run")
+    try:
+        detail = json.loads(run.logs) if run.logs else {}
+        detail.pop("status", None)
+        return HashProofResult(status=run.status, **detail)  # type: ignore[arg-type]
+    except (ValueError, TypeError):
+        return HashProofResult(status="failed", verdict="error", note="the stored result could not be read")
+
+
 def _regrade_result(run: Run | None) -> RegradeResult:
     if run is None:
         return RegradeResult(status="not-run", logs=None)
@@ -609,6 +621,7 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         tb_static_checks=_tb_static_checks_result(_get_run(submission, "tb_static_checks")),
         grader_isolation=_grader_isolation_result(submission),
         worker_probe=_worker_probe_result(_get_run(submission, "worker_probe")),
+        hash_proof=_hash_proof_result(_get_run(submission, "hash_proof")),
         ai_detection=_ai_detection_result(_get_run(submission, "ai_detection")),
         answer_exposure=_answer_exposure_result(_get_run(submission, "answer_exposure")),
         tier0=_tier0_result(_get_run(submission, "tier0_probes")),
@@ -1108,6 +1121,16 @@ def _worker_probe_line(schema) -> str:
     return head + (f"; failed: {'; '.join(bad)}" if bad else "") + note + " [advisory; needs a human]"
 
 
+def _hash_proof_line(schema) -> str:
+    proof = schema.hash_proof
+    if proof.status in ("not-run", "pending", "running"):
+        return "- Hash proof: not run yet" if proof.status == "not-run" else f"- Hash proof: running ({proof.runs} run(s) so far)"
+    used = sum(1 for e in proof.entries if e.result == "used")
+    head = f"- Hash proof: {'passed' if proof.status == 'passed' else 'FAILED'} ({proof.verdict}), {used} of {proof.total} hashed answers shown to be used"
+    bad = [f"{e.name} ({e.result})" for e in proof.entries if e.result != "used"]
+    return head + (f"; not shown: {', '.join(bad[:6])}" if bad else "") + " [does not show every answer is hashed; a reviewer confirms]"
+
+
 def build_summary_markdown(
     schema: SubmissionSchema, total_cost_usd: float | None, cost_report: dict | None = None
 ) -> str:
@@ -1198,6 +1221,7 @@ def build_summary_markdown(
         f"- Leakage Scan: {_fmt_status(schema.leakage_scan.status)}",
         _worker_line(schema),
         _worker_probe_line(schema),
+        _hash_proof_line(schema),
         (
             f"- Static Checks: {_fmt_status(schema.static_checks.status)}"
             + (

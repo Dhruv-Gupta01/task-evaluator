@@ -1290,6 +1290,7 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
             ],
         },
         "worker_probe": schema.worker_probe.model_dump(),
+        "hash_proof": schema.hash_proof.model_dump(),
         "answer_exposure": {
             "status": schema.answer_exposure.status,
             "not_run": schema.answer_exposure.status == "not-run",
@@ -1385,3 +1386,21 @@ def get_worker_probe(submission_id: str, db: Session = Depends(get_db)) -> dict:
     except ValueError:
         detail = {}
     return {"status": run.status, **detail}
+
+
+@router.post("/submissions/{submission_id}/hash-proof", status_code=202)
+async def trigger_hash_proof(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    """Damages one hashed answer at a time and runs the reference solution (docs/hash-rules.md). Needs a
+    passing Oracle: a score below 1 means nothing if the grader rejects the correct solution anyway."""
+    submission, _ = _task_root_for(submission_id, db)
+    if submission_service.to_schema(submission).oracle.all_passed is not True:
+        raise HTTPException(status_code=400, detail="run the Oracle first; every run must score 1")
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="hash_proof", run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind="hash_proof", run_index=0)
+        db.add(run)
+    run.status = "pending"
+    run.logs = None
+    db.commit()
+    await task_queue.submit(f"{submission_id}:hash_proof", task_runner.run_hash_proof_stage(submission_id))
+    return {"status": "started"}

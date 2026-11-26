@@ -914,6 +914,23 @@ export interface WorkerProbeResult {
   error: string | null;
 }
 
+// Hash proof (docs/hash-rules.md): damage one stored digest at a time and run the reference solution.
+export interface HashProofEntry {
+  name: string;
+  file: string;
+  must_match: boolean;
+  result: "used" | "not_used" | "unconfirmed" | "no_result" | "not_run";
+  note: string;
+}
+export interface HashProofResult {
+  status: StageStatus;
+  verdict: string;
+  entries: HashProofEntry[];
+  runs: number;
+  total: number;
+  note: string;
+}
+
 export interface Submission {
   id: string;
   task_name: string;
@@ -936,6 +953,7 @@ export interface Submission {
   tb_static_checks: TbStaticChecksResult;
   grader_isolation: GraderIsolationResult;
   worker_probe: WorkerProbeResult;
+  hash_proof: HashProofResult;
   ai_detection: AiDetectionResult;
   answer_exposure: AnswerExposureResult;
   tier0: Tier0Result;
@@ -1233,6 +1251,10 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(handle<GraderIsolationResult>),
+  hashProof: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/hash-proof`, { method: "POST" }).then(
+      handle<unknown>,
+    ),
   workerProbe: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/worker-probe`, { method: "POST" }).then(
       handle<unknown>,

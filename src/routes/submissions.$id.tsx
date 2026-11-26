@@ -49,6 +49,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { LogPanel } from "@/components/LogPanel";
 import { GraderIsolationPanel } from "@/components/GraderIsolationPanel";
 import { WorkerProbePanel } from "@/components/WorkerProbePanel";
+import { HashProofPanel } from "@/components/HashProofPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -105,6 +106,7 @@ function SubmissionDetail() {
         isActive(d.rubric_check.status) ||
         isActive(d.answer_exposure.status) ||
         isActive(d.worker_probe?.status ?? "not-run") ||
+        isActive(d.hash_proof?.status ?? "not-run") ||
         isActive(d.tier0.status) ||
         isActive(d.tier1.status) ||
         isActive(d.tier2.status) ||
@@ -865,6 +867,12 @@ function SubmissionDetail() {
                 </>
               );
             })()}
+          <HashProofPanel
+            id={id}
+            data={data.hash_proof}
+            oraclePassed={data.oracle.all_passed === true}
+            onChange={invalidate}
+          />
         </StageCard>
 
         {/* Grader Isolation gate */}
