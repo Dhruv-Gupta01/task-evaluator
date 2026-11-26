@@ -57,6 +57,109 @@ an exemption that names the value and gives the reason. A reviewer approves it w
 A task with nothing to hash (it only tests behaviour) also needs that approved exemption. It does not pass
 automatically.
 
+## How to convert a task
+
+You change only `tests/`. The instruction, solution and environment stay as they are.
+
+### Step 1. Work out the hash of each expected answer
+
+Run this once on your own machine for each answer, using **the same method your grader will use**.
+
+For a Python grader:
+
+```python
+import hashlib, json
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+print(digest(756))
+```
+
+For a shell grader, which hashes the raw text:
+
+```bash
+printf '%s' "Example Domain" | sha256sum | cut -d' ' -f1
+```
+
+The two methods give different hashes for the same text (the Python one hashes the JSON form, quotes
+included), so do not mix them.
+
+### Step 2. Store the hash under the right name and delete the plain value
+
+Before:
+
+```json
+{ "bad_xid": 756 }
+```
+
+After:
+
+```json
+{ "bad_xid_sha256": "<64-character hash>" }
+```
+
+| Situation | How to store it |
+|---|---|
+| The output must match | `name_sha256` |
+| The output must **not** match (a wrong state) | `name_not_sha256` |
+| Several values are accepted | one list: `name_sha256: ["h1", "h2"]` |
+
+The name works as a JSON key, a Python constant (`EXPECTED_SHA256 = {...}`) or a shell variable
+(`expected_sha256="..."`). Write the 64 characters in the file; do not compute them while grading.
+
+### Step 3. Change the grader to hash the output and compare
+
+Python:
+
+```python
+# before
+assert report["bad_xid"] == EXPECTED["bad_xid"]
+# after
+assert digest(report["bad_xid"]) == EXPECTED["bad_xid_sha256"]
+```
+
+Shell:
+
+```bash
+actual=$(tr -d '\r\n' < /app/title.txt | sha256sum | cut -d' ' -f1)
+[ "$actual" = "$expected_sha256" ]
+```
+
+Hash the output in exactly the form you used in step 1. `2` and `2.0` give different hashes, as do a
+trailing newline or different letter case.
+
+### Step 4. Remove other plain copies
+
+Check comments, other data files and generator scripts under `tests/`.
+
+### Step 5. Bump the version
+
+A `tests/` change is a minor version bump in `task.toml`.
+
+### What the platform then checks
+
+| Step | Passes when |
+|---|---|
+| Static Checks (`hash_answers`) | there is at least one correctly named hash |
+| Static Checks (`tests_plain_answers`) | ideally silent; if it warns, confirm those values are inputs or hash them |
+| Oracle (3 runs) | all score 1, so hashing did not break grading |
+| Nop | scores 0 |
+| Verify hashing | damaging each hash lowers the score |
+
+### Common reasons it fails
+
+- The old plain comparison is still there, so damaging the hash changes nothing.
+- The output is formatted differently from what was hashed, so the Oracle scores 0.
+- Accepted alternatives are stored under separate names, so the unused ones look unused. Put them in one list.
+- A "must not match" value is named `_sha256` instead of `_not_sha256`.
+
+### If your task cannot do this
+
+A time or number accepted within a wide tolerance, or a task that only runs the agent's code and tests its
+behaviour, has nothing suitable to hash. The platform has no exemption for these yet, so they show a failed
+Static Check. Nothing is blocked by it.
+
 ## How a task is checked
 
 | Step | What it checks | Result if it fails |
