@@ -140,7 +140,7 @@ A `tests/` change is a minor version bump in `task.toml`.
 |---|---|
 | Static Checks (`hash_answers`) | there is at least one correctly named hash |
 | Static Checks (`tests_plain_answers`) | ideally silent; if it warns, confirm those values are inputs or hash them |
-| Oracle (3 runs) | all score 1, so hashing did not break grading |
+| Oracle | every declared solution scores 1 (3 runs each), so hashing did not break grading |
 | Nop | scores 0 |
 | Verify hashing | damaging each hash lowers the score |
 

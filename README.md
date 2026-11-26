@@ -6,7 +6,7 @@ gates against real Docker containers, plus about twenty advisory checks (see
 [Stages in detail](#stages-in-detail-40-and-41)):
 
 1. **Build** — builds the task's `environment/Dockerfile`.
-2. **Oracle** — runs `harbor run -a oracle`, confirms the reference solution scores reward `1`.
+2. **Oracle** — runs every correct solution the task declares (at least two), each at least 3 times, with `harbor run -a oracle`; all must score `1`. The later gates stay closed until they do.
 3. **Nop** — runs `harbor run -a nop`, confirms a do-nothing agent scores reward `0`.
 4. **Sufficiency** — an LLM judge checks whether the hidden test requirements are inferable
    from the visible instructions and files.
@@ -14,6 +14,16 @@ gates against real Docker containers, plus about twenty advisory checks (see
    the pass rate and each trial's token usage and cost.
 
 Everything runs locally: FastAPI backend, React/Vite frontend, Postgres, and Docker.
+
+## What a task must provide
+
+| A task must | Checked by | If it does not | Rules |
+|---|---|---|---|
+| Ship at least two different correct solutions, declared in `[metadata] oracle_solutions` | Static Checks, Run Oracle | the Oracle is refused or fails, and later stages stay closed | [`docs/oracle-solutions.md`](docs/oracle-solutions.md) |
+| Follow the standard `task.toml` format (separate verifier, `network_mode = "public"`) | Static Check `task_toml_format` | Static Checks fail | [`docs/task-toml-format.md`](docs/task-toml-format.md) |
+| Store its expected answers as SHA-256 digests the grader really uses | Static Check `hash_answers`, "Verify hashing" | the check fails | [`docs/hash-rules.md`](docs/hash-rules.md) |
+
+There are no exemptions: a task that fails is revised and uploaded again. `examples/smoke-task` meets all three.
 
 **Taking this over?** Read [`docs/HANDOVER.md`](docs/HANDOVER.md) for what the platform is, how it
 works, every feature, the configuration, costs and the known issues. This README is the setup guide.
@@ -114,7 +124,7 @@ under `backend/storage/submissions/{id}/` (Harbor's full job output is in
 ### First run: check your setup in about two minutes
 
 `examples/smoke-task/` is a tiny task (fix two bugs in a 10-line Python function) that needs no
-API key. Zip it so `task.toml` sits at the top of the zip, then upload it:
+API key. It meets the author rules above: two correct solutions, the standard `task.toml` and hashed answers. Zip it so `task.toml` sits at the top of the zip, then upload it:
 
 ```sh
 cd examples/smoke-task && zip -r ../smoke-task.zip . -x '.DS_Store' && cd ../..
@@ -122,8 +132,9 @@ cd examples/smoke-task && zip -r ../smoke-task.zip . -x '.DS_Store' && cd ../..
 
 In the UI, upload `examples/smoke-task.zip`, then click **Validate & Build**, **Run Oracle** and
 **Run Nop**. A working setup shows all three as **Passed**: Build takes about 15 seconds on a
-warm Docker, and Oracle plus Nop about 30 seconds more (the first run pulls base images, so allow
-a few minutes). If one fails, see [Troubleshooting](#troubleshooting). To test an LLM stage, run
+warm Docker, and the Oracle (six runs: two solutions, three times each) plus Nop a minute or two
+more (the first run pulls base images, so allow a few minutes). **Run Static Checks** should then
+report no failures, and **Verify hashing** (in the same card) should pass. If one fails, see [Troubleshooting](#troubleshooting). To test an LLM stage, run
 **Sufficiency** next (needs the judge key).
 
 ### Troubleshooting
@@ -146,7 +157,8 @@ a few minutes). If one fails, see [Troubleshooting](#troubleshooting). To test a
 
 The submission page runs top to bottom in three sections: **Before the agent trials**, **Agent
 trials**, **After the agent trials**. A button that depends on an earlier stage is greyed out and
-says what it is waiting for. Only Build, Oracle, Nop, Sufficiency and Agent Trials are gates (the Grader Isolation card
+says what it is waiting for. Nop, Sufficiency, Agent Trials, the cheat trial, Tier 1, Tier 2, Run all tiers, the valid-variant, weak-answer and edge-case probes, and the hash proof
+stay closed until the Oracle passes (Tier 0 and the Worker probe do not need it). Only Build, Oracle, Nop, Sufficiency and Agent Trials are gates (the Grader Isolation card
 below is a sixth gate only when `GRADER_ISOLATION_ENFORCE=true`; by default it is advisory);
 everything else is **advisory** and never changes a gate. All of it comes from the task files
 and Harbor's own results, so a finding is a question for a reviewer, not a verdict.
@@ -158,7 +170,7 @@ Items marked **(4.1)** are new in the 4.1 branch; the rest came with 4.0.
 | Stage | What it checks | Needs |
 |---|---|---|
 | Validate & Build | Task contract, then builds `environment/Dockerfile`. | Docker |
-| Oracle | Runs the reference solution N times (default 3, every run kept); gate needs all to score 1. Each run shows time used against its limit, peak memory, platform, agent and verifier user, and tests passed. **(4.1)** Flags runs whose test count differs from the passing runs, marks a mix of 1 and 0 as flaky, and has a "Run under CPU load" button that adds stress runs kept outside the gate. | Docker |
+| Oracle | Runs every declared correct solution (at least two), each at least 3 times; the gate needs every run to score 1. Each run shows its solution, time used against its limit, peak memory, platform, agent and verifier user, and tests passed. **(4.1)** Flags runs whose test count differs from the passing runs, marks a solution that mixes 1 and 0 as flaky, and has a "Run under CPU load" button that adds stress runs kept outside the gate. | Docker |
 | Nop | A do-nothing agent must score 0. | Docker |
 | Image Contents **(4.1)** | After every build, lists the files and package versions the agent's container really has. Sufficiency uses it to tell files that never reach the container from visible ones. | Docker |
 | Fresh Build **(4.1)** | Rebuilds with no cache and freshly pulled base images, then runs one Oracle with every `RUN` step redone. Catches a dependency that no longer installs. | Docker, slow |

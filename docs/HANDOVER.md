@@ -67,12 +67,22 @@ Files: backend/storage/submissions/{id}/ (zip, extracted task, logs, Harbor outp
 
 **Nothing can be contested, except AI Detection.** A check passes or fails, and a task that fails is revised and uploaded again. The one manual ruling is on AI Detection: a named person approves it (it passes) or disapproves it (it fails), with a reason (`PUT /submissions/{id}/ai-detection-decision`). The ruling is kept with its history and stops applying when `instruction.md` or `solution/solve.sh` changes.
 
+### What a task author must provide
+
+| A task must | Checked by | If it does not | Rules |
+|---|---|---|---|
+| Ship at least two different correct solutions, declared in `[metadata] oracle_solutions` | Static Checks, Run Oracle | the Oracle is refused or fails, and later stages stay closed | [`docs/oracle-solutions.md`](oracle-solutions.md) |
+| Follow the standard `task.toml` format (separate verifier, `network_mode = "public"`) | Static Check `task_toml_format` | Static Checks fail | [`docs/task-toml-format.md`](task-toml-format.md) |
+| Store its expected answers as SHA-256 digests the grader really uses | Static Check `hash_answers`, "Verify hashing" | the check fails | [`docs/hash-rules.md`](hash-rules.md) |
+
+There are no exemptions: a task that fails is revised and uploaded again. `examples/smoke-task` meets all three.
+
 ### Gates (the task must pass these)
 
 | Stage | What it does |
 |---|---|
 | Build | Validates the task files, then builds `environment/Dockerfile`. |
-| Oracle | Runs the reference solution through Harbor, N times (default 3, every run kept). Passes only when every run scores 1. Shows time, memory and the tests passed for each run, flags a run whose test count differs from the others, and marks a mix of 1 and 0 as flaky. A "Run under CPU load" option adds stress runs outside the gate. |
+| Oracle | Runs every correct solution the task declares (at least two, `[metadata] oracle_solutions`) through Harbor, each at least 3 times, every run kept. Passes only when every solution has 3 passing runs and no run fails; Nop, Sufficiency, Agent Trials, the cheat trial, Tier 1, Tier 2, Run all tiers, the valid-variant, weak-answer and edge-case probes, and the hash proof refuse until then (Tier 0 and the Worker probe do not need it). A task with one solution, or two identical ones, is refused. Shows time, memory and the tests passed for each run, flags a run whose test count differs from the others, and marks a solution that mixes 1 and 0 as flaky. A "Run under CPU load" option adds stress runs outside the gate. |
 | Nop | A do-nothing agent must score 0. |
 | Sufficiency | An LLM judge reads the instruction, the files the agent can see and the hidden tests, and lists requirements the tests enforce that the instruction does not establish. Can run 1 to 3 times; the majority decides and disagreement is shown. |
 | Agent Trials | Runs N real agent attempts (Codex, Claude Code or Terminus-2; you pick the agent, model, reasoning level and a cost cap). Shows pass rate, pass@k for every k, and each trial's tests, time, memory, tokens and cost. Failed trials with no reward and a known infrastructure error are retried once automatically. |
@@ -174,6 +184,24 @@ here that mentions one of them would be wrong for this branch.
     from inside. A control run as plain root fails 9 of 10. Passed on pg-wal-recovery and the Reward Kit test task.
     Advisory; skipped when the grader has no Worker. It uses the default `private_paths` only.
 
+
+### Author rules added on this branch
+
+- **Two correct solutions** (`services/solution_variants.py`): see the Oracle row above. Static Checks
+  `oracle_solutions` and `identical_solutions`; identical means the same code, so renamed or reordered code is
+  not caught. Tier 1 accepts a patch only if every solution still scores 1.
+- **`task.toml` format** (`services/toml_format.py`): `task_toml_format` fails missing, unknown, wrong-type or
+  wrong-value fields; `task_toml_extra_fields` only flags extra `[metadata]` fields.
+- **Hashed answers** (`services/hash_checks.py`): `hash_answers` fails a task with no digest;
+  `tests_plain_answers` warns; "Verify hashing" damages each digest and expects the score to fall. It does not
+  show that every answer is hashed or that a short answer cannot be guessed. Why it works this way:
+  [`hash-discussion.md`](hash-discussion.md).
+- **AI Detection ruling** (`services/ai_audit.py`): the only manual ruling left; a named person approves or
+  disapproves with a reason.
+- **What still blocks nothing:** a failed Static Check (hashing, `task.toml`) does not stop agent runs. Only the
+  Oracle, and Grader Isolation when `GRADER_ISOLATION_ENFORCE=true`, close later stages.
+- **Older uploads:** Oracle runs recorded before the two-solution rule have no solution and no longer count, so
+  an old submission shows its Oracle as failed until the task is revised.
 
 ### Terminal-Bench 5.0 additions (branch `harbor-5.0`)
 

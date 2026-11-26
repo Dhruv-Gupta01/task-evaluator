@@ -101,7 +101,7 @@ judge labels it
        apply to a scratch copy of the hardened copy
           |
           v
-       Oracle gate: Oracle must still score 1 on the patched copy
+       Oracle gate: every declared solution must still score 1 on the patched copy
           |
           v
        replay gate: the winning attempt's own output is re-graded
@@ -177,7 +177,7 @@ The cross-tier loop (run Tier 0, patch, run Tier 1, patch, run Tier 2 against th
 ### What is not built
 
 - **The cross-tier orchestrator** that chains the tiers.
-- **A solver re-run after patching.** The Oracle gate only runs the author's own solution. A patch that makes the task unsolvable for real agents can still pass it. This is the paper's main failure mode: iterative hardening cut unhinted attack success from 39.2% to 16.7% on Terminal-Bench and cost 11 percentage points of legitimate pass rate. Until a solver re-run exists, a person must read every `hardened.diff`.
+- **A solver re-run after patching.** The Oracle gate only runs the author's own solutions (every one in `oracle_solutions`). A patch that makes the task unsolvable for real agents can still pass it. This is the paper's main failure mode: iterative hardening cut unhinted attack success from 39.2% to 16.7% on Terminal-Bench and cost 11 percentage points of legitimate pass rate. Until a solver re-run exists, a person must read every `hardened.diff`.
 - **Tier 0 probes derived from Static Checks findings.**
 - **Hashing for JSONL answer files.** `hash_answers` handles JSON only.
 - **An independent-tool comparison** and an author-supplied folder of equivalent or false solutions (Sufficiency recall items).

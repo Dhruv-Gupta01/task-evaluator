@@ -61,6 +61,8 @@ one `grep` or one file read away from a yes/no answer.
       elsewhere, on different task copies.
 - [ ] Oracle run count matches what was actually promised/expected (e.g. "5
       runs" in the README should mean 5 files are actually there, not 4).
+- [ ] Oracle evidence covers **every** declared solution (`oracle_solutions`, at
+      least two), each with at least 3 passing runs; name the solution of each run.
 
 ## Prose / overclaiming
 

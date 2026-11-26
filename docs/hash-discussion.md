@@ -117,7 +117,7 @@ Code: `backend/app/services/hash_checks.py`. Tests: `test_hash_checks.py`, `test
 **Not built**
 - **Blocking.** Nothing stops agent runs. A failed `hash_answers` marks Static Checks failed, which is still
   advisory.
-- **Reviewer exemption and sign-off** (rules 5 and step 5 of the rules).
+- **Reviewer exemption and sign-off:** decided against (section 10).
 - Reading inline asserts or shell strings as plain answers.
 
 ## 8. Platform results
@@ -143,8 +143,16 @@ having no hash (smoke-task and webtask included), and webtask's shell variable i
 - That the agent cannot get the answer **elsewhere**, for example from a reachable server.
 - That a **decoy** was not used: hashing one unimportant value satisfies the static check, and passes the proof.
 
-## 10. Decisions still open
+## 10. Decisions since
 
-1. Should a failed check **block** agent runs, and with a reviewer override?
-2. What happens to a task with nothing to hash, or an answer that cannot be hashed (a wide tolerance)?
-3. Every existing task now fails `hash_answers`. Is that intended before authors have converted them?
+- **No exemptions.** Nothing can be contested except AI Detection, so a task that cannot hash an answer has to be
+  changed.
+- **`hash_answers` stays a failure**, although it blocks nothing: Static Checks show failed and agent runs can
+  still start.
+- **The sample task was converted** (`examples/smoke-task`): 8 digests, both solutions score 1, Nop 0, and the
+  proof shows all 8 used. Its answers are small numbers, so they could still be guessed.
+- The proof runs the default solution only, not every declared solution.
+
+## 11. Still open
+
+Should a failed hash check block agent runs?

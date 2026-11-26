@@ -50,8 +50,8 @@ A `solution/` change is a patch version bump.
 | Static Checks (`identical_solutions`) | no two solutions are the same code (comments, blank lines and indentation ignored) |
 | Run Oracle | every declared solution scores 1 at least 3 times and no run fails |
 
-**The Oracle is a gate for what follows.** Nop, Sufficiency, Agent Trials, the cheat trial, the probes, the
-tiers and the hash proof stay closed until it passes. A task with only one solution is not allowed: there is no
+**The Oracle is a gate for what follows.** Nop, Sufficiency, Agent Trials, the cheat trial, Tier 1, Tier 2, Run all tiers, the valid-variant, weak-answer and edge-case probes, and the hash proof
+stay closed until it passes (Tier 0 and the Worker probe do not need it). A task with only one solution is not allowed: there is no
 exemption.
 
 When Tier 1 patches a task, every declared solution must still score 1 on the patched copy.

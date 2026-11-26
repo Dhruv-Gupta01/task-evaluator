@@ -67,7 +67,7 @@ Task code is untrusted (arbitrary Dockerfiles and solutions) and runs on the sam
 | Change | Needed? | Notes |
 |---|---|---|
 | `DOCKER_PLATFORM=linux/amd64` | Required | The default is `linux/arm64` (Apple Silicon). Risk: results measured on arm64 here may differ on amd64 for architecture-sensitive tasks; re-check a few known tasks after the move |
-| Add `PUT` to CORS methods (`backend/app/main.py`) | Required | The UI's `reviewer-decision` call uses PUT; cross-origin it fails without it. Not needed if proxy serves frontend and API on one origin, but cheap to fix |
+| Add `PUT` to CORS methods (`backend/app/main.py`) | Required | The UI's AI Detection ruling (`ai-detection-decision`) uses PUT; cross-origin it fails without it. Not needed if proxy serves frontend and API on one origin, but cheap to fix |
 | Frontend build for Node instead of Cloudflare | Required | **Verified locally**: `NITRO_PRESET=node-server VITE_API_BASE_URL=<url> bun run build` succeeds, produces `.output/server/index.mjs`, and `PORT=3999 node .output/server/index.mjs` served the home page with HTTP 200 |
 | `VITE_API_BASE_URL` at build time | Required | Baked into the bundle; use the real URL, or a same-origin path behind the proxy |
 | Proxy login (outside the code) | Required | Cloudflare Access is free below 50 users (Cloudflare pricing page); login inside the app would mean users and ownership in the code, which is days of work |
