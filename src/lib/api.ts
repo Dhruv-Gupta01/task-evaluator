@@ -905,6 +905,15 @@ export interface HashProofResult {
   note: string;
 }
 
+// Each declared correct solution run as an Oracle trial; at least two are required.
+export interface SolutionVariantsResult {
+  status: StageStatus;
+  values: { value: string; status: string; rewards: (number | null)[] }[];
+  runs_per_value: number;
+  note: string;
+  declared: string[];
+}
+
 export interface Submission {
   id: string;
   task_name: string;
@@ -927,6 +936,7 @@ export interface Submission {
   grader_isolation: GraderIsolationResult;
   worker_probe: WorkerProbeResult;
   hash_proof: HashProofResult;
+  solution_variants: SolutionVariantsResult;
   ai_detection: AiDetectionResult;
   answer_exposure: AnswerExposureResult;
   tier0: Tier0Result;
@@ -1168,6 +1178,10 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(handle<unknown>),
+  solutionVariants: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/solution-variants`, { method: "POST" }).then(
+      handle<unknown>,
+    ),
   hashProof: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/hash-proof`, { method: "POST" }).then(
       handle<unknown>,

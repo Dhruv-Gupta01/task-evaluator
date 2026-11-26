@@ -47,6 +47,7 @@ import { GraderIsolationPanel } from "@/components/GraderIsolationPanel";
 import { WorkerProbePanel } from "@/components/WorkerProbePanel";
 import { HashProofPanel } from "@/components/HashProofPanel";
 import { AiRulingPanel } from "@/components/AiRulingPanel";
+import { SolutionVariantsPanel } from "@/components/SolutionVariantsPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -104,6 +105,7 @@ function SubmissionDetail() {
         isActive(d.answer_exposure.status) ||
         isActive(d.worker_probe?.status ?? "not-run") ||
         isActive(d.hash_proof?.status ?? "not-run") ||
+        isActive(d.solution_variants?.status ?? "not-run") ||
         isActive(d.tier0.status) ||
         isActive(d.tier1.status) ||
         isActive(d.tier2.status) ||
@@ -700,6 +702,19 @@ function SubmissionDetail() {
               </ul>
             </div>
           )}
+        </StageCard>
+
+        <StageCard
+          title="Solution Variants"
+          description="At least two different correct solutions are required. Each one the task declares is run as an Oracle trial, 3 times, and every run must score 1."
+          status={data.solution_variants.status}
+        >
+          <SolutionVariantsPanel
+            id={id}
+            data={data.solution_variants}
+            built={data.build.status === "passed"}
+            onChange={invalidate}
+          />
         </StageCard>
 
         {/* Nop */}

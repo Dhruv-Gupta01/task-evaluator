@@ -403,6 +403,21 @@ class HashProofResult(BaseModel):
     note: str = ""
 
 
+class SolutionValueResult(BaseModel):
+    value: str
+    status: str  # pending | running | passed | failed
+    rewards: list[float | None] = []
+
+
+class SolutionVariantsResult(BaseModel):
+    """Each declared correct solution run as an Oracle trial; passed only when every run scored 1."""
+    status: StageStatus
+    values: list[SolutionValueResult] = []
+    runs_per_value: int = 0
+    note: str = ""
+    declared: list[str] = []
+
+
 class GraderIsolationResult(BaseModel):
     """The Grader Isolation gate (way 2 of the Worker flag). `state` is ok / missing / unclear;
     `analysis` is the way-1 result (not_required, present, equivalent, missing). Advisory unless `enforced`.
@@ -482,6 +497,7 @@ class SubmissionSchema(BaseModel):
     grader_isolation: GraderIsolationResult = GraderIsolationResult(status="not-run")
     worker_probe: WorkerProbeResult = WorkerProbeResult(status="not-run")
     hash_proof: HashProofResult = HashProofResult(status="not-run")
+    solution_variants: SolutionVariantsResult = SolutionVariantsResult(status="not-run")
     ai_detection: AiDetectionResult
     answer_exposure: AnswerExposureResult
     tier0: Tier0Result

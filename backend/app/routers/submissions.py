@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.models import LlmSpend, Run, Submission
 from app.schemas import SubmissionListItem, SubmissionSchema, UploadResponse
-from app.services import ai_audit, budget, grader_isolation, submission_diff, submission_service, task_runner, versions
+from app.services import ai_audit, budget, grader_isolation, solution_variants, submission_diff, submission_service, task_runner, versions
 from app.workers import task_queue
 
 router = APIRouter()
@@ -1058,6 +1058,7 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
         },
         "worker_probe": schema.worker_probe.model_dump(),
         "hash_proof": schema.hash_proof.model_dump(),
+        "solution_variants": schema.solution_variants.model_dump(),
         "answer_exposure": {
             "status": schema.answer_exposure.status,
             "not_run": schema.answer_exposure.status == "not-run",
@@ -1199,3 +1200,26 @@ def set_ai_detection_decision(submission_id: str, body: AiDetectionDecision, db:
     db.commit()
     db.refresh(submission)
     return submission_service._ai_detection_result(submission).model_dump()
+
+
+@router.post("/submissions/{submission_id}/solution-variants", status_code=202)
+async def trigger_solution_variants(submission_id: str, runs: int = 3, db: Session = Depends(get_db)) -> dict[str, str]:
+    """Runs every correct solution the task declares (`[metadata] oracle_solutions`) as an Oracle trial,
+    `runs` times each (1..5). Needs Build. Every run must score 1."""
+    submission, task_root = _task_root_for(submission_id, db)
+    if not 1 <= runs <= 5:
+        raise HTTPException(status_code=400, detail="runs must be between 1 and 5")
+    if submission.build_status != "passed":
+        raise HTTPException(status_code=400, detail="Build must pass first")
+    found = solution_variants.problems(task_root)
+    if found:
+        raise HTTPException(status_code=400, detail="; ".join(found))
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="solution_variants", run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind="solution_variants", run_index=0)
+        db.add(run)
+    run.status, run.logs = "pending", None
+    db.commit()
+    await task_queue.submit(f"{submission_id}:solution_variants", task_runner.run_solution_variants_stage(submission_id, runs))
+    return {"status": "started"}
+

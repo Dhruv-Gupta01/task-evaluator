@@ -428,6 +428,12 @@ def _hashed_answers(task_root: Path, report) -> None:
     check_hashed_answers(task_root, report)
 
 
+def _oracle_solutions(task_root: Path, report) -> None:
+    from app.services.solution_variants import check_oracle_solutions
+
+    check_oracle_solutions(task_root, report)
+
+
 def run_static_checks(task_root: Path) -> StaticCheckReport:
     report = StaticCheckReport()
     check_instruction(task_root / "instruction.md", report)
@@ -452,4 +458,5 @@ def run_static_checks(task_root: Path) -> StaticCheckReport:
         except Exception as exc:  # advisory: one odd file must not break the stage
             report.add(check.__name__, "info", f"check could not run: {type(exc).__name__}")
     _hashed_answers(task_root, report)
+    _oracle_solutions(task_root, report)
     return report

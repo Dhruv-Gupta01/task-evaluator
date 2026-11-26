@@ -6,7 +6,7 @@ from pathlib import Path
 
 from app.config import get_settings
 from app.models import LlmSpend, Run, Submission
-from app.services import ai_audit, grader_isolation, image_inventory, verifier_report, versions
+from app.services import ai_audit, grader_isolation, image_inventory, solution_variants, verifier_report, versions
 from app.services.harbor_runner import CODEX_BAKE_NOTE_MARKER
 from app.services.task_config import TaskConfig
 from app.services.tier2 import memory as tier2_memory
@@ -37,6 +37,7 @@ from app.schemas import (
     StageStatus,
     GraderIsolationResult,
     HashProofResult,
+    SolutionVariantsResult,
     WorkerProbeCheck,
     WorkerProbeResult,
     StaticChecksResult,
@@ -573,6 +574,19 @@ def _hash_proof_result(run: Run | None) -> HashProofResult:
         return HashProofResult(status="failed", verdict="error", note="the stored result could not be read")
 
 
+def _solution_variants_result(submission: Submission) -> SolutionVariantsResult:
+    root = Path(submission.extracted_path) if submission.extracted_path else None
+    declared = solution_variants.declared_values(root) if root else []
+    run = _get_run(submission, "solution_variants")
+    if run is None:
+        return SolutionVariantsResult(status="not-run", declared=declared)
+    try:
+        detail = json.loads(run.logs) if run.logs else {}
+        return SolutionVariantsResult(status=run.status, declared=declared, **detail)  # type: ignore[arg-type]
+    except (ValueError, TypeError):
+        return SolutionVariantsResult(status="failed", note="the stored result could not be read", declared=declared)
+
+
 def _regrade_result(run: Run | None) -> RegradeResult:
     if run is None:
         return RegradeResult(status="not-run", logs=None)
@@ -622,6 +636,7 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         grader_isolation=_grader_isolation_result(submission),
         worker_probe=_worker_probe_result(_get_run(submission, "worker_probe")),
         hash_proof=_hash_proof_result(_get_run(submission, "hash_proof")),
+        solution_variants=_solution_variants_result(submission),
         ai_detection=_ai_detection_result(submission),
         answer_exposure=_answer_exposure_result(_get_run(submission, "answer_exposure")),
         tier0=_tier0_result(_get_run(submission, "tier0_probes")),
@@ -1140,6 +1155,14 @@ def _ai_detection_line(schema) -> str:
     return line
 
 
+def _solution_variants_line(schema) -> str:
+    result = schema.solution_variants
+    if result.status == "not-run":
+        return f"- Solution variants: not run yet ({len(result.declared)} declared; at least 2 are required)"
+    parts = [f"SOLUTION={v.value} {v.status} ({', '.join('-' if r is None else f'{r:g}' for r in v.rewards)})" for v in result.values]
+    return f"- Solution variants: {result.status}" + (f" -- {'; '.join(parts)}" if parts else "")
+
+
 def build_summary_markdown(
     schema: SubmissionSchema, total_cost_usd: float | None, cost_report: dict | None = None
 ) -> str:
@@ -1231,6 +1254,7 @@ def build_summary_markdown(
         _worker_line(schema),
         _worker_probe_line(schema),
         _hash_proof_line(schema),
+        _solution_variants_line(schema),
         _ai_detection_line(schema),
         (
             f"- Static Checks: {_fmt_status(schema.static_checks.status)}"

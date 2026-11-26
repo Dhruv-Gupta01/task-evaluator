@@ -1,0 +1,102 @@
+"""At least two different correct solutions per task (authors: docs/oracle-solutions.md).
+
+The Harbor convention: `solution/solve.sh` reads `$SOLUTION` and picks one of several solutions, and the Oracle
+is run with `--ae SOLUTION=<value>`. A task declares its correct values in `[metadata] oracle_solutions`; they are
+never guessed from the script, which may also hold deliberately wrong ones.
+
+The static check can show that two values are declared and wired up, and catch two that run identical text. It
+cannot tell whether two scripts are really different approaches; nothing automatic can.
+"""
+from __future__ import annotations
+
+import re
+import tomllib
+from pathlib import Path
+
+ENV = "SOLUTION"
+KEY = "oracle_solutions"
+MIN_VALUES, MAX_VALUES = 2, 10
+_VALUE_RE = re.compile(r"[A-Za-z0-9_.\-]{1,40}")
+_READS_RE = re.compile(r"\$\{?SOLUTION\b|environ(?:\.get)?[\[(]\s*['\"]SOLUTION['\"]|getenv\(\s*['\"]SOLUTION['\"]")
+_ARM_RE = re.compile(r"^\s*\(?([A-Za-z0-9_.\-\"'| ]+)\)(.*?);;", re.M | re.S)
+
+
+def _toml(task_root: Path) -> dict:
+    try:
+        return tomllib.loads((task_root / "task.toml").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def declared_values(task_root: Path) -> list[str]:
+    """The distinct, usable values of `[metadata] oracle_solutions`, in the order given; [] when absent or invalid."""
+    values = (_toml(task_root).get("metadata") or {}).get(KEY)
+    if not isinstance(values, list) or not all(isinstance(v, str) and _VALUE_RE.fullmatch(v) for v in values):
+        return []
+    return list(dict.fromkeys(values))[:MAX_VALUES]
+
+
+def _code(text: str) -> str:
+    """A script without comments and blank lines, so two copies that differ only there compare equal."""
+    return "\n".join(line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#"))
+
+
+def _arm_text(command: str, solution: Path) -> str:
+    """What one `case` arm runs: the command, with any script it names under solution/ read in."""
+    out = _code(command)
+    for name in re.findall(r"[\w./\-]+\.(?:sh|py)", command):
+        path = solution / Path(name).name
+        if path.is_file():
+            out = out.replace(name, _code(path.read_text(errors="ignore")))
+    return out
+
+
+def _identical_values(task_root: Path, values: list[str]) -> list[str]:
+    solve = task_root / "solution" / "solve.sh"
+    if not solve.is_file():
+        return []
+    arms: dict[str, str] = {}
+    for labels, command in _ARM_RE.findall(solve.read_text(errors="ignore")):
+        for label in labels.split("|"):
+            arms[label.strip().strip("\"'")] = command
+    texts: dict[str, str] = {}
+    for value in values:
+        if value in arms:
+            text = _arm_text(arms[value], task_root / "solution")
+            if text in texts:
+                return [texts[text], value]
+            texts[text] = value
+    return []
+
+
+def problems(task_root: Path) -> list[str]:
+    values = declared_values(task_root)
+    found = []
+    if len(values) < MIN_VALUES:
+        found.append(
+            f"task.toml must declare at least {MIN_VALUES} correct solutions as `[metadata] {KEY} = [\"1\", \"2\"]` "
+            "(distinct values; letters, digits, _ . -)"
+        )
+    solution = task_root / "solution"
+    reads = solution.is_dir() and any(
+        _READS_RE.search(p.read_text(errors="ignore")) for p in solution.rglob("*") if p.is_file() and p.stat().st_size < 1_000_000
+    )
+    if not reads:
+        found.append("solution/solve.sh must read $SOLUTION to pick which solution to run")
+    if ENV in ((_toml(task_root).get("solution") or {}).get("env") or {}):
+        found.append("remove SOLUTION from [solution.env]: Harbor lets it override the value being tested")
+    if len(values) >= MIN_VALUES and (same := _identical_values(task_root, values)):
+        found.append(f"SOLUTION={same[0]} and SOLUTION={same[1]} run the same code, so they are not two different solutions")
+    return found
+
+
+def check_oracle_solutions(task_root: Path, report) -> None:
+    found = problems(task_root)
+    if found:
+        report.add("oracle_solutions", "fail", "; ".join(found) + " (docs/oracle-solutions.md).")
+    else:
+        report.add(
+            "oracle_solutions", "info",
+            f"Declared correct solutions: {', '.join(declared_values(task_root))}. Run them on the Solution variants card; "
+            "each must score 1. Whether they are really different approaches is not something this check can tell.",
+        )

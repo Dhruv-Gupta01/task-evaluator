@@ -925,6 +925,7 @@ async def run_job(
     extra_note: str = "",
     fresh_build: bool = False,
     agent_timeout_override: int | None = None,
+    agent_env: dict[str, str] | None = None,
 ) -> HarborJobResult:
     """Run `harbor run` with `n_attempts` trials of `agent` against the task
     at `task_root`. If `cost_cap_usd` is set, the job is stopped once the cost
@@ -975,6 +976,8 @@ async def run_job(
         cmd += ["--model", model]
     for key, value in (agent_kwargs or {}).items():
         cmd += ["--agent-kwarg", f"{key}={value}"]
+    for key, value in (agent_env or {}).items():
+        cmd += ["--ae", f"{key}={value}"]  # an environment variable for the agent (the oracle's solve.sh reads it)
 
     # C9: every trial's logs start with exactly what ran it, so a result can
     # be traced back to the precise command/config/harness version rather
@@ -1160,10 +1163,12 @@ async def run_single(
     timeout_sec: float,
     extra_note: str = "",
     fresh_build: bool = False,
+    agent_env: dict[str, str] | None = None,
 ) -> TrialOutcome:
-    """One trial of a model-free agent (oracle/nop)."""
+    """One trial of a model-free agent (oracle/nop). `agent_env` becomes `--ae KEY=VALUE`."""
     result = await run_job(
-        task_root, agent, jobs_dir, job_name, timeout_sec, extra_note=extra_note, fresh_build=fresh_build
+        task_root, agent, jobs_dir, job_name, timeout_sec, extra_note=extra_note, fresh_build=fresh_build,
+        agent_env=agent_env,
     )
     if result.trials:
         return result.trials[0]

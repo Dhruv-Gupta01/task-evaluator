@@ -284,6 +284,17 @@ Rules for authors: [`docs/hash-rules.md`](docs/hash-rules.md). Why it works this
 
 Nothing blocks agent runs on these yet.
 
+### At least two correct solutions
+
+Rules for authors: [`docs/oracle-solutions.md`](docs/oracle-solutions.md).
+
+| Check | What it does | Where it shows |
+|---|---|---|
+| `oracle_solutions` | **Fails** a task that does not declare two correct solutions in `[metadata] oracle_solutions`, whose `solution/` never reads `$SOLUTION`, or whose values run identical code | Static Checks |
+| Solution Variants | Runs each declared value as an Oracle trial 3 times; every run must score 1 | Solution Variants card, evidence |
+
+Nothing blocks agent runs on these yet, and the Oracle gate is unchanged.
+
 ## Notes
 
 - **Docker platform**: every build and container run (Build, and Oracle/Nop/Agent Trials via

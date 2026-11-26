@@ -3263,3 +3263,53 @@ async def run_hash_proof_stage(submission_id: str) -> None:
         db.commit()
     finally:
         db.close()
+
+
+async def run_solution_variants_stage(submission_id: str, runs: int = 3) -> None:
+    """Each declared correct solution as its own Oracle trial (`--ae SOLUTION=<value>`), `runs` times, one at a
+    time. Passes only when every run of every value scores 1. Not a Gate 1 run and not part of the task-version
+    comparison (only an environment variable differs). Run kind "solution_variants", logs {values, note}."""
+    from app.services import solution_variants
+
+    db = SessionLocal()
+    try:
+        submission = db.get(Submission, submission_id)
+        if submission is None or submission.extracted_path is None:
+            return
+        run = _get_or_create_run(db, submission_id, "solution_variants", 0)
+        run.status, run.reward, run.logs = "running", None, None
+        run.started_at = datetime.now(UTC)
+        db.commit()
+        task_root = Path(submission.extracted_path)
+        values = [{"value": v, "status": "pending", "rewards": []} for v in solution_variants.declared_values(task_root)]
+
+        def save(status: str, note: str = "") -> None:
+            run.status = status
+            run.logs = json.dumps({"values": values, "runs_per_value": runs, "note": note})
+            db.commit()
+
+        try:
+            timeout_sec = _oracle_timeout_sec(_get_task_config(submission))
+            jobs = task_root.parent / "runs" / "solution_variants"
+            for item in values:
+                item["status"] = "running"
+                for index in range(runs):
+                    outcome = await harbor_runner.run_single(
+                        task_root, "oracle", jobs, f"solution-{uuid.uuid4().hex[:8]}", timeout_sec,
+                        agent_env={solution_variants.ENV: item["value"]},
+                        extra_note=f"(solution variant: SOLUTION={item['value']}, run {index + 1})",
+                    )
+                    item["rewards"].append(outcome.reward)
+                    save("running")
+                item["status"] = "passed" if all(r == 1 for r in item["rewards"]) else "failed"
+            passed = len(values) >= solution_variants.MIN_VALUES and all(v["status"] == "passed" for v in values)
+            run.reward = 1 if passed else 0
+            run.finished_at = datetime.now(UTC)
+            save("passed" if passed else "failed")
+        except Exception:
+            run.reward = None
+            run.finished_at = datetime.now(UTC)
+            save("failed", traceback.format_exc()[-1500:])
+    finally:
+        db.close()
+
