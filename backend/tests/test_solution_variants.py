@@ -249,3 +249,26 @@ def test_one_solution_that_sometimes_fails_is_flaky_and_named(env):
     add_runs(Session, [("1", 1)] * 3 + [("2", 1), ("2", 0), ("2", 1)])
     result = oracle(client)
     assert result["flaky"] is True and "SOLUTION=2: 1 of 3" in result["flaky_note"] and "SOLUTION=1" not in result["flaky_note"]
+
+
+# ---- the probes and tiers use the same rule, not "some Oracle run scored 1" -----------------------------
+
+LATER = ("variant-probe", "weak-probe", "edge-cases?probe=true", "tier1", "tier2", "tiers")
+
+
+def test_one_passing_solution_does_not_open_the_probes_or_tiers(env):
+    client, root, Session = env
+    declare(root)
+    add_runs(Session, [("1", 1)] * 3 + [("2", 0)] * 3)
+    for path in LATER:
+        response = client.post(f"/submissions/s1/{path}")
+        assert response.status_code == 400 and "Oracle" in response.json()["detail"], (path, response.status_code)
+
+
+def test_all_solutions_passing_opens_them(env):
+    client, root, Session = env
+    declare(root)
+    add_runs(Session, ALL_GOOD)
+    for path in LATER:
+        response = client.post(f"/submissions/s1/{path}")
+        assert "Oracle" not in str(response.json()), (path, response.json())

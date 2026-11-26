@@ -539,11 +539,7 @@ async def trigger_variant_probe(submission_id: str, db: Session = Depends(get_db
     passing Oracle run first, so a failure can't be blamed on a broken task."""
     _raise_if_over_budget(db, budget.judge_exceeded_message(db))
     _require_built_submission(submission_id, db)
-    oracle_passed = (
-        db.query(Run).filter_by(submission_id=submission_id, kind="oracle", reward=1).first() is not None
-    )
-    if not oracle_passed:
-        raise HTTPException(status_code=400, detail="run the Oracle and get a pass first")
+    _require_oracle_passed(submission_id, db)
 
     run = db.query(Run).filter_by(submission_id=submission_id, kind="variant_probe", run_index=0).one_or_none()
     if run is None:
@@ -566,8 +562,7 @@ async def trigger_weak_probe(submission_id: str, db: Session = Depends(get_db)) 
     instruction. Needs a passing Oracle run first."""
     _raise_if_over_budget(db, budget.judge_exceeded_message(db))
     _require_built_submission(submission_id, db)
-    if db.query(Run).filter_by(submission_id=submission_id, kind="oracle", reward=1).first() is None:
-        raise HTTPException(status_code=400, detail="run the Oracle and get a pass first")
+    _require_oracle_passed(submission_id, db)
     run = db.query(Run).filter_by(submission_id=submission_id, kind="weak_probe", run_index=0).one_or_none()
     if run is None:
         run = Run(submission_id=submission_id, kind="weak_probe", run_index=0)
@@ -599,8 +594,7 @@ async def trigger_edge_cases(
         raise HTTPException(status_code=400, detail="probe_covered needs probe=true")
     if probe:
         _require_built_submission(submission_id, db)
-        if db.query(Run).filter_by(submission_id=submission_id, kind="oracle", reward=1).first() is None:
-            raise HTTPException(status_code=400, detail="run the Oracle and get a pass first")
+        _require_oracle_passed(submission_id, db)
     run = db.query(Run).filter_by(submission_id=submission_id, kind="edge_cases", run_index=0).one_or_none()
     if run is None:
         run = Run(submission_id=submission_id, kind="edge_cases", run_index=0)
@@ -695,8 +689,7 @@ async def trigger_tier1(
     _raise_if_over_budget(db, budget.exceeded_message(db))
     _require_built_submission(submission_id, db)
     _require_grader_isolation(submission_id, db)
-    if db.query(Run).filter_by(submission_id=submission_id, kind="oracle", reward=1).first() is None:
-        raise HTTPException(status_code=400, detail="run the Oracle and get a pass first")
+    _require_oracle_passed(submission_id, db)
     _queue_row(db, submission_id, "tier1_loop")
     await task_queue.submit(
         f"{submission_id}:tier1_loop",
@@ -736,8 +729,7 @@ async def trigger_tier_cycle(
     _raise_if_over_budget(db, budget.exceeded_message(db))
     _require_built_submission(submission_id, db)
     _require_grader_isolation(submission_id, db)
-    if db.query(Run).filter_by(submission_id=submission_id, kind="oracle", reward=1).first() is None:
-        raise HTTPException(status_code=400, detail="run the Oracle and get a pass first")
+    _require_oracle_passed(submission_id, db)
     for kind in ("tier_cycle", "tier0_probes", "tier1_loop"):
         _queue_row(db, submission_id, kind)
     await task_queue.submit(
@@ -788,8 +780,7 @@ async def trigger_tier2(
     _raise_if_over_budget(db, budget.exceeded_message(db))
     _require_built_submission(submission_id, db)
     _require_grader_isolation(submission_id, db)
-    if db.query(Run).filter_by(submission_id=submission_id, kind="oracle", reward=1).first() is None:
-        raise HTTPException(status_code=400, detail="run the Oracle and get a pass first")
+    _require_oracle_passed(submission_id, db)
     _queue_row(db, submission_id, "tier2_loop")
     await task_queue.submit(
         f"{submission_id}:tier2_loop",
