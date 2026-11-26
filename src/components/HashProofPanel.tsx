@@ -84,7 +84,7 @@ export function HashProofPanel({
       {ran && data.note && <p className="text-amber-700">{data.note}</p>}
       <p className="text-xs text-muted-foreground">
         A pass shows the stored digests are used. It does not show every answer is hashed, or that a
-        short answer cannot be guessed. A reviewer confirms both.
+        short answer cannot be guessed. This check cannot tell either.
       </p>
     </div>
   );

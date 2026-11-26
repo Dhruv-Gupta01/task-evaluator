@@ -296,6 +296,10 @@ Rules for authors: [`docs/oracle-solutions.md`](docs/oracle-solutions.md).
 
 A task with one solution is refused. Tier 1 accepts a patch only if every declared solution still scores 1.
 
+### task.toml format
+
+Rules for authors: [`docs/task-toml-format.md`](docs/task-toml-format.md). Static Check `task_toml_format` **fails** a missing, unknown or wrong-type field, a `network_mode` other than `"public"`, a verifier that is not `separate`, and `allow_internet`; `task_toml_extra_fields` only flags extra `[metadata]` fields and a top-level `version`.
+
 ## Notes
 
 - **Docker platform**: every build and container run (Build, and Oracle/Nop/Agent Trials via

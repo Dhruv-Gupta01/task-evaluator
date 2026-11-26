@@ -435,6 +435,12 @@ def _oracle_solutions(task_root: Path, report) -> None:
     check_identical_solutions(task_root, report)
 
 
+def _toml_format(task_root: Path, report) -> None:
+    from app.services.toml_format import check_task_toml_format
+
+    check_task_toml_format(task_root, report)
+
+
 def run_static_checks(task_root: Path) -> StaticCheckReport:
     report = StaticCheckReport()
     check_instruction(task_root / "instruction.md", report)
@@ -460,4 +466,5 @@ def run_static_checks(task_root: Path) -> StaticCheckReport:
             report.add(check.__name__, "info", f"check could not run: {type(exc).__name__}")
     _hashed_answers(task_root, report)
     _oracle_solutions(task_root, report)
+    _toml_format(task_root, report)
     return report
