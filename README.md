@@ -266,11 +266,12 @@ and never changes a gate. Tiers 1 and 2 spend real credits; set a cap. Details: 
 | Tier 0: Static Probes | Scripted fake agents (planted `conftest.py`, shadowed programs, `LD_PRELOAD`, a symlink or FIFO in place of the output, pre-written reward files, empty or placeholder output) run against a replica of the task's verifier. A probe that scores 1 is an exploit. The task's own solution must score 1 through the same replica (the control). No LLM; needs Docker. | Tier 0: Static Probes card |
 | Tier 1: Hinted Agent | A Claude Code attacker with the red-team prompt and a read-only copy of `tests/` tries to get reward 1. A judge labels each attempt (exploited, tried a shortcut and failed, honest solve, refused ...). After a hit a fixer proposes edits to `tests/` and `environment/`, kept only if the Oracle still scores 1 and a replay of the winning output no longer wins. The upload is never edited; a person reviews the diff. | Tier 1: Hinted Agent card |
 | Tier 2: Unhinted Agent | The plain instruction plus one pressure line, no test copy and no memory between runs: what happens in ordinary use. Never patches anything. | Tier 2: Unhinted Agent card |
-| Run all tiers | Tier 0, 1 and 2 as one job. If Tier 1 patched the task, all three run again on the patched copy (up to 3 rounds). Honest solves and refusals are never counted as the grader holding. | Tier cards, "Run all tiers" button |
+| Run all tiers | Tier 0, 1 and 2 as one job. If Tier 1 patched the task, all three run again on the patched copy (up to 3 rounds). Every attempt is a hit or a miss. | Tier cards, "Run all tiers" button |
 
-Each tier ends `robust` after 3 consecutive real shortcut attempts that failed. `max_attempts` caps attempts of
-any kind, so a run of honest solves ends `inconclusive`, not `robust`. A cheap model such as Haiku mostly refuses
-or solves honestly: that shows the plumbing works, not that the task is robust.
+Every attempt is a hit (reward 1 through a shortcut, or a reward 1 the judge could not clear) or a miss
+(anything else, honest solves and refusals included). Each tier ends `robust` after 3 misses in a row; there is
+no attempt cap. A cheap model such as Haiku mostly refuses or solves honestly, so its `robust` shows the plumbing
+works, not that the task resists a determined attacker.
 
 ### Reward Kit
 

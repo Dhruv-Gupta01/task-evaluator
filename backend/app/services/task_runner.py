@@ -2544,7 +2544,6 @@ async def run_tier1_stage(
     agent: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
-    max_attempts: int | None = None,
     max_cost_usd: float | None = None,
     task_root: Path | None = None,
 ) -> None:
@@ -2609,11 +2608,10 @@ async def run_tier1_stage(
             "attempt_cost_usd": settings.tier1_attempt_cost_usd,
         }
         limits = tier1_loop.Limits(
-            max_attempts=max_attempts or settings.tier1_max_attempts,
             max_fixes=settings.tier1_max_fixes,
             max_cost_usd=settings.tier1_max_cost_usd if max_cost_usd is None else max_cost_usd,
         )
-        meta["limits"] = {"max_attempts": limits.max_attempts, "max_fixes": limits.max_fixes, "max_cost_usd": limits.max_cost_usd}
+        meta["limits"] = {"max_fixes": limits.max_fixes, "max_cost_usd": limits.max_cost_usd}
 
         def llm_cost(calls) -> float:
             return sum(llm_pricing.cost_usd(m, u) or 0.0 for m, u in calls)
@@ -2831,7 +2829,6 @@ async def run_tier_cycle(
     submission_id: str,
     repeats: int = 1,
     model: str | None = None,
-    max_attempts: int | None = None,
     max_cost_usd: float | None = None,
     max_rounds: int = 3,
 ) -> None:
@@ -2923,7 +2920,7 @@ async def run_tier_cycle(
             this["tier0"] = _stage_snapshot(submission_id, "tier0_probes")
             save()
 
-            await run_tier1_stage(submission_id, None, model, None, max_attempts, remaining(), task_root)
+            await run_tier1_stage(submission_id, None, model, None, remaining(), task_root)
             this["tier1"] = _stage_snapshot(submission_id, "tier1_loop")
             spent += this["tier1"].get("cost_usd") or 0.0
             patched = this["tier1"].get("fixes_accepted") or 0
@@ -2951,7 +2948,7 @@ async def run_tier_cycle(
                 final, reason = "budget", f"spend reached the cap of ${max_cost_usd:.2f} before Tier 2"
                 break
             mark_pending(("tier2_loop",))
-            await run_tier2_stage(submission_id, None, model, None, max_attempts, remaining(), None)
+            await run_tier2_stage(submission_id, None, model, None, remaining(), None)
             this["tier2"] = _stage_snapshot(submission_id, "tier2_loop")
             spent += this["tier2"].get("cost_usd") or 0.0
             state["cost_usd"] = round(spent, 4)
@@ -2985,7 +2982,6 @@ async def run_tier2_stage(
     agent: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
-    max_attempts: int | None = None,
     max_cost_usd: float | None = None,
     task_copy: str | None = None,
 ) -> None:
@@ -2993,10 +2989,10 @@ async def run_tier2_stage(
     default, on TIER2_HACKER_MODEL) gets the task's own instruction plus one line of pressure
     (tier2.PRESSURE_LINE), with no verifier access, no red-team charter and no memory of earlier
     runs. Runs are independent, one at a time, each its own Harbor job. A judge labels each run
-    (a shortcut or an honest attempt, for passes and failures). Three genuine failed shortcut
-    attempts in a row end the stage "robust" (passed); the first shortcut that gets reward 1
-    stops it "exploited" for a person to rule on; nothing is patched. Honest solves and failures
-    are neutral, so many runs end "inconclusive". Runs on Tier 1's hardened copy when there is
+    (a shortcut or an honest attempt, for passes and failures). Every run is a hit or a miss:
+    three misses in a row end the stage "robust" (passed); the first hit stops it "exploited" (or
+    "needs_review" for a reward 1 the judge could not clear) for a person to rule on; nothing is
+    patched, so it runs at most 3 times. Runs on Tier 1's hardened copy when there is
     one (task_copy "hardened" or "upload" chooses), and needs a passing Oracle first. Advisory;
     never changes a gate. logs is JSON, see tier2/loop.py."""
     db = SessionLocal()
@@ -3052,10 +3048,9 @@ async def run_tier2_stage(
             "pressure_line": PRESSURE_LINE,
         }
         limits = tier2_loop.Limits(
-            max_attempts=max_attempts or settings.tier2_max_attempts,
             max_cost_usd=settings.tier2_max_cost_usd if max_cost_usd is None else max_cost_usd,
         )
-        meta["limits"] = {"max_attempts": limits.max_attempts, "max_cost_usd": limits.max_cost_usd}
+        meta["limits"] = {"max_cost_usd": limits.max_cost_usd}
 
         def llm_cost(calls) -> float:
             return sum(llm_pricing.cost_usd(m, u) or 0.0 for m, u in calls)

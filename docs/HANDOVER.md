@@ -132,9 +132,8 @@ here that mentions one of them would be wrong for this branch.
 - **Tier cycle ("Run all tiers")**: Tier 0 (static probes), Tier 1 (hinted agent plus fixer) and
   Tier 2 (unhinted agent) repeat on the patched task until a round needs no patch (default 3
   rounds). Tier 1 is the only tier that edits the task; the upload is never changed and a person
-  reviews the diff. Honest solves and refusals are labelled as such and never count as the grader
-  holding. Each tier stops after 3 consecutive real shortcut attempts that failed; `max_attempts` caps the
-  attempts of any kind, so a run of honest solves ends `inconclusive`, never `robust`. Costs real credits.
+  reviews the diff. Every attempt is a hit or a miss: honest solves and refusals are labelled but count
+  as misses. Each tier stops after 3 misses in a row; there is no attempt cap. Costs real credits.
 - **Reward Kit**: runs inside the task's own grader; the platform only reads what it leaves behind. Per-check
   results from `reward-details.json`, grader errors (a missing reward file or a Worker setup error is shown as
   a grader error, left out of the pass rate, never a plain 0), a suggested verdict (shown only; it cannot be changed), and a

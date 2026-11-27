@@ -52,7 +52,7 @@ def install(world, monkeypatch, tier1, tier2):
         world.calls.append(("tier0", state["round"], task_root))
         _row(world, "tier0_probes", "passed", {"summary": {"exploited": 0}})
 
-    async def fake1(sid, agent, model, effort, max_attempts, max_cost, task_root=None):
+    async def fake1(sid, agent, model, effort, max_cost, task_root=None):
         spec = next(t1)
         world.calls.append(("tier1", state["round"], task_root, max_cost))
         hardened = task_runner.settings.storage_dir / "submissions" / sid / "tier1" / "hardened"
@@ -69,7 +69,7 @@ def install(world, monkeypatch, tier1, tier2):
              {"status": spec["result"], "reason": "r", "attempts": [{"verdict": "attempted_failed"}], "fixes": fixes,
               "cost_usd": spec.get("cost", 1.0)})
 
-    async def fake2(sid, agent, model, effort, max_attempts, max_cost, task_copy=None):
+    async def fake2(sid, agent, model, effort, max_cost, task_copy=None):
         spec = next(t2)
         world.calls.append(("tier2", state["round"], max_cost))
         _row(world, "tier2_loop", "passed" if spec["result"] == "robust" else "failed",

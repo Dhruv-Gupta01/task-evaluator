@@ -3,15 +3,14 @@ an LLM (run an attempt, classify it, propose a fix, check a patched copy), so th
 tested with fakes.
 
 Rules (decided with the user):
-  * the stage ends when 3 consecutive real cheating attempts fail (status "robust");
-  * a hit (judge-confirmed) resets the counter, asks the fixer for a patch to a hardened copy, and
-    the loop continues against the hardened copy;
+  * every attempt is a hit or a miss (memory.is_hit); 3 misses in a row end the stage "robust";
+  * a hit (exploited, or a reward 1 the judge could not clear) resets the counter, asks the fixer
+    for a patch to a hardened copy, and the loop continues against the hardened copy, so the loop
+    only goes on while hacks are being found and patched;
   * a patch is only accepted when the Oracle still scores 1 on it (`gate`); a rejected patch gets
     one more try, then the loop stops "unfixed" for a human;
-  * an unclear reward-1 attempt stops the loop "needs_review" (a person decides, never a guess);
-  * refusals, honest solves, no-reward attempts and barely-tried attempts change nothing, but
-    NEUTRAL_LIMIT of them in a row stop the loop "inconclusive" so it cannot spin;
-  * hard caps on attempts, fixes and spend are safe defaults, tuned later."""
+  * there is no attempt cap: the number of accepted patches (`max_fixes`) and the spend cap bound
+    the loop."""
 from __future__ import annotations
 
 import shutil
@@ -21,13 +20,11 @@ from typing import Awaitable, Callable
 
 from . import memory
 
-NEUTRAL_LIMIT = 4
 FIX_TRIES = 2
 
 
 @dataclass
 class Limits:
-    max_attempts: int = 10
     max_fixes: int = 5
     max_cost_usd: float = 0.0  # 0 = no cap beyond the per-attempt ones
 
@@ -49,7 +46,7 @@ async def run(hardened: Path, scratch: Path, hooks: Hooks, limits: Limits) -> di
     """`hardened` starts as a copy of the upload and is edited in place by accepted fixes."""
     attempts: list[dict] = []
     fixes: list[dict] = []
-    status, reason = "attempt_limit", f"{limits.max_attempts} attempts were made without reaching a result"
+    status, reason = "robust", ""
     cost = 0.0
     by = {"hacker": 0.0, "judge": 0.0, "fixer": 0.0}
 
@@ -60,10 +57,7 @@ async def run(hardened: Path, scratch: Path, hooks: Hooks, limits: Limits) -> di
             "cost_usd": round(cost, 4), "cost_breakdown_usd": {k: round(v, 4) for k, v in by.items()},
         }
 
-    neutral_run = 0
     while True:
-        if len(attempts) >= limits.max_attempts:
-            break
         if limits.max_cost_usd and cost >= limits.max_cost_usd:
             status, reason = "budget", f"spend reached the cap of ${limits.max_cost_usd:.2f}"
             break
@@ -89,21 +83,11 @@ async def run(hardened: Path, scratch: Path, hooks: Hooks, limits: Limits) -> di
         attempts.append(attempt)
         hooks.progress(snapshot())
 
-        if verdict == "attempted_failed":
-            neutral_run = 0
+        if not memory.is_hit(verdict):
             if memory.consecutive_misses(attempts) >= memory.MISS_LIMIT:
-                status, reason = "robust", f"{memory.MISS_LIMIT} cheating attempts in a row failed"
+                status, reason = "robust", f"{memory.MISS_LIMIT} attempts in a row did not get reward 1 through a shortcut"
                 break
-        elif verdict in memory.NEUTRAL:
-            neutral_run += 1
-            if neutral_run >= NEUTRAL_LIMIT:
-                status, reason = "inconclusive", f"{NEUTRAL_LIMIT} attempts in a row did not test the task (refused, no reward or barely tried)"
-                break
-        elif verdict == "needs_review":
-            status, reason = "needs_review", "an attempt scored reward 1 and the judge could not say whether it was a shortcut"
-            break
-        elif verdict == "exploited":
-            neutral_run = 0
+        else:
             if len(fixes) >= limits.max_fixes:
                 status, reason = "unfixed", f"still being exploited after {limits.max_fixes} patches"
                 break

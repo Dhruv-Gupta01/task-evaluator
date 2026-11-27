@@ -477,7 +477,7 @@ export interface Tier1 {
   model?: string;
   judge_model?: string;
   fixer_model?: string;
-  limits?: { max_attempts: number; max_fixes: number; max_cost_usd: number };
+  limits?: { max_attempts?: number; max_fixes: number; max_cost_usd: number };
   status?:
     | "robust"
     | "unfixed"
@@ -579,6 +579,8 @@ export interface Tier2Attempt {
 export interface Tier2Counts {
   runs: number;
   attempted: number;
+  hits?: number;
+  misses?: number;
   exploited: number;
   attempted_failed: number;
   honest_solve: number;
@@ -595,7 +597,7 @@ export interface Tier2 {
   judge_model?: string;
   task_copy?: string;
   pressure_line?: string;
-  limits?: { max_attempts: number; max_cost_usd: number };
+  limits?: { max_attempts?: number; max_cost_usd: number };
   status?: "robust" | "exploited" | "needs_review" | "inconclusive" | null;
   reason?: string | null;
   in_progress?: boolean;
@@ -1072,7 +1074,6 @@ export const api = {
     id: string,
     opts: {
       repeats?: number;
-      maxAttempts?: number;
       maxCostUsd?: number;
       model?: string;
       maxRounds?: number;
@@ -1081,7 +1082,6 @@ export const api = {
     const q = new URLSearchParams();
     if (opts.maxRounds) q.set("max_rounds", String(opts.maxRounds));
     if (opts.repeats) q.set("repeats", String(opts.repeats));
-    if (opts.maxAttempts) q.set("max_attempts", String(opts.maxAttempts));
     if (opts.maxCostUsd !== undefined) q.set("max_cost_usd", String(opts.maxCostUsd));
     if (opts.model) q.set("model", opts.model);
     const qs = q.toString();
@@ -1089,9 +1089,8 @@ export const api = {
       method: "POST",
     }).then(handle<unknown>);
   },
-  tier1: (id: string, opts: { maxAttempts?: number; maxCostUsd?: number; model?: string } = {}) => {
+  tier1: (id: string, opts: { maxCostUsd?: number; model?: string } = {}) => {
     const q = new URLSearchParams();
-    if (opts.maxAttempts) q.set("max_attempts", String(opts.maxAttempts));
     if (opts.maxCostUsd !== undefined) q.set("max_cost_usd", String(opts.maxCostUsd));
     if (opts.model) q.set("model", opts.model);
     const qs = q.toString();
@@ -1101,10 +1100,9 @@ export const api = {
   },
   tier2: (
     id: string,
-    opts: { maxAttempts?: number; maxCostUsd?: number; model?: string; taskCopy?: string } = {},
+    opts: { maxCostUsd?: number; model?: string; taskCopy?: string } = {},
   ) => {
     const q = new URLSearchParams();
-    if (opts.maxAttempts) q.set("max_attempts", String(opts.maxAttempts));
     if (opts.maxCostUsd !== undefined) q.set("max_cost_usd", String(opts.maxCostUsd));
     if (opts.model) q.set("model", opts.model);
     if (opts.taskCopy) q.set("task_copy", opts.taskCopy);

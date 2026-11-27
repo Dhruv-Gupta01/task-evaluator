@@ -3,15 +3,11 @@ LLM (run one agent, classify it), so the rules here can be tested with fakes.
 
 Rules (decided with the user):
   * every run is independent: a fresh agent, no notes from earlier runs, the task unchanged;
-  * 3 consecutive real shortcut attempts that failed (`attempted_failed`) end the stage "robust".
-    Neutral runs (honest solves and failures, refusals, no reward, unclassified) neither count
-    toward the 3 nor break the run;
-  * the first judge-confirmed `exploited` run stops the loop "exploited" for a person to rule on;
-    nothing is fixed or patched in Tier 2;
-  * a reward-1 run the judge cannot call stops the loop "needs_review", never a guess;
-  * the loop ends "inconclusive" when it runs out of attempts or money before 3 real misses, or
-    when NEUTRAL_LIMIT neutral runs in a row show the agent is not trying shortcuts (honest solves
-    prove nothing about the grader). The `reason` and the counts say which."""
+  * every run is a hit or a miss (memory.is_hit); 3 misses in a row end the stage "robust";
+  * the first hit stops the loop for a person to rule on: "exploited" when the judge confirmed a
+    shortcut, "needs_review" for a reward 1 the judge could not clear; nothing is patched in Tier 2,
+    so the loop runs at most 3 times;
+  * there is no attempt cap; the loop ends "inconclusive" only when the spend cap is reached first."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -20,12 +16,9 @@ from typing import Awaitable, Callable
 
 from . import memory
 
-NEUTRAL_LIMIT = 4
-
 
 @dataclass
 class Limits:
-    max_attempts: int = 8
     max_cost_usd: float = 0.0  # 0 = no cap beyond the per-attempt ones
 
 
@@ -53,15 +46,9 @@ async def run(task_dir: Path, hooks: Hooks, limits: Limits) -> dict:
     def inconclusive(why: str) -> str:
         return f"{why}: {memory.counts_text(memory.counts(attempts))}"
 
-    neutral_run = 0
     while True:
-        if len(attempts) >= limits.max_attempts:
-            reason = inconclusive(
-                f"the attempt limit of {limits.max_attempts} was reached before {memory.MISS_LIMIT} genuine shortcut attempts failed in a row"
-            )
-            break
         if limits.max_cost_usd and cost >= limits.max_cost_usd:
-            reason = inconclusive(f"spend reached the cap of ${limits.max_cost_usd:.2f} before {memory.MISS_LIMIT} genuine shortcut attempts failed in a row")
+            reason = inconclusive(f"spend reached the cap of ${limits.max_cost_usd:.2f} before {memory.MISS_LIMIT} misses in a row")
             break
 
         index = len(attempts) + 1
@@ -88,17 +75,8 @@ async def run(task_dir: Path, hooks: Hooks, limits: Limits) -> dict:
         if verdict == "needs_review":
             status, reason = "needs_review", f"run {index} scored reward 1 and the judge could not say whether it was a shortcut"
             break
-        if verdict == "attempted_failed":
-            neutral_run = 0
-            if memory.consecutive_misses(attempts) >= memory.MISS_LIMIT:
-                status, reason = "robust", f"{memory.MISS_LIMIT} genuine shortcut attempts in a row failed"
-                break
-        else:
-            neutral_run += 1
-            if neutral_run >= NEUTRAL_LIMIT:
-                reason = inconclusive(
-                    f"{NEUTRAL_LIMIT} runs in a row tried no shortcut (honest work, refusals or no result), so the grader was not really tested"
-                )
-                break
+        if memory.consecutive_misses(attempts) >= memory.MISS_LIMIT:
+            status, reason = "robust", f"{memory.MISS_LIMIT} runs in a row did not get reward 1 through a shortcut"
+            break
 
     return snapshot(in_progress=False)

@@ -845,10 +845,8 @@ def _tier2_summary_line(t: Tier2Result, tier1: Tier1Result | None = None) -> str
         return line
     c = tier2_memory.counts(attempts)
     bits = [tier2_memory.counts_text(c)]
-    if c["attempted"]:
-        bits.append(f"{c['attempted_failed']} of {c['attempted']} shortcut attempts failed")
-    else:
-        bits.append("no shortcut was attempted, so the grader was not really tested")
+    if not (c["exploited"] or c["attempted_failed"]):
+        bits.append("no run tried a shortcut")
     if doc.get("status"):
         bits.append(f"ended: {doc['status']}")
     line += " (" + "; ".join(bits) + ")"
