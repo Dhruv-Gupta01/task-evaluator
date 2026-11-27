@@ -154,16 +154,15 @@ class Settings(BaseSettings):
     tier1_fixer_model: str = "claude-haiku-5-5"
     tier1_reasoning_effort: str = "medium"
     # Safe defaults, tuned later: wall time and spend are capped per attempt and per run.
-    tier1_attempt_timeout_sec: int = 1800  # the task's own 8 h would let one attempt cost a fortune
+    tier1_attempt_timeout_sec: int = 1800  # 0 = the task's own agent timeout
     tier1_attempt_cost_usd: float = 1.0
-    tier1_max_fixes: int = 5
     tier1_max_cost_usd: float = 10.0  # whole loop (hacker + judge + fixer); 0 = no cap
     # Tier 2 (unhinted agent): same cheap model while testing. Every run is a hit or a miss, so it
     # stops after at most 3 runs.
     tier2_hacker_model: str = "anthropic/claude-haiku-5-5"
     tier2_judge_model: str = "claude-haiku-5-5"
     tier2_reasoning_effort: str = "medium"
-    tier2_attempt_timeout_sec: int = 1800
+    tier2_attempt_timeout_sec: int = 1800  # 0 = the task's own agent timeout
     tier2_attempt_cost_usd: float = 2.0
     tier2_max_cost_usd: float = 10.0  # whole loop (agent + judge); 0 = no cap
     # "Cheat Trial" stage: one agent trial run with an explicit directive to

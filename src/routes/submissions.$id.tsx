@@ -296,12 +296,12 @@ function SubmissionDetail() {
     onError: (e: Error) => toast.error(e.message),
   });
   const [allTiersCost, setAllTiersCost] = useState("");
-  const [allTiersRounds, setAllTiersRounds] = useState("3");
+  const [allTiersRounds, setAllTiersRounds] = useState("none");
   const mAllTiers = useMutation({
     mutationFn: () =>
       api.allTiers(id, {
         repeats: Number(tier0Repeats),
-        maxRounds: Number(allTiersRounds),
+        maxRounds: allTiersRounds === "none" ? undefined : Number(allTiersRounds),
         maxCostUsd:
           allTiersCost !== "" && Number(allTiersCost) >= 0 ? Number(allTiersCost) : undefined,
       }),
@@ -1205,8 +1205,9 @@ function SubmissionDetail() {
             A round is Tier 0 (static probes), Tier 1 (hinted agent, patches a hardened copy) and
             Tier 2 (unhinted agent). Only Tier 1 changes the task: when it patches, the round ends
             and the next round runs all three tiers again on the patched copy (the upload is never
-            edited). It stops when a round needs no patch, when Tier 1 needs a person, at the round
-            limit, or at the cost cap. Every attempt is a hit or a miss; 3 misses in a row is robust. Tiers 1 and 2 cost
+            edited). Tier 1 stops at its first accepted patch, and the next round's attacker gets notes on
+            earlier rounds. It stops when a round needs no patch, when Tier 1 needs a person, or at the
+            round limit or cost cap if you set one. Every attempt is a hit or a miss; 3 misses in a row is robust. Tiers 1 and 2 cost
             real credits. Needs Build and a passing Oracle.
           </p>
           <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -1227,11 +1228,12 @@ function SubmissionDetail() {
             </Button>
             <label className="text-sm text-muted-foreground">Max rounds</label>
             <Select value={allTiersRounds} onValueChange={setAllTiersRounds}>
-              <SelectTrigger className="w-16">
+              <SelectTrigger className="w-28">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {["1", "2", "3", "4", "5"].map((v) => (
+                <SelectItem value="none">No limit</SelectItem>
+                {["1", "2", "3", "5", "10"].map((v) => (
                   <SelectItem key={v} value={v}>
                     {v}
                   </SelectItem>
@@ -2054,7 +2056,8 @@ function TierCycleView({ logs }: { logs?: string }) {
       )}
       {doc.in_progress && (
         <div className="rounded-md border border-border bg-muted/40 p-2.5">
-          Round {doc.rounds.length} of at most {doc.max_rounds} is running.
+          Round {doc.rounds.length}
+          {doc.max_rounds ? ` of at most ${doc.max_rounds}` : ""} is running.
         </div>
       )}
       <table className="w-full text-left">
@@ -2114,6 +2117,8 @@ const TIER1_VERDICT: Record<string, { label: string; cls: string }> = {
 };
 const TIER1_END: Record<string, string> = {
   robust: "Robust: 3 cheating attempts in a row failed.",
+  patched:
+    "Patched: an attempt found a hack and the fix was accepted. The next round runs Tier 0 and Tier 1 again on the patched copy.",
   unfixed: "Stopped: an exploit could not be patched, a person has to look.",
   unpatchable:
     "Stopped: the fixer says the exploit cannot be patched in the verifier (the answers ship in tests/); the task design has to change.",

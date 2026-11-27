@@ -10,7 +10,6 @@ from app.services import harbor_runner
 
 HINT_DIR = "/hinted-tests"
 _COPY_NAME = "_hinted_tests"  # folder inside environment/ (the Docker build context)
-MAX_TRANSCRIPT_CHARS = 24000
 
 
 def build_hinted_task(src: Path, dest: Path) -> str | None:
@@ -62,9 +61,11 @@ def directive(base_prompt: str, memory_text: str) -> str:
     return text
 
 
-def condense_trajectory(trial_dir: Path | None, max_chars: int = MAX_TRANSCRIPT_CHARS) -> str:
-    """The agent's messages and tool calls (with a clipped result each) as plain text, newest
-    steps kept when it is too long. For the judge; never shown to the agent."""
+def condense_trajectory(trial_dir: Path | None, max_chars: int | None = None) -> str:
+    """The agent's messages and tool calls (with a clipped result each) as plain text, every step
+    kept: a shortcut is usually taken early (reading /hinted-tests), and a judge that saw only the
+    end of a 60k-character transcript (2026-11-27, 39% of it) could not clear an honest solve.
+    `max_chars` keeps the newest steps when set. For the judge and fixer; never shown to the agent."""
     if trial_dir is None:
         return ""
     try:
@@ -85,4 +86,4 @@ def condense_trajectory(trial_dir: Path | None, max_chars: int = MAX_TRANSCRIPT_
         elif msg and i == 1:
             out.append(f"[{i}] TASK PROMPT (clipped): {msg[:600]}")
     text = "\n".join(out)
-    return text if len(text) <= max_chars else "...(earlier steps cut)...\n" + text[-max_chars:]
+    return text if not max_chars or len(text) <= max_chars else "...(earlier steps cut)...\n" + text[-max_chars:]

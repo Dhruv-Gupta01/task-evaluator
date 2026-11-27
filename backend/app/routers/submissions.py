@@ -702,19 +702,19 @@ async def trigger_tier_cycle(
     repeats: int = 1,
     model: str | None = None,
     max_cost_usd: float | None = None,
-    max_rounds: int = 3,
+    max_rounds: int | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
     """The whole cheat-trial pipeline in a loop: Tier 0, Tier 1, Tier 2 on the task, and whenever
     Tier 1 patches it (a hardened copy; the upload is never edited) all three run again on the
-    patched copy, up to `max_rounds` (1..5, default 3), until a round needs no patch. Tier 1 and
+    patched copy, until a round needs no patch (no round limit unless `max_rounds` is given). Tier 1 and
     Tier 2 cost real credits: `max_cost_usd` is one shared cap for both across every round (0 or
     none = each tier's own default cap per round), `model` overrides both hackers. The three
     single endpoints stay. Needs Build and a passing Oracle. Posting again cancels the running job."""
     if not 1 <= repeats <= 3:
         raise HTTPException(status_code=400, detail="repeats must be between 1 and 3")
-    if not 1 <= max_rounds <= 5:
-        raise HTTPException(status_code=400, detail="max_rounds must be between 1 and 5")
+    if max_rounds is not None and max_rounds < 1:
+        raise HTTPException(status_code=400, detail="max_rounds must be at least 1, or left out for no limit")
     if model:
         model_error = task_runner.valid_model_override("claude-code", model)
         if model_error:

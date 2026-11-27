@@ -4,13 +4,12 @@ tested with fakes.
 
 Rules (decided with the user):
   * every attempt is a hit or a miss (memory.is_hit); 3 misses in a row end the stage "robust";
-  * a hit (exploited, or a reward 1 the judge could not clear) resets the counter, asks the fixer
-    for a patch to a hardened copy, and the loop continues against the hardened copy, so the loop
-    only goes on while hacks are being found and patched;
+  * a hit (exploited, or a reward 1 the judge leans to calling a shortcut) asks the fixer for a
+    patch to a hardened copy; an accepted patch ends the stage "patched", and the tier cycle then
+    starts a new round (Tier 0, then a fresh Tier 1 given `earlier_rounds` as notes) on that copy;
   * a patch is only accepted when the Oracle still scores 1 on it (`gate`); a rejected patch gets
     one more try, then the loop stops "unfixed" for a human;
-  * there is no attempt cap: the number of accepted patches (`max_fixes`) and the spend cap bound
-    the loop."""
+  * there is no attempt or patch cap; only the optional spend cap (0 = none) bounds the loop."""
 from __future__ import annotations
 
 import shutil
@@ -25,7 +24,6 @@ FIX_TRIES = 2
 
 @dataclass
 class Limits:
-    max_fixes: int = 5
     max_cost_usd: float = 0.0  # 0 = no cap beyond the per-attempt ones
 
 
@@ -42,7 +40,7 @@ class Hooks:
     replay: Callable[[Path, dict], Awaitable[tuple[bool, str]]] | None = None
 
 
-async def run(hardened: Path, scratch: Path, hooks: Hooks, limits: Limits) -> dict:
+async def run(hardened: Path, scratch: Path, hooks: Hooks, limits: Limits, earlier_rounds: list[dict] | None = None) -> dict:
     """`hardened` starts as a copy of the upload and is edited in place by accepted fixes."""
     attempts: list[dict] = []
     fixes: list[dict] = []
@@ -63,7 +61,7 @@ async def run(hardened: Path, scratch: Path, hooks: Hooks, limits: Limits) -> di
             break
 
         index = len(attempts) + 1
-        mem = memory.render_memory(attempts, fixes)
+        mem = memory.render_memory(attempts, fixes, earlier_rounds)
         outcome = await hooks.run_attempt(hardened, mem, index)
         by["hacker"] += float(outcome.get("cost_usd") or 0.0)
         judged = await hooks.classify(outcome, mem)
@@ -88,9 +86,6 @@ async def run(hardened: Path, scratch: Path, hooks: Hooks, limits: Limits) -> di
                 status, reason = "robust", f"{memory.MISS_LIMIT} attempts in a row did not get reward 1 through a shortcut"
                 break
         else:
-            if len(fixes) >= limits.max_fixes:
-                status, reason = "unfixed", f"still being exploited after {limits.max_fixes} patches"
-                break
             fix = await _make_fix(hardened, scratch, attempt, mem, hooks, len(fixes) + 1)
             by["fixer"] += fix.get("cost_usd", 0.0)
             cost = sum(by.values())
@@ -103,6 +98,8 @@ async def run(hardened: Path, scratch: Path, hooks: Hooks, limits: Limits) -> di
                 fixes.append({**fix, "after_attempt": index, "accepted": False})
                 break
             fixes.append({**fix, "after_attempt": index})
+            status, reason = "patched", f"attempt {index} found a hack and patch {fix['number']} was accepted; the next round tests the patched copy"
+            break
         hooks.progress(snapshot())
 
     return snapshot(in_progress=False)

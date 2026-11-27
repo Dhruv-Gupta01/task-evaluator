@@ -477,9 +477,10 @@ export interface Tier1 {
   model?: string;
   judge_model?: string;
   fixer_model?: string;
-  limits?: { max_attempts?: number; max_fixes: number; max_cost_usd: number };
+  limits?: { max_attempts?: number; max_fixes?: number; max_cost_usd: number };
   status?:
     | "robust"
+    | "patched"
     | "unfixed"
     | "needs_review"
     | "unpatchable"
@@ -535,7 +536,7 @@ export interface TierCycleReport {
     | null;
   reason: string | null;
   in_progress: boolean;
-  max_rounds: number;
+  max_rounds: number | null;
   cost_usd: number;
   max_cost_usd: number;
   diff: string;

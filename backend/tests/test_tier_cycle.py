@@ -31,7 +31,7 @@ def world(tmp_path, monkeypatch):
     with factory() as db:
         db.add(Submission(id="s1", task_name="t", uploaded_at=datetime.now(UTC), zip_path="x", extracted_path=str(upload)))
         db.commit()
-    return type("W", (), {"factory": factory, "upload": upload, "calls": []})
+    return type("W", (), {"factory": factory, "upload": upload, "calls": [], "history": []})
 
 
 def _row(world, kind, status, logs):
@@ -52,9 +52,10 @@ def install(world, monkeypatch, tier1, tier2):
         world.calls.append(("tier0", state["round"], task_root))
         _row(world, "tier0_probes", "passed", {"summary": {"exploited": 0}})
 
-    async def fake1(sid, agent, model, effort, max_cost, task_root=None):
+    async def fake1(sid, agent, model, effort, max_cost, task_root=None, earlier_rounds=None):
         spec = next(t1)
         world.calls.append(("tier1", state["round"], task_root, max_cost))
+        world.history.append([r["round"] for r in earlier_rounds or []])
         hardened = task_runner.settings.storage_dir / "submissions" / sid / "tier1" / "hardened"
         base = task_root or world.upload
         import shutil
@@ -129,7 +130,7 @@ def test_tier2_hit_is_reported_and_nothing_is_patched(world, monkeypatch):
     assert doc["status"] == "exploited" and len(doc["rounds"]) == 1
 
 
-def test_honest_solves_never_count_as_robust(world, monkeypatch):
+def test_a_tier2_that_ran_out_of_money_is_not_robust(world, monkeypatch):
     install(world, monkeypatch, [{"result": "robust"}], [{"result": "inconclusive"}])
     go()
     status, doc = result(world)
@@ -213,3 +214,12 @@ def test_tier0_replay_of_an_older_version_is_not_blamed_on_the_harness(monkeypat
     patched = runner.run_replays(None, [(bundle, "agent", "earlier version (before the patch)")], opts)
     assert same[0]["verdict"] == "harness_disagrees"
     assert patched[0]["verdict"] == "REGRESSION"
+
+
+def test_no_round_limit_by_default_and_each_round_gets_the_earlier_rounds(world, monkeypatch):
+    # seven rounds in a row find and patch a hack; with no limit the cycle keeps going until one is clean
+    install(world, monkeypatch, [{"result": "patched", "patched": 1}] * 7 + [{"result": "robust"}], [{"result": "robust"}])
+    go()
+    status, doc = result(world)
+    assert status == "passed" and doc["status"] == "robust" and len(doc["rounds"]) == 8
+    assert world.history == [list(range(1, n)) for n in range(1, 9)]  # round n's Tier 1 is told about rounds 1..n-1

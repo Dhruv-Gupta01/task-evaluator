@@ -2546,6 +2546,7 @@ async def run_tier1_stage(
     reasoning_effort: str | None = None,
     max_cost_usd: float | None = None,
     task_root: Path | None = None,
+    earlier_rounds: list[dict] | None = None,
 ) -> None:
     """Tier 1 of the cheat-trial loop (services/tier1/): a hinted agent (Claude Code by default,
     on TIER1_HACKER_MODEL) is told to get reward 1 without doing the work, sees a read-only copy
@@ -2594,6 +2595,8 @@ async def run_tier1_stage(
             return
 
         config = _get_task_config(submission)
+        # 0 = the task's own agent timeout, so a long attempt is never cut short and miscounted as a miss
+        attempt_timeout = settings.tier1_attempt_timeout_sec or int(_agent_timeout_sec(config))
         hardened = base / "hardened"
         shutil.copytree(src, hardened, symlinks=True)
         instruction = (src / "instruction.md").read_text(errors="replace") if (src / "instruction.md").is_file() else ""
@@ -2604,14 +2607,14 @@ async def run_tier1_stage(
             "judge_model": settings.tier1_judge_model,
             "fixer_model": settings.tier1_fixer_model,
             **_tier_effort_meta(agent, hacker_model, reasoning_effort or settings.tier1_reasoning_effort),
-            "attempt_timeout_sec": settings.tier1_attempt_timeout_sec,
+            "attempt_timeout_sec": attempt_timeout,
             "attempt_cost_usd": settings.tier1_attempt_cost_usd,
+            "earlier_rounds": len(earlier_rounds or []),
         }
         limits = tier1_loop.Limits(
-            max_fixes=settings.tier1_max_fixes,
             max_cost_usd=settings.tier1_max_cost_usd if max_cost_usd is None else max_cost_usd,
         )
-        meta["limits"] = {"max_fixes": limits.max_fixes, "max_cost_usd": limits.max_cost_usd}
+        meta["limits"] = {"max_cost_usd": limits.max_cost_usd}
 
         def llm_cost(calls) -> float:
             return sum(llm_pricing.cost_usd(m, u) or 0.0 for m, u in calls)
@@ -2640,7 +2643,7 @@ async def run_tier1_stage(
                 kwargs["max_budget_usd"] = f"{max(cap, 0.01):.2f}"
             timeout_sec = (
                 config.environment.build_timeout_sec
-                + settings.tier1_attempt_timeout_sec
+                + attempt_timeout
                 + config.verifier.timeout_sec
                 + max(_AGENT_SETUP_ALLOWANCE_SEC, _agent_setup_timeout_sec(agent))
                 + _HARBOR_TIMEOUT_BUFFER_SEC
@@ -2652,7 +2655,7 @@ async def run_tier1_stage(
                 cost_cap_usd=cap, cost_cap_label=cap_label, on_trial=on_trial,
                 cheat_instruction=True,
                 cheat_instruction_text=tier1_hacker.directive(base_prompt, mem),
-                agent_timeout_override=settings.tier1_attempt_timeout_sec,
+                agent_timeout_override=attempt_timeout,
             )
             shutil.rmtree(hinted, ignore_errors=True)
             shutil.rmtree(jobs_dir.parent / f"{jobs_dir.name}-task", ignore_errors=True)
@@ -2716,7 +2719,7 @@ async def run_tier1_stage(
             return await _tier1_replay(hardened, candidate, attempt, replay_control, settings.docker_platform or None)
 
         hooks = tier1_loop.Hooks(run_attempt, classify, propose_fix, tier1_fixer.apply_edits, gate, progress, replay=replay)
-        result = await tier1_loop.run(hardened, base, hooks, limits)
+        result = await tier1_loop.run(hardened, base, hooks, limits, earlier_rounds)
         diff = tier1_fixer.tree_diff(src, hardened)
         (base / "hardened.diff").write_text(diff)
         passed = result["status"] == "robust"
@@ -2821,6 +2824,20 @@ def _stage_snapshot(submission_id: str, kind: str) -> dict:
         db.close()
 
 
+def _tier1_notes(submission_id: str) -> dict:
+    """The stored Tier 1 attempts and fixes of the round that just ended, for the next round's notes."""
+    db = SessionLocal()
+    try:
+        row = db.query(Run).filter_by(submission_id=submission_id, kind="tier1_loop", run_index=0).one_or_none()
+        try:
+            logs = json.loads(row.logs) if row is not None and row.logs else {}
+        except ValueError:
+            logs = {}
+        return {"attempts": logs.get("attempts") or [], "fixes": logs.get("fixes") or []}
+    finally:
+        db.close()
+
+
 def tier_cycle_dir(submission_id: str) -> Path:
     return settings.storage_dir / "submissions" / submission_id / "tier_cycle"
 
@@ -2830,19 +2847,20 @@ async def run_tier_cycle(
     repeats: int = 1,
     model: str | None = None,
     max_cost_usd: float | None = None,
-    max_rounds: int = 3,
+    max_rounds: int | None = None,
 ) -> None:
     """The whole cheat-trial pipeline, repeated until the task stops changing.
 
     A round is Tier 0 (static probes), then Tier 1 (hinted agent, patches a hardened copy), then
-    Tier 2 (unhinted agent) on the same copy. Only Tier 1 changes the task. If it accepted a patch,
-    the round ends there (Tier 2 would be testing a task that is about to change) and the next
-    round starts all three tiers again on the patched copy. The loop ends when:
+    Tier 2 (unhinted agent) on the same copy. Only Tier 1 changes the task, and it stops at its first
+    accepted patch; the round ends there (Tier 2 would be testing a task that is about to change) and
+    the next round starts all three tiers again on the patched copy, its Tier 1 given notes on every
+    earlier round. There is no round limit unless `max_rounds` is set. The loop ends when:
       * a round makes no patch: "robust" if Tier 1 and Tier 2 both ended robust, "exploited" if
         Tier 2 got reward 1 by a shortcut (a person rules; nothing is patched from Tier 2),
         "inconclusive" if nobody really tried (honest solves, refusals) so nothing is proven;
       * Tier 1 stopped for a person (unfixed, unpatchable, needs_review): "needs_review";
-      * `max_rounds` rounds all made a patch: "not_converged";
+      * `max_rounds` (when set) rounds all made a patch: "not_converged";
       * the shared `max_cost_usd` (Tier 1 + Tier 2 across all rounds; 0 or none = each tier's own
         default cap per round) is spent: "budget".
     The upload is never edited: each round's hardened copy is kept under tier_cycle/round-N/ and
@@ -2902,11 +2920,14 @@ async def run_tier_cycle(
         task_root: Path | None = None  # None = the upload; later rounds = the last hardened copy
         spent = 0.0
         final, reason = "not_converged", f"{max_rounds} rounds each still needed a patch"
+        history: list[dict] = []  # earlier rounds' Tier 1 attempts and fixes, given to the next attacker
 
         def remaining() -> float | None:
             return None if not max_cost_usd else max(max_cost_usd - spent, 0.0)
 
-        for n in range(1, max_rounds + 1):
+        n = 0
+        while max_rounds is None or n < max_rounds:
+            n += 1
             if max_cost_usd and spent >= max_cost_usd:
                 final, reason = "budget", f"spend reached the cap of ${max_cost_usd:.2f} before round {n}"
                 break
@@ -2920,8 +2941,9 @@ async def run_tier_cycle(
             this["tier0"] = _stage_snapshot(submission_id, "tier0_probes")
             save()
 
-            await run_tier1_stage(submission_id, None, model, None, remaining(), task_root)
+            await run_tier1_stage(submission_id, None, model, None, remaining(), task_root, list(history))
             this["tier1"] = _stage_snapshot(submission_id, "tier1_loop")
+            history.append({"round": n, **_tier1_notes(submission_id)})
             spent += this["tier1"].get("cost_usd") or 0.0
             patched = this["tier1"].get("fixes_accepted") or 0
             this["patched"] = patched
@@ -2939,7 +2961,7 @@ async def run_tier_cycle(
                 final, reason = "needs_review", f"Tier 1 stopped ({t1}): {this['tier1'].get('reason') or 'a person has to look'}"
                 break
             if patched:
-                if n == max_rounds:
+                if max_rounds is not None and n >= max_rounds:
                     final, reason = "not_converged", f"round {n} still needed a patch and the round limit ({max_rounds}) is reached"
                     break
                 continue  # the task changed: start again from Tier 0 on the patched copy
@@ -3036,13 +3058,14 @@ async def run_tier2_stage(
         base.mkdir(parents=True)
 
         config = _get_task_config(submission)
+        attempt_timeout = settings.tier2_attempt_timeout_sec or int(_agent_timeout_sec(config))  # 0 = the task's own
         instruction = (src / "instruction.md").read_text(errors="replace") if (src / "instruction.md").is_file() else ""
         meta = {
             "agent": agent,
             "model": hacker_model or _agent_model(agent),
             "judge_model": settings.tier2_judge_model,
             **_tier_effort_meta(agent, hacker_model, reasoning_effort or settings.tier2_reasoning_effort),
-            "attempt_timeout_sec": settings.tier2_attempt_timeout_sec,
+            "attempt_timeout_sec": attempt_timeout,
             "attempt_cost_usd": settings.tier2_attempt_cost_usd,
             "task_copy": copy_used,
             "pressure_line": PRESSURE_LINE,
@@ -3075,7 +3098,7 @@ async def run_tier2_stage(
                 kwargs["max_budget_usd"] = f"{max(cap, 0.01):.2f}"
             timeout_sec = (
                 config.environment.build_timeout_sec
-                + settings.tier2_attempt_timeout_sec
+                + attempt_timeout
                 + config.verifier.timeout_sec
                 + max(_AGENT_SETUP_ALLOWANCE_SEC, _agent_setup_timeout_sec(agent))
                 + _HARBOR_TIMEOUT_BUFFER_SEC
@@ -3087,7 +3110,7 @@ async def run_tier2_stage(
                 cost_cap_usd=cap, cost_cap_label=cap_label, on_trial=on_trial,
                 cheat_instruction=True,
                 cheat_instruction_text=PRESSURE_LINE,
-                agent_timeout_override=settings.tier2_attempt_timeout_sec,
+                agent_timeout_override=attempt_timeout,
             )
             shutil.rmtree(jobs_dir.parent / f"{jobs_dir.name}-task", ignore_errors=True)
             if not outcomes:
@@ -3113,7 +3136,7 @@ async def run_tier2_stage(
             if outcome.get("reward") is None or not outcome.get("trial_dir"):
                 return None
             if outcome["reward"] < 1.0 and outcome.get("refused"):
-                return None  # a refusal is neutral, nothing to judge
+                return None  # a refusal is a miss; nothing to judge
             transcript = tier1_hacker.condense_trajectory(Path(outcome["trial_dir"]))
             calls = llm_usage.start()
             try:
