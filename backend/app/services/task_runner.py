@@ -17,6 +17,7 @@ from app.services import (
     ai_detection,
     answer_exposure,
     edge_cases,
+    solution_variants,
     budget,
     docker_orchestrator,
     harbor_runner,
@@ -864,22 +865,31 @@ def _oracle_timeout_sec(config: TaskConfig) -> float:
     )
 
 
-async def _run_variant(task_root: Path, base: Path, i: int, variant: dict, mode: str, timeout_sec: float) -> dict:
+def _probe_solutions(task_root: Path) -> list[str | None]:
+    """The SOLUTION values the probes run against; [None] for a task that declares none."""
+    return solution_variants.declared_values(task_root) or [None]
+
+
+async def _run_variant(
+    task_root: Path, base: Path, i: int, variant: dict, mode: str, timeout_sec: float, solution: str | None = None
+) -> dict:
     """Apply one proposed edit to a copy of the task and run the Oracle on it.
     mode "valid": a correct variant should be accepted (else "rejected").
     mode "broken": a deliberately wrong answer should score 0 ("caught"),
-    and one that scores 1 is the finding ("slipped_through")."""
-    entry = {**variant, "status": "did_not_run", "reward": None, "failed_tests": [], "flags": [], "note": ""}
+    and one that scores 1 is the finding ("slipped_through").
+    `solution` is the SOLUTION value the edited copy runs with."""
+    entry = {**variant, "solution": solution, "status": "did_not_run", "reward": None, "failed_tests": [], "flags": [], "note": ""}
     copy_root = base / f"v{i}-src"  # not "-task": run_job uses that name for its own copy
     if copy_root.exists():
         shutil.rmtree(copy_root)
     shutil.copytree(task_root, copy_root, symlinks=True)
-    problem = variant_probe.apply_edits(copy_root, variant["edits"])
+    problem = variant_probe.apply_edits(copy_root, variant["edits"], solution)
     if problem:
         entry["note"] = f"the edit could not be applied: {problem}"
         return entry
     outcome = await harbor_runner.run_single(
-        copy_root, "oracle", base / f"v{i}", f"variant-{uuid.uuid4().hex[:8]}", timeout_sec
+        copy_root, "oracle", base / f"v{i}", f"variant-{uuid.uuid4().hex[:8]}", timeout_sec,
+        agent_env={"SOLUTION": solution} if solution else None,
     )
     shutil.rmtree(copy_root, ignore_errors=True)
     report = outcome.report or {}
@@ -897,11 +907,11 @@ async def _run_variant(task_root: Path, base: Path, i: int, variant: dict, mode:
 
 async def _run_probe(submission_id: str, kind: str, mode: str) -> None:
     """Shared by the valid-variant probe (mode "valid") and the weak-answer
-    probe (mode "broken"). Advisory. A model proposes correct-by-the-instruction variants of the
-    Oracle's answer (services/variant_probe.py); each is run through the real
+    probe (mode "broken"). Advisory. For every declared Oracle solution a model proposes up to 4
+    edits of that solution (services/variant_probe.py); each is run through the real
     verifier as an Oracle trial on a temporary copy of the task. A variant the
     verifier rejects means the grader accepts fewer forms than the instruction
-    allows. logs is JSON: {model, reason, dropped, variants: [{description,
+    allows. logs is JSON: {model, reason, dropped, variants: [{solution, description,
     instruction_quote, edits, status: accepted|rejected|did_not_run, reward,
     failed_tests, flags, note}]}."""
     db = SessionLocal()
@@ -919,7 +929,10 @@ async def _run_probe(submission_id: str, kind: str, mode: str) -> None:
         task_root = Path(submission.extracted_path)
         try:
             with _track_llm_spend(db, submission_id, kind):
-                proposal = await variant_probe.propose_variants(task_root, mode)
+                proposals = [
+                    (value, await variant_probe.propose_variants(task_root, mode, value))
+                    for value in _probe_solutions(task_root)
+                ]
         except Exception:
             run.status = "failed"
             run.logs = json.dumps({"error": traceback.format_exc(), "variants": []})
@@ -930,8 +943,9 @@ async def _run_probe(submission_id: str, kind: str, mode: str) -> None:
         timeout_sec = _oracle_timeout_sec(_get_task_config(submission))
         base = settings.storage_dir / "submissions" / submission_id / "runs" / kind
         results: list[dict] = []
-        for i, variant in enumerate(proposal["variants"]):
-            entry = await _run_variant(task_root, base, i, variant, mode, timeout_sec)
+        planned = [(value, variant) for value, proposal in proposals for variant in proposal["variants"]]
+        for i, (value, variant) in enumerate(planned):
+            entry = await _run_variant(task_root, base, i, variant, mode, timeout_sec, value)
             results.append(entry)
             db.refresh(run)
             run.logs = json.dumps({"model": settings.llm_model, "mode": mode, "in_progress": True, "variants": results})
@@ -942,8 +956,12 @@ async def _run_probe(submission_id: str, kind: str, mode: str) -> None:
             {
                 "model": settings.llm_model,
                 "mode": mode,
-                "reason": proposal["reason"],
-                "dropped": proposal["dropped"],
+                "reason": "; ".join(
+                    f"SOLUTION={value}: {p['reason']}" if value else p["reason"]
+                    for value, p in proposals
+                    if p["reason"]
+                ),
+                "dropped": [{**d, "solution": value} for value, p in proposals for d in p["dropped"]],
                 "variants": results,
             }
         )
@@ -974,6 +992,10 @@ async def run_weak_probe(submission_id: str) -> None:
     await _run_probe(submission_id, "weak_probe", "broken")
 
 
+# Which solution's result stands for an edge case: a slip anywhere is the finding, then a catch.
+_PROBE_RANK = {"slipped_through": 0, "caught": 1}
+
+
 async def run_edge_case_check(submission_id: str, probe: bool = False, probe_covered: bool = False) -> None:
     """Advisory. Edge cases an expert would handle (from the instruction only),
     each checked against the tests. "failed" means at least one is uncovered.
@@ -983,7 +1005,8 @@ async def run_edge_case_check(submission_id: str, probe: bool = False, probe_cov
     an Oracle trial. Scoring 1 confirms the gap (`probe.status`
     "slipped_through"); scoring 0 means a test does catch it after all
     ("caught"), and the case no longer counts as uncovered. Every uncovered
-    case is probed, however many there are.
+    case is probed, however many there are, once for every declared Oracle
+    solution (`probes`; `probe` is the one that decides: any slip, else any catch).
 
     probe_covered=True also probes the cases the judge marked covered. A broken
     answer that still scores 1 means the "covered" verdict was wrong, so the
@@ -1003,33 +1026,41 @@ async def run_edge_case_check(submission_id: str, probe: bool = False, probe_cov
         with _track_llm_spend(db, submission_id, "edge_cases"):
             result = await edge_cases.run_edge_case_check(task_root)
             to_probe = [c for c in result["cases"] if probe_covered or not c["covered"]]
-            proposals = (
-                await variant_probe.propose_edge_breaks(task_root, [c["case"] for c in to_probe])
-                if probe and to_probe and not result.get("error")
-                else []
-            )
+            solutions = _probe_solutions(task_root)
+            proposals = {}
+            if probe and to_probe and not result.get("error"):
+                names = [c["case"] for c in to_probe]
+                for value in solutions:
+                    found = await variant_probe.propose_edge_breaks(task_root, names, value)
+                    proposals[value] = {p["case"]: p for p in found}
         if probe:
             result["probed"] = True
-            result["probe_total"] = len(to_probe)
+            result["probe_total"] = len(to_probe) * len(solutions)
             result["probe_done"] = 0
-            by_case = {p["case"]: p for p in proposals}
             timeout_sec = _oracle_timeout_sec(_get_task_config(submission))
             base = settings.storage_dir / "submissions" / submission_id / "runs" / "edge_cases"
             for i, case in enumerate(to_probe):
-                proposal = by_case.get(case["case"])
-                if proposal is None:
-                    case["probe"] = {"status": "did_not_run", "note": "no edit was proposed for this case"}
-                else:
-                    entry = await _run_variant(task_root, base, i, proposal, "broken", timeout_sec)
-                    case["probe"] = {
-                        k: entry[k] for k in ("status", "reward", "failed_tests", "flags", "note", "description")
-                    }
-                if case["covered"] and case["probe"].get("status") == "slipped_through":
-                    case["covered_claim_wrong"] = True
-                result["probe_done"] = i + 1
-                db.refresh(run)
-                run.logs = json.dumps({**result, "in_progress": True})
-                db.commit()
+                case["probes"] = []
+                for j, value in enumerate(solutions):
+                    proposal = proposals.get(value, {}).get(case["case"])
+                    if proposal is None:
+                        entry = {"status": "did_not_run", "note": "no edit was proposed for this case"}
+                    else:
+                        n = i * len(solutions) + j
+                        entry = await _run_variant(task_root, base, n, proposal, "broken", timeout_sec, value)
+                    case["probes"].append(
+                        {
+                            "solution": value,
+                            **{k: entry.get(k) for k in ("status", "reward", "failed_tests", "flags", "note", "description")},
+                        }
+                    )
+                    case["probe"] = min(case["probes"], key=lambda p: _PROBE_RANK.get(p["status"], 2))
+                    if case["covered"] and case["probe"]["status"] == "slipped_through":
+                        case["covered_claim_wrong"] = True
+                    result["probe_done"] += 1
+                    db.refresh(run)
+                    run.logs = json.dumps({**result, "in_progress": True})
+                    db.commit()
         uncovered = [
             c for c in result["cases"]
             if (not c["covered"] and (c.get("probe") or {}).get("status") != "caught") or c.get("covered_claim_wrong")

@@ -100,8 +100,8 @@ There are no exemptions: a task that fails is revised and uploaded again. `examp
 | AI Detection | Terminal-Bench's GPTZero check on the instruction and solution. | `GPTZERO_API_KEY` (optional) |
 | Edge-Case Coverage | Lists edge cases from the instruction, checks which the tests cover; optionally breaks the Oracle's answer on each uncovered case and runs it through the real grader. | LLM, Docker |
 | Rubric Check | `harbor check`: an agent scores the task against a quality rubric (the vendored 36-criterion TB rubric by default). | Anthropic key |
-| Valid-Variant Probe | Runs other correct forms of the Oracle's answer; a rejection suggests the grader is too strict. | LLM, Docker |
-| Weak-Answer Probe | Breaks one stated rule at a time in the Oracle's answer; a broken answer that still scores 1 means a rule is not enforced. | LLM, Docker |
+| Valid-Variant Probe | Runs up to 4 other correct forms of each Oracle solution's answer; a rejection suggests the grader is too strict. | LLM, Docker |
+| Weak-Answer Probe | Breaks one stated rule at a time, up to 4 times per Oracle solution; a broken answer that still scores 1 means a rule is not enforced. | LLM, Docker |
 | Cheat Trial | Runs 1 to 3 trials told to cheat. A reward of 1 triggers an automatic reward-hacking check. A trial where the agent made fewer than 3 tool calls is "inconclusive", not "the trap held". | agent key |
 | Failure Analysis | `harbor analyze` over every trial: reward hacking, instruction gaps, a classification of each failure (real bug, instruction gap, infrastructure), and an audit of passing trials. | OpenAI key |
 | Review Report | A draft report built from everything above, for human review. Needs every gate to be finished. | LLM |

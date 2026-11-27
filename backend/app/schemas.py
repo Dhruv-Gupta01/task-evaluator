@@ -275,7 +275,8 @@ class VariantProbeResult(BaseModel):
     """Valid-variant probe. Advisory: a model proposes forms of the Oracle's
     answer that the instruction allows, each is run through the real verifier,
     and a rejected one means the grader may be stricter than the instruction.
-    `logs` is JSON: {model, reason, dropped, variants: [{description,
+    Up to 4 per declared Oracle solution.
+    `logs` is JSON: {model, reason, dropped, variants: [{solution, description,
     instruction_quote, edits, status accepted|rejected|did_not_run, reward,
     failed_tests, flags, note}]}."""
     status: StageStatus

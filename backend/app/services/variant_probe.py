@@ -9,24 +9,29 @@ the task with each edit applied; a variant the verifier rejects means the
 grader accepts fewer forms than the instruction does.
 
 The model never sees tests/, so it cannot aim at a known weak spot, and a
-proposal whose quote is not in the instruction is dropped, not run."""
+proposal whose quote is not in the instruction is dropped, not run.
+
+A task declares several correct solutions (services/solution_variants.py). Each
+gets its own proposals and its own runs with that SOLUTION value, and an edit
+to code that solution does not run is refused: it would "pass" without ever
+having been tested."""
 
 import json
 import re
 from pathlib import Path
 
+from app.services import solution_variants
 from app.services.judge_files import read_text_files
 from app.services.llm.base import Message
 from app.services.llm.factory import get_llm_client
 
-MAX_VARIANTS = 4
-MAX_BREAKS = 6
+MAX_PER_SOLUTION = 4  # proposals per declared solution, for each of the two probes
 
 SYSTEM_PROMPT = f"""You help find graders that are stricter than their task instruction. You are \
 shown a task's instruction.md and its reference solution (solution/). The reference solution \
 produces one correct answer in one particular form.
 
-Propose up to {MAX_VARIANTS} variants of the reference solution that change only the FORM of the answer \
+Propose up to {MAX_PER_SOLUTION} variants of the reference solution that change only the FORM of the answer \
 and are still fully correct under the instruction: for example a different but equivalent number \
 format (11800.0 vs 11800.00), the other identifier or spelling the instruction says is acceptable, \
 a different order where the instruction leaves order free, different whitespace, or a different \
@@ -47,7 +52,7 @@ Respond with ONLY JSON:
 BREAK_PROMPT = f"""You help find graders that are weaker than their task instruction. You are shown a \
 task's instruction.md and its reference solution (solution/), which produces a correct answer.
 
-Propose up to {MAX_BREAKS} deliberately BROKEN versions of the reference solution. Each breaks exactly one \
+Propose up to {MAX_PER_SOLUTION} deliberately BROKEN versions of the reference solution. Each breaks exactly one \
 rule the instruction states, so a correct grader must reject it. Examples: leave an output empty or \
 truncated, drop items the instruction says to include, add something the instruction forbids, leave \
 one element wrong while the rest is right, weaken a check the instruction requires, skip a required \
@@ -86,6 +91,20 @@ Each edge case has a number. Respond with ONLY JSON:
 
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _solution_prompt(task_root: Path, solution: str | None) -> str:
+    """The solution/ files shown to the model: only those the targeted solution runs."""
+    folder = task_root / "solution"
+    if not folder.is_dir():
+        return ""
+    if solution is None:
+        return read_text_files(folder)
+    hidden = {rel.removeprefix("solution/") for rel in solution_variants.files_of_other_solutions(task_root, solution)}
+    return (
+        f"The task has several solutions; solve.sh picks one through $SOLUTION. Target SOLUTION={solution} "
+        "only: edit only code that this value runs.\n" + read_text_files(folder, exclude=hidden)
+    )
 
 
 async def _edge_break_call(instruction: str, solution: str, cases: list[str]) -> dict:
@@ -137,29 +156,29 @@ def _match_edge_breaks(data: dict, cases: list[str]) -> list[dict]:
     return out
 
 
-async def propose_edge_breaks(task_root: Path, cases: list[str]) -> list[dict]:
+async def propose_edge_breaks(task_root: Path, cases: list[str], solution: str | None = None) -> list[dict]:
     """E.3: one deliberately wrong solution per edge case, keyed by the case text. Retried once
     when nothing usable comes back, because the answer is occasionally unusable (reworded or cut off)."""
     instruction = (task_root / "instruction.md").read_text(errors="replace")
-    solution = read_text_files(task_root / "solution") if (task_root / "solution").is_dir() else ""
+    shown = _solution_prompt(task_root, solution)
     for _ in range(2):
-        out = _match_edge_breaks(await _edge_break_call(instruction, solution, cases), cases)
+        out = _match_edge_breaks(await _edge_break_call(instruction, shown, cases), cases)
         if out or not cases:
             return out
     return []
 
 
-async def propose_variants(task_root: Path, mode: str = "valid") -> dict:
+async def propose_variants(task_root: Path, mode: str = "valid", solution: str | None = None) -> dict:
     """{"variants": [...kept...], "dropped": [{"description", "reason"}], "reason": str}."""
     instruction = (task_root / "instruction.md").read_text(errors="replace")
-    solution = read_text_files(task_root / "solution") if (task_root / "solution").is_dir() else ""
+    shown = _solution_prompt(task_root, solution)
     client = get_llm_client()
     response = await client.complete(
         [
             Message(role="system", content=BREAK_PROMPT if mode == "broken" else SYSTEM_PROMPT),
             Message(
                 role="user",
-                content=f"=== instruction.md ===\n{instruction}\n\n=== solution/ ===\n{solution}\n",
+                content=f"=== instruction.md ===\n{instruction}\n\n=== solution/ ===\n{shown}\n",
             ),
         ],
         tools=[],
@@ -175,7 +194,7 @@ async def propose_variants(task_root: Path, mode: str = "valid") -> dict:
     kept: list[dict] = []
     dropped: list[dict] = []
     normalized_instruction = _norm(instruction)
-    for raw in (data.get("variants") or [])[: MAX_BREAKS if mode == "broken" else MAX_VARIANTS]:
+    for raw in (data.get("variants") or [])[:MAX_PER_SOLUTION]:
         if not isinstance(raw, dict):
             continue
         description = str(raw.get("description", "variant"))[:300]
@@ -200,8 +219,9 @@ async def propose_variants(task_root: Path, mode: str = "valid") -> dict:
     return {"variants": kept, "dropped": dropped, "reason": str(data.get("reason", ""))[:500]}
 
 
-def apply_edits(copy_root: Path, edits: list[dict]) -> str | None:
-    """Apply find/replace edits to a copy of the task. None on success, else why not."""
+def apply_edits(copy_root: Path, edits: list[dict], solution: str | None = None) -> str | None:
+    """Apply find/replace edits to a copy of the task. None on success, else why not.
+    `solution` is the SOLUTION value the copy will run with."""
     root = copy_root.resolve()
     for edit in edits:
         target = (copy_root / edit["file"]).resolve()
@@ -212,5 +232,7 @@ def apply_edits(copy_root: Path, edits: list[dict]) -> str | None:
         text = target.read_text(errors="replace")
         if not edit["find"] or text.count(edit["find"]) != 1:
             return f"the text to replace does not appear exactly once in {edit['file']}"
+        if solution is not None and (unused := solution_variants.unused_edit(copy_root, solution, edit["file"], edit["find"])):
+            return unused
         target.write_text(text.replace(edit["find"], edit["replace"], 1))
     return None

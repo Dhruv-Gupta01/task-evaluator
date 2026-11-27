@@ -54,6 +54,11 @@ A `solution/` change is a patch version bump. Write it as `version` under `[task
 stay closed until it passes (Tier 0 and the Worker probe do not need it). A task with only one solution is not allowed: there is no
 exemption.
 
+The three probes run once for **each** declared solution, with that `SOLUTION` value: up to 4 valid variants and 4
+broken answers per solution, and every probed edge case against each solution. An edit to code the targeted
+solution does not run is shown as "did not run". Keep each solution in its own script (`solve_1.sh`, `solve_2.sh`)
+so the platform can tell which code belongs to which.
+
 When Tier 1 patches a task, every declared solution must still score 1 on the patched copy.
 
 ## What "different" means

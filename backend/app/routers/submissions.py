@@ -532,9 +532,10 @@ async def trigger_rubric_check(
 
 @router.post("/submissions/{submission_id}/variant-probe", status_code=202)
 async def trigger_variant_probe(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
-    """Advisory. A model proposes forms of the Oracle's answer that the
-    instruction allows; each runs through the real verifier as an Oracle trial
-    on a temporary copy of the task (sequentially, up to 4). A rejected variant
+    """Advisory. For each declared Oracle solution a model proposes up to 4 forms
+    of its answer that the instruction allows; each runs through the real verifier
+    as an Oracle trial with that SOLUTION on a temporary copy of the task
+    (sequentially). A rejected variant
     means the grader may accept fewer forms than the instruction does. Needs a
     passing Oracle run first, so a failure can't be blamed on a broken task."""
     _raise_if_over_budget(db, budget.judge_exceeded_message(db))
@@ -556,8 +557,8 @@ async def trigger_variant_probe(submission_id: str, db: Session = Depends(get_db
 
 @router.post("/submissions/{submission_id}/weak-probe", status_code=202)
 async def trigger_weak_probe(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
-    """Advisory. Up to 6 deliberately broken versions of the Oracle's answer
-    run through the real verifier (one Oracle trial each, sequentially); each
+    """Advisory. Up to 4 deliberately broken versions of each declared Oracle
+    solution run through the real verifier (one Oracle trial each, sequentially); each
     must score 0. One that scores 1 means the grader is weaker than the
     instruction. Needs a passing Oracle run first."""
     _raise_if_over_budget(db, budget.judge_exceeded_message(db))
@@ -581,7 +582,7 @@ async def trigger_edge_cases(
     (from the instruction alone), a second checks each against the tests.
     Uncovered cases are findings for a human. No Docker needed, unless
     probe=true: then every uncovered case also runs through the real
-    verifier as a deliberately wrong Oracle copy (needs an Oracle pass).
+    verifier as a deliberately wrong copy of each declared Oracle solution (needs an Oracle pass).
     probe_covered=true (with probe) probes the covered cases too, to check
     the judge's "covered" verdicts against the real grader."""
     _raise_if_over_budget(db, budget.judge_exceeded_message(db))

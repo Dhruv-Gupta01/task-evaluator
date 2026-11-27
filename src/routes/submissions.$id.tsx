@@ -1113,9 +1113,9 @@ function SubmissionDetail() {
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            The second button also breaks the Oracle&apos;s answer on every uncovered case and runs
-            it through the real verifier: scoring 1 confirms the case is untested. Each case is a
-            full Oracle run, so a long list takes a while.
+            The second button also breaks each Oracle solution on every uncovered case and runs it
+            through the real verifier: scoring 1 confirms the case is untested. That is one full
+            Oracle run per case and solution, so a long list takes a while.
           </p>
           <label className="flex items-center gap-2 text-xs text-muted-foreground">
             <input
@@ -1165,7 +1165,7 @@ function SubmissionDetail() {
         {/* Valid-variant probe */}
         <StageCard
           title="Valid-Variant Probe"
-          description="Is the grader stricter than the instruction? A model proposes other forms of the Oracle's answer that the instruction allows (a number format, the other accepted identifier, an order left free); each runs through the real verifier on a temporary copy of the task. A rejected variant may mean the grader is too strict — or that the variant was not really allowed, so read the quoted sentence. Advisory."
+          description="Is the grader stricter than the instruction? For each declared Oracle solution, a model proposes up to 4 other forms of its answer that the instruction allows (a number format, the other accepted identifier, an order left free); each runs through the real verifier on a temporary copy of the task. A rejected variant may mean the grader is too strict — or that the variant was not really allowed, so read the quoted sentence. Advisory."
           status={data.variant_probe.status}
         >
           <div className="flex flex-wrap items-center gap-2">
@@ -1185,7 +1185,7 @@ function SubmissionDetail() {
         {/* Weak-answer probe */}
         <StageCard
           title="Weak-Answer Probe"
-          description="Is the grader weaker than the instruction? A model breaks one stated rule at a time in the Oracle's answer (up to 6 breakages), and each broken answer runs through the real verifier. It must score 0; a broken answer that still passes means a stated rule is not enforced. Advisory."
+          description="Is the grader weaker than the instruction? For each declared Oracle solution, a model breaks one stated rule at a time (up to 4 breakages per solution), and each broken answer runs through the real verifier. It must score 0; a broken answer that still passes means a stated rule is not enforced. Advisory."
           status={data.weak_probe.status}
         >
           <div className="flex flex-wrap items-center gap-2">
@@ -2772,6 +2772,13 @@ function EdgeCasesView({ logs }: { logs?: string }) {
               {c.probe.description && (
                 <span className="text-muted-foreground"> ({c.probe.description})</span>
               )}
+              {c.probes?.some((p) => p.solution) && (
+                <div className="text-muted-foreground">
+                  {c.probes
+                    .map((p) => `SOLUTION=${p.solution}: ${p.status.replaceAll("_", " ")}`)
+                    .join(" · ")}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -2803,7 +2810,14 @@ function VariantProbeView({ logs }: { logs?: string }) {
       {parsed.variants.map((v, i) => (
         <div key={i} className="rounded-md border border-border p-3">
           <div className="flex items-center justify-between gap-2">
-            <span>{v.description}</span>
+            <span>
+              {v.solution && (
+                <span className="font-mono text-xs text-muted-foreground">
+                  SOLUTION={v.solution}{" "}
+                </span>
+              )}
+              {v.description}
+            </span>
             <span
               className={`text-xs font-medium ${
                 v.status === "accepted" || v.status === "caught"
@@ -2843,7 +2857,7 @@ function VariantProbeView({ logs }: { logs?: string }) {
       ))}
       {(parsed.dropped ?? []).map((d, i) => (
         <div key={`d${i}`} className="text-xs text-muted-foreground">
-          Dropped “{d.description}”: {d.reason}.
+          Dropped {d.solution ? `(SOLUTION=${d.solution}) ` : ""}“{d.description}”: {d.reason}.
         </div>
       ))}
     </div>

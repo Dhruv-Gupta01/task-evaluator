@@ -299,6 +299,7 @@ export interface EdgeCaseProbe {
   flags?: string[];
   note?: string;
   description?: string;
+  solution?: string | null; // the Oracle solution this result came from
 }
 export interface EdgeCases {
   cases: {
@@ -309,7 +310,8 @@ export interface EdgeCases {
     reason: string;
     // false: the reference solution itself does not handle this case.
     reference_handles?: boolean | null;
-    probe?: EdgeCaseProbe;
+    probe?: EdgeCaseProbe; // the deciding result: any slip, else any catch
+    probes?: EdgeCaseProbe[]; // one per Oracle solution
     // The judge said "covered", but a wrong answer still scored 1 through the grader.
     covered_claim_wrong?: boolean;
   }[];
@@ -702,6 +704,7 @@ export interface VariantProbeResult {
   logs?: string;
 }
 export interface VariantEntry {
+  solution?: string | null; // the Oracle solution (SOLUTION value) this edit ran against
   description: string;
   instruction_quote: string;
   status: "accepted" | "rejected" | "caught" | "slipped_through" | "did_not_run";
@@ -716,7 +719,7 @@ export interface VariantProbe {
   reason?: string;
   error?: string;
   in_progress?: boolean;
-  dropped?: { description: string; reason: string }[];
+  dropped?: { description: string; reason: string; solution?: string | null }[];
   variants: VariantEntry[];
 }
 

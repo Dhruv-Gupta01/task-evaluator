@@ -32,7 +32,7 @@ def _is_text(path: Path) -> bool:
     return True
 
 
-def read_text_files(root: Path, max_total: int | None = None) -> str:
+def read_text_files(root: Path, max_total: int | None = None, exclude: set[str] = frozenset()) -> str:
     settings = get_settings()
     max_file = settings.judge_max_file_chars
     max_total = max_total or settings.judge_max_total_chars
@@ -40,7 +40,7 @@ def read_text_files(root: Path, max_total: int | None = None) -> str:
     chunks: list[str] = []
     total = 0
     budget_reached = False
-    files = [p for p in sorted(root.rglob("*")) if p.is_file()]
+    files = [p for p in sorted(root.rglob("*")) if p.is_file() and p.relative_to(root).as_posix() not in exclude]
 
     for path in files:
         rel = path.relative_to(root)
