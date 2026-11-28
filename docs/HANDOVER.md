@@ -58,10 +58,13 @@ Files: backend/storage/submissions/{id}/ (zip, extracted task, logs, Harbor outp
 - **Harbor** (`uv tool install harbor==0.26.0`, the tested version) is Terminal-Bench's own test
   harness. The platform shells out to `harbor run` for Oracle, Nop and Agent Trials, and to
   `harbor analyze` and `harbor check` for Failure Analysis and Rubric Check.
-- **Vendored upstream code** (`backend/vendor/`): Terminal-Bench's 28 `check-*.sh` scripts, its
+- **Vendored upstream code** (`backend/vendor/`): Terminal-Bench's 29 `check-*.sh` scripts, its
   AI-detection script and five prompt/rubric files, copied verbatim at a pinned commit
-  (`2e29ca9`, 2026-10-15). `PROVENANCE.md` in each folder records the commit.
+  (`bdf6034`, 2026-11-16). `PROVENANCE.md` in each folder records the commit.
   `backend/scripts/diff_vendored_checks.py` shows how upstream has moved on; updating is manual.
+  Once the pin is older than `VENDOR_STALE_DAYS` (30) the TB Static Checks and Rubric Check
+  cards show an amber reminder. Each check may run for `TB_CHECK_TIMEOUT_SEC` (180 s); one that
+  runs out of time is "not run", which leaves the stage incomplete, never passed.
 
 ## 3. Features
 

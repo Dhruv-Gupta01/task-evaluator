@@ -1,9 +1,21 @@
 # Vendored: Terminal-Bench official static checks
 
 Source: https://github.com/harbor-framework/terminal-bench
-Path: `scripts/checks/check-*.sh`, `scripts/checks/check-cpu-threads.py`, `scripts/checks/check_ai_detection.py`
-Commit: `2e29ca91d5f1cb6fb60924bf867acc755565c044` (2026-10-15)
+Path: `scripts/checks/check-*.sh`, `scripts/checks/check-cpu-threads.py`, `scripts/checks/check-lockfiles.py`, `scripts/checks/check_ai_detection.py`
+Commit: `bdf60347ddb22be127cf3af14215c0385ea08705` (2026-11-16)
 License: Apache License 2.0 (see upstream repo's `LICENSE`)
+
+Refreshed on 2026-11-17 from the 2026-10-15 pin (`2e29ca9`) to upstream HEAD `bdf6034`
+(the last change under `scripts/checks/` is `73d6279`, 2026-11-03). It brought in:
+
+- `check-lockfiles.sh` + `check-lockfiles.py` (upstream #2107): every dependency
+  install in a Dockerfile must come from a committed lockfile. A `pip install` needs a
+  preceding `uv export --locked` and `--require-hashes --no-deps`; uv needs
+  `--locked`; npm needs `npm ci`; Cargo `--locked`; conda an explicit lock file. It
+  reads Dockerfiles without running them and needs PyYAML (the backend's own
+  interpreter has it). That makes 29 `check-*.sh` scripts.
+
+Every other vendored script is byte-identical to `bdf6034` (ignoring line endings).
 
 Refreshed on 2026-10-19 from the 2026-09-28 pin (`1dcda87`), which brought in:
 
@@ -18,9 +30,11 @@ Refreshed on 2026-10-19 from the 2026-09-28 pin (`1dcda87`), which brought in:
   pool settings (OMP/MKL/OpenBLAS) against `[environment].cpus`. It prints
   `WARN` lines and exits 0, so its output is shown even when it passes.
 - `check-image-digests.sh`: every `FROM` and compose `image:` must be digest
-  pinned. It needs the `dockerfile-pin` CLI on PATH (upstream CI installs
-  v1.5.0 from github.com/azu/dockerfile-pin); without it the result is
-  reported as "not run", not as a task failure.
+  pinned. It needs the `dockerfile-pin` CLI (upstream CI installs v1.5.0 from
+  github.com/azu/dockerfile-pin). `uv run python scripts/install_dockerfile_pin.py`
+  puts the same version, checked against its release sha256, in `backend/.tools/bin/`,
+  which the checks add to PATH. Without it the check is reported as "not run" and
+  the stage as incomplete, never as a pass.
 
 Upstream's `test-*.sh`/`test-*.py` files test the checks themselves and
 `rubric_review.py` drives their CI; neither is vendored. The canary change
@@ -30,7 +44,7 @@ discussed upstream (#2200/#2210) is not merged as of this commit, so
 `check_ai_detection.py` (Layer 3 of Terminal-Bench's own three-layer AI-usage
 detection -- see `docs/prompts/task-implementation.toml`'s `instruction_concision`
 criterion for Layer 2, already run via the platform's Rubric Check "TB" option)
-is genuinely NOT one of the `check-*.sh` scripts (28 since the refresh; a 29th file, `check-cpu-threads.py`, is a helper the shell script calls) and is NOT wired into any
+is genuinely NOT one of the `check-*.sh` scripts (29 since the 2026-11-17 refresh; `check-cpu-threads.py` and `check-lockfiles.py` are helpers their shell scripts call) and is NOT wired into any
 of TB's own automatic CI workflows -- confirmed directly against their
 `.github/workflows/`: it's optional, off by default, enabled only by adding a
 step with a `GPTZERO_API_KEY` secret. It calls a real third-party service

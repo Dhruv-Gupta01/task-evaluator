@@ -506,7 +506,7 @@ async def trigger_rubric_check(
 ) -> dict[str, str]:
     """`harbor check`: an evaluator agent scores the whole task against a
     rubric. Advisory. Needs ANTHROPIC_API_KEY (CHECK_AGENT defaults to
-    claude-code). The default is the vendored 36-criterion Terminal-Bench
+    claude-code). The default is the vendored Terminal-Bench
     rubric (4.1 A.4); rubric="default" uses Harbor's own 11-criterion one."""
     if rubric not in task_runner.RUBRICS:
         raise HTTPException(

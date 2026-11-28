@@ -31,6 +31,7 @@ from app.services import (
     tb_static_checks,
     validation_service,
     variant_probe,
+    vendor_info,
     verifier_report,
 )
 from app.services.llm import factory as llm_factory
@@ -1814,6 +1815,7 @@ async def run_tb_static_checks_stage(submission_id: str) -> None:
             db.commit()
             return
 
+        vendor = tb_static_checks.vendor_info()
         run.status, run.reward = tb_static_checks.stage_outcome(report)
         run.logs = json.dumps(
             {
@@ -1821,7 +1823,9 @@ async def run_tb_static_checks_stage(submission_id: str) -> None:
                 "pass_count": report.pass_count,
                 "fail_count": report.fail_count,
                 "skip_count": report.skip_count,
-                "vendor": tb_static_checks.vendor_info(),
+                "ran_count": report.ran_count,
+                "script_count": vendor["scripts"],
+                "vendor": vendor,
                 "results": [
                     {"name": r.name, "passed": r.passed, "output": r.output, "skipped": r.skipped}
                     for r in report.results
@@ -3170,7 +3174,7 @@ async def run_tier2_stage(
 
 async def run_rubric_check(submission_id: str, rubric: str = "tb") -> None:
     """`harbor check`: an evaluator agent reads the whole task and scores it
-    against a rubric -- the vendored 36-criterion Terminal-Bench rubric
+    against a rubric -- the vendored Terminal-Bench rubric
     (vendor/tb_prompts/, see PROVENANCE.md) by default, since criteria such as
     ctrf_reporting, verifier_execution_isolation, resource_configuration and
     effective_instruction_length exist only there (4.1 A.4), or Harbor's own
@@ -3214,6 +3218,7 @@ async def run_rubric_check(submission_id: str, rubric: str = "tb") -> None:
             )
 
         results = (outcome.report or {}).get("results") or []
+        info = vendor_info.rubric_info() if rubric == "tb" else None
         run.logs = json.dumps(
             {
                 "agent": settings.check_agent,
@@ -3222,6 +3227,12 @@ async def run_rubric_check(submission_id: str, rubric: str = "tb") -> None:
                 "error": outcome.error,
                 "results": results,
                 "rubric": rubric,
+                "rubric_info": info,
+                # Harbor ignores the rubric's `severity`, so a failed warning-level criterion
+                # is moved to `warnings` here: shown, never blocking.
+                "summary": vendor_info.rubric_summary(
+                    results, info["warning_criteria"] if info else []
+                ),
             }
         )
         has_checks = any(r.get("checks") for r in results)

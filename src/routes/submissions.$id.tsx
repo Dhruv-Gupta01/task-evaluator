@@ -20,6 +20,7 @@ import {
   type StageStatus,
   type StaticCheckReport,
   type TbStaticCheckReport,
+  type VendorInfo,
   type AiDetectionReport,
   type AnalysisCheck,
   type AgentTrialsResult,
@@ -894,13 +895,19 @@ function SubmissionDetail() {
                 <>
                   <div
                     className={`rounded-md border p-2.5 text-xs ${
-                      report.fail_count === 0
-                        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                        : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
+                      report.fail_count > 0
+                        ? "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400"
+                        : report.skip_count
+                          ? "border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-300"
+                          : "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
                     }`}
                   >
+                    {report.script_count != null &&
+                      `${report.ran_count ?? report.pass_count + report.fail_count} of ${report.script_count} checks ran: `}
                     {report.pass_count} pass, {report.fail_count} fail
-                    {report.skip_count ? `, ${report.skip_count} not run (a tool is missing, so the stage does not pass)` : ""}
+                    {report.skip_count
+                      ? `, ${report.skip_count} not run (a tool is missing or it timed out), so this is not a complete pass`
+                      : ""}
                     {report.vendor?.commit && (
                       <span className="block text-muted-foreground">
                         Rule set: upstream{" "}
@@ -910,6 +917,7 @@ function SubmissionDetail() {
                       </span>
                     )}
                   </div>
+                  <VendorReminder info={report.vendor} />
                   <LogPanel logs={report.text} title="TB check findings" />
                 </>
               );
@@ -3017,7 +3025,7 @@ function LayerBadge({ outcome }: { outcome: string }) {
 // pulled from data already gathered by Rubric Check (TB rubric) and AI
 // Detection above -- shown side by side, never merged into one score.
 // Layer 1 is a written policy (no check to run). Layer 2 is one criterion
-// (instruction_concision) inside the 35-criteria rubric -- an LLM's
+// (instruction_concision) inside the TB rubric -- an LLM's
 // subjective opinion. Layer 3 is a real GPTZero measurement, entirely
 // independent of Layer 2's opinion.
 function AiLayersOverview({
@@ -3155,6 +3163,16 @@ function CheatTrialView({ status, logs }: { status: StageStatus; logs?: string }
   );
 }
 
+// Shown when the vendored upstream files are older than VENDOR_STALE_DAYS.
+function VendorReminder({ info }: { info?: VendorInfo | null }) {
+  if (!info?.stale || !info.reminder) return null;
+  return (
+    <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-800 dark:text-amber-300">
+      {info.reminder}
+    </div>
+  );
+}
+
 function RubricCheckView({ logs }: { logs?: string }) {
   if (!logs) return null;
   let parsed: RubricCheck | null = null;
@@ -3163,13 +3181,31 @@ function RubricCheckView({ logs }: { logs?: string }) {
   } catch {
     return <LogPanel logs={logs} title="Rubric check output" />;
   }
+  // Harbor ignores the rubric's severity field; these criteria fail as warnings, not blockers.
+  const warningCriteria = parsed.rubric_info?.warning_criteria;
   return (
     <div className="space-y-3">
       <div className="text-xs text-muted-foreground">
         {parsed.agent} · {parsed.model}
         {parsed.cost_usd != null && <> · ${parsed.cost_usd.toFixed(3)}</>}
         {parsed.rubric && <> · {parsed.rubric} rubric</>}
+        {parsed.rubric_info && (
+          <>
+            {" "}
+            ({parsed.rubric_info.criteria} criteria
+            {parsed.rubric_info.commit && <>, upstream {parsed.rubric_info.commit.slice(0, 7)}</>}
+            {parsed.rubric_info.date && <> of {parsed.rubric_info.date}</>})
+          </>
+        )}
+        {parsed.summary && (
+          <>
+            {" "}
+            · {parsed.summary.passed} pass, {parsed.summary.blocking_fails.length} fail,{" "}
+            {parsed.summary.warnings.length} warning (non-blocking)
+          </>
+        )}
       </div>
+      <VendorReminder info={parsed.rubric_info} />
       {parsed.error && (
         <div className="rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs whitespace-pre-wrap max-h-48 overflow-y-auto">
           {parsed.error}
@@ -3186,22 +3222,27 @@ function RubricCheckView({ logs }: { logs?: string }) {
             <>
               {r.summary && <p className="mt-1 whitespace-pre-wrap">{r.summary}</p>}
               <ul className="mt-2 space-y-1.5">
-                {Object.entries(r.checks).map(([name, c]) => (
-                  <li key={name} className="text-xs">
-                    <span
-                      className={`mr-2 rounded px-1.5 py-0.5 font-medium ${
-                        c.outcome === "pass"
-                          ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
-                          : c.outcome === "fail"
-                          ? "bg-red-500/15 text-red-700 dark:text-red-400"
-                          : "bg-muted text-muted-foreground"
-                      }`}
-                    >
-                      {name}: {c.outcome}
-                    </span>
-                    <span className="text-muted-foreground">{c.explanation}</span>
-                  </li>
-                ))}
+                {Object.entries(r.checks).map(([name, c]) => {
+                  const warning = c.outcome === "fail" && !!warningCriteria?.includes(name);
+                  return (
+                    <li key={name} className="text-xs">
+                      <span
+                        className={`mr-2 rounded px-1.5 py-0.5 font-medium ${
+                          c.outcome === "pass"
+                            ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                            : warning
+                              ? "bg-amber-500/15 text-amber-800 dark:text-amber-300"
+                              : c.outcome === "fail"
+                                ? "bg-red-500/15 text-red-700 dark:text-red-400"
+                                : "bg-muted text-muted-foreground"
+                        }`}
+                      >
+                        {name}: {warning ? "warning (non-blocking)" : c.outcome}
+                      </span>
+                      <span className="text-muted-foreground">{c.explanation}</span>
+                    </li>
+                  );
+                })}
               </ul>
             </>
           )}

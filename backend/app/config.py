@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     # edit both in .env when the plan or the exchange rate changes.
     gptzero_inr_per_word: float = 0.014207
     usd_inr_rate: float = 96.9
+    # The vendored TB checks and rubric get a "run scripts/diff_vendored_checks.py"
+    # reminder once their upstream commit is older than this. 0 turns it off.
+    vendor_stale_days: int = 30
+    # Per-script limit for the vendored TB checks. A check that runs out of time is
+    # reported as not run, never as a fail or a pass.
+    tb_check_timeout_sec: int = 180
 
     # Defaults applied when a task.toml omits a section
     default_cpus: float = 1.0
@@ -140,7 +146,7 @@ class Settings(BaseSettings):
     check_model: str = "anthropic/claude-fable-5-1"
     check_timeout_sec: int = 3600
     # How long the Rubric Check's evaluator agent may work. Harbor fixes this at 1800 s; the
-    # 36-criterion TB rubric over a large task can need longer, and a run that hits the wall
+    # full TB rubric over a large task can need longer, and a run that hits the wall
     # has already spent its tokens and returns no verdict.
     check_agent_timeout_sec: int = 3300
     # Same idea for the rubric check: empty = the model's own default effort.
