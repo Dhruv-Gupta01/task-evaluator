@@ -49,6 +49,7 @@ import { GraderIsolationPanel } from "@/components/GraderIsolationPanel";
 import { WorkerProbePanel } from "@/components/WorkerProbePanel";
 import { HashProofPanel } from "@/components/HashProofPanel";
 import { EvidenceSetPanel } from "@/components/EvidenceSetPanel";
+import { AgentRubricPanel } from "@/components/AgentRubricPanel";
 import { AiRulingPanel } from "@/components/AiRulingPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1672,6 +1673,13 @@ function SubmissionDetail() {
             mainModel={agentModel}
             agentModels={agentModels}
             modelChoices={modelChoices}
+          />
+
+          <AgentRubricPanel
+            id={id}
+            data={data.agent_rubric ?? { status: "not-run" }}
+            hasTrials={data.agent_trials.n > 0}
+            onChange={invalidate}
           />
 
           {data.agent_trials.trials && data.agent_trials.trials.length > 0 && (

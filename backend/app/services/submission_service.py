@@ -716,6 +716,7 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         checksum=_checksum_info(submission),
         result_warnings=_result_warnings(submission, agent_trials),
         evidence_set=_evidence_set_result(_get_run(submission, "evidence_runs")),
+        agent_rubric=_evidence_set_result(_get_run(submission, "agent_rubric")),
     )
 
 

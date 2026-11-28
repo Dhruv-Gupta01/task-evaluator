@@ -534,6 +534,9 @@ class SubmissionSchema(BaseModel):
     # 15.12, 15.31). Never a gate, no ruling.
     result_warnings: list[str] = []
     evidence_set: EvidenceSetResult = EvidenceSetResult(status="not-run")
+    # Agent rubric draft (services/generators.agent_rubric). logs is JSON: {items: [{criterion, pass_when, weight,
+    # evidence: [{trial, quote}], unverified_evidence}], dropped, model, trials, transcript_chars, error?}.
+    agent_rubric: EvidenceSetResult = EvidenceSetResult(status="not-run")
 
 
 class SubmissionListItem(BaseModel):

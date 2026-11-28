@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Upload, RefreshCw } from "lucide-react";
 import { api, type SubmissionListItem } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
+import { IdeaReviewCard } from "@/components/IdeaReviewCard";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
@@ -109,6 +110,8 @@ function SubmissionsPage() {
             {upload.isPending ? "Uploading…" : "Upload Zip"}
           </Button>
         </div>
+
+        <IdeaReviewCard />
 
         <div className="rounded-lg border border-border">
           <div className="border-b border-border px-4 py-3 text-sm font-medium">

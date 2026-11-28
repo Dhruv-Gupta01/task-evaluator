@@ -1691,6 +1691,22 @@ async def _retry_infra_agent_failures(
         db.commit()
 
 
+def agent_transcripts(submission_id: str) -> dict[str, str]:
+    """Every agent trial's full transcript, keyed "<job>/<trial>", from the trial folders Failure Analysis reads
+    (runs/agent/harbor/agent-*/<trial>/ with a result.json). The same condensed transcript the Tier judges read:
+    every step kept, no overall cap. A trial with no trajectory.json is left out."""
+    from app.services.tier1 import hacker as tier1_hacker
+
+    agent_root = settings.storage_dir / "submissions" / submission_id / "runs" / "agent" / "harbor"
+    out: dict[str, str] = {}
+    for job in sorted((d for d in agent_root.glob("agent-*") if d.is_dir()), key=lambda d: d.name):
+        for trial in sorted(d for d in job.iterdir() if d.is_dir() and (d / "result.json").is_file()):
+            text = tier1_hacker.condense_trajectory(trial)
+            if text:
+                out[f"{job.name}/{trial.name}"] = text
+    return out
+
+
 EVIDENCE_SETS = ("standard", "cheap")
 
 

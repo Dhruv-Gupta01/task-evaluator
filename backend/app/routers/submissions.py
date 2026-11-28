@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.models import LlmSpend, Run, Submission
 from app.schemas import SubmissionListItem, SubmissionSchema, UploadResponse
-from app.services import ai_audit, budget, redaction, grader_isolation, solution_variants, submission_diff, submission_service, task_runner, versioning, versions
+from app.services import ai_audit, budget, generators, redaction, grader_isolation, solution_variants, submission_diff, submission_service, task_runner, versioning, versions
 from app.workers import task_queue
 
 router = APIRouter()
@@ -797,6 +797,78 @@ async def trigger_image_inventory(submission_id: str, db: Session = Depends(get_
         f"{submission_id}:image_inventory", task_runner.run_image_inventory_stage(submission_id)
     )
     return {"status": "started"}
+
+
+class IdeaBody(BaseModel):
+    idea: str
+
+
+IDEA_REVIEW_DIR = "idea_reviews"
+
+
+@router.post("/idea-review")
+async def idea_review(body: IdeaBody, db: Session = Depends(get_db)) -> dict:
+    """Reviews a task idea before it is built, with Terminal-Bench's own proposal prompt, its task guidelines and
+    the list of accepted tasks (services/generators.py). One judge-model call, counted in the budget. Saved under
+    storage/idea_reviews/; a person reads it, nothing acts on it."""
+    if not 20 <= len(body.idea.strip()) <= 20_000:
+        raise HTTPException(status_code=400, detail="describe the idea in 20 to 20000 characters")
+    _raise_if_over_budget(db, budget.judge_exceeded_message(db))
+    with task_runner._track_llm_spend(db, "idea-review", "idea_review"):
+        result = await generators.idea_review(body.idea)
+    db.commit()
+    review_id = uuid.uuid4().hex[:12]
+    folder = settings.storage_dir / IDEA_REVIEW_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    saved = {"id": review_id, "created_at": datetime.now(UTC).isoformat(), "idea": body.idea, **result}
+    (folder / f"{review_id}.json").write_text(json.dumps(saved, indent=1), encoding="utf-8")
+    return saved
+
+
+@router.get("/idea-reviews")
+def list_idea_reviews(limit: int = 10) -> list[dict]:
+    """The newest saved idea reviews, newest first."""
+    folder = settings.storage_dir / IDEA_REVIEW_DIR
+    if not folder.is_dir():
+        return []
+    out = []
+    for path in sorted(folder.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[: max(1, min(limit, 50))]:
+        try:
+            out.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+@router.post("/submissions/{submission_id}/agent-rubric")
+async def agent_rubric(submission_id: str, db: Session = Depends(get_db)) -> dict:
+    """Rubric items about how the agents worked, each backed by a quote checked word for word against the trial
+    it names (services/generators.py). Reads every agent trial's full transcript; needs agent trials. One
+    judge-model call, counted in the budget. Run kind "agent_rubric"; a person reviews it."""
+    submission = db.get(Submission, submission_id)
+    if submission is None or submission.extracted_path is None:
+        raise HTTPException(status_code=404, detail="submission not found or not extracted")
+    trajectories = task_runner.agent_transcripts(submission_id)
+    if not trajectories:
+        raise HTTPException(status_code=400, detail="no agent trial transcripts yet: run agent trials first")
+    instruction = (Path(submission.extracted_path) / "instruction.md").read_text(encoding="utf-8", errors="replace")
+    _raise_if_over_budget(db, budget.judge_exceeded_message(db))
+    run = db.query(Run).filter_by(submission_id=submission_id, kind="agent_rubric", run_index=0).one_or_none()
+    if run is None:
+        run = Run(submission_id=submission_id, kind="agent_rubric", run_index=0)
+        db.add(run)
+    run.started_at = datetime.now(UTC)
+    try:
+        with task_runner._track_llm_spend(db, submission_id, "agent_rubric"):
+            result = await generators.agent_rubric(instruction, trajectories)
+    except Exception as exc:  # noqa: BLE001 - e.g. the transcripts do not fit the model's context
+        result = {"items": [], "dropped": [], "trials": sorted(trajectories), "error": f"{type(exc).__name__}: {exc}"[:2000]}
+    run.status = "failed" if result.get("error") else "passed"
+    run.reward = None
+    run.logs = json.dumps(result)
+    run.finished_at = datetime.now(UTC)
+    db.commit()
+    return result
 
 
 @router.post("/submissions/{submission_id}/evidence-set", status_code=202)

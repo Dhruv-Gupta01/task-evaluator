@@ -748,6 +748,20 @@ export interface EvidenceSetResult {
   logs?: string | null;
 }
 
+// Agent rubric draft (backend generators.agent_rubric). logs is JSON: {items, dropped, model, trials,
+// transcript_chars, error?}.
+export type AgentRubricResult = EvidenceSetResult;
+
+// Idea review (backend POST /idea-review), saved under storage/idea_reviews/.
+export interface IdeaReview {
+  id: string;
+  created_at: string;
+  idea: string;
+  review: string;
+  prompt: string;
+  model: string;
+}
+
 export interface FreshBuildResult {
   status: StageStatus;
   logs?: string;
@@ -1061,6 +1075,7 @@ export interface Submission {
   // starting with its rule id (15.6, 15.11, 15.12, 15.31). Never a gate, no ruling.
   result_warnings?: string[];
   evidence_set?: EvidenceSetResult;
+  agent_rubric?: AgentRubricResult;
 }
 
 export interface SubmissionListItem {
@@ -1264,6 +1279,17 @@ export const api = {
       handle<unknown>,
     );
   },
+  ideaReview: (idea: string) =>
+    fetch(`${API_BASE_URL}/idea-review`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ idea }),
+    }).then(handle<IdeaReview>),
+  listIdeaReviews: () => fetch(`${API_BASE_URL}/idea-reviews`).then(handle<IdeaReview[]>),
+  agentRubric: (id: string) =>
+    fetch(`${API_BASE_URL}/submissions/${id}/agent-rubric`, { method: "POST" }).then(
+      handle<unknown>,
+    ),
   freshBuild: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/fresh-build`, { method: "POST" }).then(
       handle<unknown>,
