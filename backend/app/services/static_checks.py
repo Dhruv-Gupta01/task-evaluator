@@ -12,6 +12,7 @@ from pathlib import Path
 from app.services.hygiene_checks import _own_files, run_hygiene_checks
 from app.services.agent_user_checks import check_agent_user
 from app.services.pinning_checks import check_hf_revisions, check_licences_and_size, check_toolchain_pinning
+from app.services.harborignore_checks import check_harborignore
 from app.services.reward_kit_checks import check_harbor_lint, check_reward_kit, uses_reward_kit
 from app.services.platform_checks import check_bundled_binaries, check_resources
 from app.services.reproducibility_checks import run_reproducibility_checks
@@ -459,6 +460,7 @@ def run_static_checks(task_root: Path) -> StaticCheckReport:
     check_resources(task_root, report)
     for check in (
         check_toolchain_pinning, check_hf_revisions, check_licences_and_size, check_reward_kit, check_harbor_lint,
+        check_harborignore,
     ):
         try:
             check(task_root, report)

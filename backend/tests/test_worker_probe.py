@@ -107,3 +107,31 @@ def test_the_driver_is_valid_python_after_substitution():
     import ast
     src = wp.DRIVER.replace("__SCRIPT__", repr(wp.PROBE_SCRIPT)).replace("__LEFTOVER__", repr(wp.LEFTOVER_PATTERN))
     ast.parse(src.replace("__SENTINEL__", wp.SENTINEL).replace("__MARKER__", wp.MARKER))
+
+
+def test_the_probe_image_is_built_from_what_harbor_uploads(tmp_path, monkeypatch):
+    """The Worker probe builds the grader image from tests/ minus what a .harborignore rule keeps out, like Tier 0's
+    replica, so the image holds what the real verifier gets (a generator left out stays out)."""
+    import pytest
+
+    from app.services import worker_probe
+    from app.services.tier0 import docker_runner as dr
+
+    tests = tmp_path / "tests"
+    (tests / "generator").mkdir(parents=True)
+    (tests / "generator" / "make_answers.py").write_text("print(1)\n")
+    (tests / "Dockerfile").write_text("FROM python:3.13-slim\nCOPY . /tests/\n")
+    (tests / "test.sh").write_text("#!/bin/bash\n")
+    (tests / ".harborignore").write_text("generator/\n")
+    monkeypatch.setattr(worker_probe, "analyze_worker_requirement", lambda root: {"result": "present"})
+    monkeypatch.setattr(dr, "require_docker", lambda: None)
+    seen: dict = {}
+
+    def fake_build(dockerfile, context, tag, platform, timeout):
+        seen["files"] = sorted(p.relative_to(context).as_posix() for p in context.rglob("*") if p.is_file())
+        raise RuntimeError("stop after the build step")
+
+    monkeypatch.setattr(dr, "_build", fake_build)
+    with pytest.raises(RuntimeError):
+        worker_probe.run_worker_probe(tmp_path)
+    assert seen["files"] == ["Dockerfile", "test.sh"]

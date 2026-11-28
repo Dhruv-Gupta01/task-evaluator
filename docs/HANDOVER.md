@@ -130,12 +130,13 @@ The README has a longer table of the same stages with the extra detail added in 
 Built from `harbor-5.0`: Reward Kit, the three cheat-trial tiers, Harbor 0.26.0 and the Worker work below.
 **Not on this branch yet** (they live on `merge-reward-kit-into-post-fixes` and are being brought over one at a
 time since 2026-11-28): the Flags system and its panels,
-session-log integrity (deferred for review), `.harborignore` handling, web-use counting,
+session-log integrity (deferred for review), web-use counting,
 versioning, evidence-set runs and generators. Solution variants are replaced
 here by `oracle_solutions`. A section here that mentions one of them would be wrong for this branch. Already
 brought over: the vendored checks at `bdf6034`, the task name from `[task] name`, Harbor's error policy, four
 Static Checks (printed success words, Lean output, one-sample timing, timed repeats), the prompt guards, the
-Tier 0 probes G17 to G27, the regrade classifier, secret redaction on export and the output scan.
+Tier 0 probes G17 to G27, the regrade classifier, secret redaction on export, the output scan, Failure
+Analysis per trial and `.harborignore` handling.
 
 - **Tier cycle ("Run all tiers")**: Tier 0 (static probes), Tier 1 (hinted agent plus fixer) and
   Tier 2 (unhinted agent) repeat on the patched task until a round needs no patch (no round
@@ -186,7 +187,7 @@ Tier 0 probes G17 to G27, the regrade classifier, secret redaction on export and
     only; none of the stored real tasks queries localhost.
   - **Worker probe** (`services/worker_probe.py`, `POST`/`GET /submissions/{id}/worker-probe`, the Worker Probe card,
     a "Worker probe" line in the evidence summary and `worker_probe` in the evidence download): builds the task's own
-    verifier image, runs a Worker in it as root, and has it try to read `/tests`, write the reward file, keep a
+    verifier image (from `tests/` minus what `.harborignore` keeps out, like Harbor), runs a Worker in it as root, and has it try to read `/tests`, write the reward file, keep a
     background process and read the environment. Ten checks (non-root uid and gid, no extra groups, no-new-privs, no
     capabilities, `/tests` and the reward file unreachable, reward intact, environment not inherited, leftovers
     killed). Reward Kit 0.2.4 already verifies most of this itself and fails closed; the probe shows what it looks like
@@ -345,8 +346,8 @@ Read these before relying on the platform.
   force-push, and never rebase, amend or squash commits that are already pushed.** Push with
   `git -c http.postBuffer=524288000 push origin <branch>`.
 - **Tests**: `backend/tests/` (no Docker or database needed). From `backend/`:
-  `PYTHONPATH=. UV_PYTHON=3.13 uv run --with pytest --with httpx pytest -q tests` (give it `tests`: a bare `pytest` also
-  collects files under `storage/`, which runs leave behind; Python 3.15 has no `psycopg-binary` wheel). The Worker
+  `UV_PYTHON=3.13 uv run --with pytest --with httpx pytest -q` (`pyproject.toml` points pytest at `tests/`, so files
+  under `storage/` that runs leave behind are not collected; Python 3.15 has no `psycopg-binary` wheel). The Worker
   probe's Docker part is checked by running it on a real task, not in the suite. `docs/testing/` holds recorded runs
   on real Terminal-Bench tasks with the platform's results, for 4.0, 4.1 and 5.0 checks. Use `examples/smoke-task`
   for a quick check that the setup works.

@@ -22,6 +22,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
+from app.services import harborignore
 from app.services.verifier_isolation import analyze_worker_requirement
 
 SENTINEL = "SENTINEL"
@@ -184,7 +185,8 @@ def run_worker_probe(task_root: Path, platform: str | None = None, build_timeout
     cid = None
     try:
         context = workdir / "tests"
-        shutil.copytree(tests, context)
+        # What Harbor builds and uploads: tests/ minus the files a .harborignore rule keeps out (as Tier 0's replica).
+        harborignore.copy_tests(task_root, context)
         dr._build(context / "Dockerfile", context, tag, platform, build_timeout)
         cid = dr._start(tag, platform, name)
         python = _python_for_rewardkit((tests / "test.sh").read_text() if (tests / "test.sh").is_file() else "")

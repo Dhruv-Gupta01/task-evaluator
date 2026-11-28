@@ -6,7 +6,7 @@ import re
 import shutil
 from pathlib import Path
 
-from app.services import harbor_runner
+from app.services import harbor_runner, harborignore
 
 HINT_DIR = "/hinted-tests"
 _COPY_NAME = "_hinted_tests"  # folder inside environment/ (the Docker build context)
@@ -28,7 +28,8 @@ def build_hinted_task(src: Path, dest: Path) -> str | None:
     if dest.exists():
         shutil.rmtree(dest)
     shutil.copytree(src, dest, symlinks=True)
-    shutil.copytree(src / "tests", dest / "environment" / _COPY_NAME, symlinks=True)
+    # the hint is what the verifier gets: tests/ without the files a .harborignore rule keeps out
+    harborignore.copy_tests(src, dest / "environment" / _COPY_NAME)
     text = (dest / "environment" / "Dockerfile").read_text()
     users = re.findall(r"^\s*USER\s+(\S+)", text, flags=re.IGNORECASE | re.MULTILINE)
     lines = [

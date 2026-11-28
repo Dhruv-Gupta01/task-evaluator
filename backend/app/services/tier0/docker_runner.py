@@ -35,6 +35,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.services import harborignore
+
 from . import mutants as mutants_mod
 from .taskspec import TaskSpec
 
@@ -145,7 +147,8 @@ def build_verifier_image(spec: TaskSpec, platform: str | None = None,
     """
     staging = Path(tempfile.mkdtemp(prefix=f"probe-tests-{spec.slug}-"))
     tests_copy = staging / "tests"
-    shutil.copytree(spec.root / "tests", tests_copy, symlinks=True)
+    # What Harbor uploads into the verifier: tests/ minus the files a .harborignore rule excludes.
+    harborignore.copy_tests(spec.root, tests_copy)
     ids = _as_list(mutant)
     for mid in ids:
         m = mutants_mod.get(mid)

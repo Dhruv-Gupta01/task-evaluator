@@ -42,6 +42,8 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.services.harborignore import TaskIgnore
+
 
 @dataclass(frozen=True)
 class Mutant:
@@ -208,9 +210,10 @@ def literal_candidates(tests_dir: Path) -> list[tuple[str, str, int]]:
     Constants built inside functions or by code are not covered.
     """
     out: list[tuple[str, str, int]] = []
+    ignore = TaskIgnore(tests_dir.parent)  # a file a .harborignore rule excludes is not in the real verifier
     for path in sorted(tests_dir.rglob("*.py")):
         rel_parts = path.relative_to(tests_dir).parts
-        if any(part in _SKIP_PARTS or part.startswith(".") for part in rel_parts):
+        if any(part in _SKIP_PARTS or part.startswith(".") for part in rel_parts) or ignore.is_excluded(path):
             continue
         try:
             if path.stat().st_size > 2_000_000:
@@ -274,7 +277,8 @@ def expand(tests_dir: Path, ids: tuple[str, ...] | None) -> list[str]:
         if mid != GENERIC_DROP_DIRS:
             out.append(mid)
             continue
-        entries = sorted(tests_dir.iterdir(), key=lambda p: p.name)
+        ignore = TaskIgnore(tests_dir.parent)
+        entries = sorted((p for p in tests_dir.iterdir() if not ignore.is_excluded(p)), key=lambda p: p.name)
         names = [
             p.name for p in entries
             if p.is_dir() and not p.name.startswith((".", "_")) and p.name != "node_modules"
