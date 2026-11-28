@@ -112,7 +112,8 @@ There are no exemptions: a task that fails is revised and uploaded again. `examp
 ### Around the stages
 
 - **Changes banner**: compares an upload with the latest earlier upload of the same task name
-  (amber when tests were removed).
+  (amber when tests were removed). The name is `task.toml`'s `[task] name` without the
+  `terminal-bench/` prefix, not the zip's file name, so a renamed zip still finds its earlier upload.
 - **Task version check**: every Oracle, Nop and agent run records the task checksum Harbor
   reports. A red banner appears if runs on one submission used different task copies.
 - **Verifier report**: per-test results, flags where reward and tests disagree, time and memory
