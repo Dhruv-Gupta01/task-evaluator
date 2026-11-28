@@ -221,8 +221,11 @@ All advisory, no new buttons; each extends an existing stage.
   a failing trial as "environment, not the agent". Image Contents records architecture, OS and
   glibc; run limits warn on glibc below 2.36 and an image/platform mismatch.
 - **Grader hardening**: extra Static Checks for a grader that reads the submission's source to
-  enforce a rule or leaks file descriptors to agent code; a Targeted Cheat Trial prompt built from
-  the task's own restrictions (never run by default); more cases in the Weak-Answer Probe.
+  enforce a rule or leaks file descriptors to agent code, trusts a success word the agent's program
+  prints, or decides from text in Lean's output; notes for a timing assertion on one sample and for
+  a timed call repeated on one input (agent code can cache the answer); a Targeted Cheat Trial
+  prompt built from the task's own restrictions (never run by default); more cases in the
+  Weak-Answer Probe.
 - **Sufficiency and edge-case recall**: the judge adds field, docstring, number, identifier and
   ground-truth checks; Edge-Case Coverage reads format and spec files and checks the Oracle handles
   each option.
