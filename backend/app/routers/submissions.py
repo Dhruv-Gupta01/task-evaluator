@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.models import LlmSpend, Run, Submission
 from app.schemas import SubmissionListItem, SubmissionSchema, UploadResponse
-from app.services import ai_audit, budget, grader_isolation, solution_variants, submission_diff, submission_service, task_runner, versions
+from app.services import ai_audit, budget, redaction, grader_isolation, solution_variants, submission_diff, submission_service, task_runner, versions
 from app.workers import task_queue
 
 router = APIRouter()
@@ -1119,10 +1119,13 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
             schema, total_cost_usd, cost_report
         ),
     }
-    # C10: strip host usernames from every absolute /Users|home/<user>/...
-    # path before this leaves the platform -- the raw versions are fine in
-    # the UI/DB, just never in something meant for outside reading.
-    bundle = submission_service.redact_host_paths(bundle)
+    # Before this leaves the platform: strip host usernames from absolute paths (C10) and every secret
+    # (services/redaction.py: keys this machine holds, key-shaped strings, NAME_API_KEY=value). Codex and
+    # Claude Code get the provider key inside the container, so an agent that dumps its environment puts
+    # it in the trial log. The raw versions stay in the UI and the database.
+    counts: dict[str, int] = {}
+    bundle = redaction.redact_secrets(redaction.redact_host_paths(bundle), counts)
+    bundle["secret_redactions"] = counts
     body = json.dumps(bundle, indent=2)
     return Response(
         content=body,

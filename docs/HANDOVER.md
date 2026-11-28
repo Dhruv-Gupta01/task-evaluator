@@ -120,7 +120,8 @@ There are no exemptions: a task that fails is revised and uploaded again. `examp
   against limits, and refusal detection for model safety refusals.
 - **Download Evidence**: one JSON file with the build log, Static Checks, Rubric Check, every
   stage's result, cost per stage, run limits and an auto-written summary (no LLM writes it).
-  Home-directory usernames in paths are redacted. See known issue 4 about keys.
+  Home-directory usernames in paths and secrets (keys this machine holds, key-shaped strings,
+  `NAME_API_KEY=value`) are redacted; `secret_redactions` counts what was removed.
 - **Budget guard**: caps priced LLM spend per UTC month and per agent run (section 5).
 
 The README has a longer table of the same stages with the extra detail added in 4.0, 4.1 and 5.0.
@@ -129,12 +130,12 @@ The README has a longer table of the same stages with the extra detail added in 
 Built from `harbor-5.0`: Reward Kit, the three cheat-trial tiers, Harbor 0.26.0 and the Worker work below.
 **Not on this branch yet** (they live on `merge-reward-kit-into-post-fixes` and are being brought over one at a
 time since 2026-11-28): the Flags system and its panels,
-session-log integrity, the output scan, `.harborignore` handling, web-use counting,
-versioning, evidence-set runs, generators and redaction of the evidence bundle. Solution variants are replaced
+session-log integrity (deferred for review), `.harborignore` handling, web-use counting,
+versioning, evidence-set runs and generators. Solution variants are replaced
 here by `oracle_solutions`. A section here that mentions one of them would be wrong for this branch. Already
 brought over: the vendored checks at `bdf6034`, the task name from `[task] name`, Harbor's error policy, four
 Static Checks (printed success words, Lean output, one-sample timing, timed repeats), the prompt guards, the
-Tier 0 probes G17 to G27 and the regrade classifier.
+Tier 0 probes G17 to G27, the regrade classifier, secret redaction on export and the output scan.
 
 - **Tier cycle ("Run all tiers")**: Tier 0 (static probes), Tier 1 (hinted agent plus fixer) and
   Tier 2 (unhinted agent) repeat on the patched task until a round needs no patch (no round
@@ -317,8 +318,10 @@ Read these before relying on the platform.
 4. **API keys can leak into stored logs.** Codex and Claude Code run inside the task container and
    receive the provider key in their environment. An agent that dumps its environment (for example
    a cheat trial told to look around) writes the key into the trial log, which the evidence bundle
-   then includes. Path redaction does not remove it. Redacting key-like strings is not built yet.
-   Check a log before you share an evidence file, and rotate any key that appears in one.
+   then includes. The evidence download and `export_evidence.py` now redact such keys (any value this
+   machine holds, plus key-shaped strings), and the output scan flags keys the agent left in its output
+   files. The raw text is still in the database and the UI, and a key split into pieces is not caught,
+   so still check before you share, and rotate any key that appears.
 5. **Windows has never been run.** The code has Windows handling and `.gitattributes` keeps shell
    scripts on LF, but no one has tried it.
 6. **Docker Desktop for Mac cannot enforce `no-network`**, so every task is run with network access

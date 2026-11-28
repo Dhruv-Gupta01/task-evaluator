@@ -22,7 +22,7 @@ from pathlib import Path
 import yaml
 
 from app.config import docker_add_host_pairs, get_settings, host_env_for_subprocess
-from app.services import error_policy, infra_marker_scan, refusal_detector, reward_kit_checks, verifier_report, versions
+from app.services import error_policy, infra_marker_scan, output_scan, refusal_detector, reward_kit_checks, verifier_report, versions
 from app.services.llm import pricing
 from app.services.llm.base import Usage
 
@@ -804,6 +804,11 @@ def _parse_trial(
             )
         outcome.report["flags"] += verifier_report.reward_file_flags(trial_dir / "verifier", reward)
         outcome.report["flags"] += verifier_report.harness_error_flags(trial_dir, reward)
+        # The agent's own output talking to an AI model (a saved key, a provider's address): see output_scan.py.
+        scanned = output_scan.scan_trial(trial_dir)
+        if scanned:
+            outcome.report["output_scan"] = scanned
+            outcome.report["flags"] += output_scan.flags(scanned)
         # J: a refusal scores 0 like a real failure; label it so the pass rate can be read both ways.
         refusal = refusal_detector.detect(
             trial_dir, reward, tool_calls, str(result.get("exception_info") or "")

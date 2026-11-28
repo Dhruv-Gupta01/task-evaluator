@@ -437,7 +437,7 @@ Rules for authors: [`docs/task-toml-format.md`](docs/task-toml-format.md). Stati
   only ever fills in powers-of-2/multiples-of-5 k values and never computes pass@1 at all), and total
   recorded LLM spend. No LLM call generates it, so every field is a real value or an explicit "not run
   yet"/"not recorded" — never a `[fill]` placeholder. Every absolute `/Users/<user>/...` or
-  `/home/<user>/...` path in the bundle has its username redacted (C10) before this leaves the platform.
+  `/home/<user>/...` (or Windows `C:\Users\<user>\`) path in the bundle has its username redacted (C10), and API keys, tokens and private keys are replaced with `<redacted:kind>` (counted in `secret_redactions`), before this leaves the platform.
   The "Download Evidence" button in the header triggers this from the UI.
 - **Cheat trial**: the Cheat Trial card's "Run Cheat Trial" button runs one agent trial with an
   explicit directive to cheat spliced into the instruction (edit the verifier, hardcode outputs,
