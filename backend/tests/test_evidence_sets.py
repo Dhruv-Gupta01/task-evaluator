@@ -45,6 +45,28 @@ def test_the_standard_set_is_the_main_agent_only_unless_the_second_family_is_ask
     ]
 
 
+def test_the_pickers_choose_both_families(agents):
+    pairs = task_runner.evidence_pairs("standard", second=True, agent="codex", model="openai/gpt-6-astra",
+                                       second_agent="claude-code", second_model="anthropic/claude-sonnet-5-5")
+    assert pairs == [
+        {"agent": "codex", "model": "openai/gpt-6-astra", "n": 3},
+        {"agent": "claude-code", "model": "anthropic/claude-sonnet-5-5", "n": 3},
+    ]
+
+
+def test_a_second_agent_picked_without_a_model_uses_that_agents_own_default(agents):
+    # SECOND_AGENT_MODEL belongs to SECOND_AGENT (codex, an openai model), so it must not go to claude-code
+    pairs = task_runner.evidence_pairs("standard", second=True, second_agent="claude-code")
+    assert pairs[1] == {"agent": "claude-code", "model": None, "n": 3}
+    assert task_runner.evidence_pairs("standard", second=True, second_agent="codex")[1]["model"] == "openai/gpt-6-luna"
+
+
+def test_the_cheap_set_ignores_the_pickers(agents):
+    assert task_runner.evidence_pairs("cheap", agent="codex", model="openai/gpt-6-astra") == [
+        {"agent": "claude-code", "model": "anthropic/claude-haiku-5-5", "n": 2}
+    ]
+
+
 def test_no_second_agent_set_means_no_second_pair(agents, monkeypatch):
     monkeypatch.setattr(agents, "second_agent", "")
     assert len(task_runner.evidence_pairs("standard", second=True)) == 1
@@ -138,6 +160,13 @@ def test_the_endpoint_checks_its_arguments(monkeypatch):
     with pytest.raises(HTTPException) as e:
         asyncio.run(router.trigger_evidence_set("s1", which="cheap", max_cost_usd=-1, db=None))
     assert e.value.status_code == 400
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(router.trigger_evidence_set("s1", which="standard", second_agent="gpt", db=None))
+    assert e.value.status_code == 400
+    with pytest.raises(HTTPException) as e:  # a codex run takes openai/* models only
+        asyncio.run(router.trigger_evidence_set("s1", which="standard", second_agent="codex",
+                                                second_model="anthropic/claude-haiku-5-5", db=None))
+    assert e.value.status_code == 400
 
 
 def test_the_endpoint_passes_second_through(monkeypatch, agents):
@@ -153,8 +182,11 @@ def test_the_endpoint_passes_second_through(monkeypatch, agents):
         coro.close()
 
     monkeypatch.setattr(router.task_queue, "submit", fake_submit)
-    out = asyncio.run(router.trigger_evidence_set("s1", which="standard", second=True, db=None))
-    assert seen["key"] == "s1:agent" and len(json.loads(out["pairs"])) == 2
+    out = asyncio.run(router.trigger_evidence_set("s1", which="standard", second=True, agent="claude-code",
+                                                  second_agent="codex", second_model="openai/gpt-6-astra", db=None))
+    assert seen["key"] == "s1:agent"
+    assert json.loads(out["pairs"]) == [{"agent": "claude-code", "model": None, "n": 3},
+                                        {"agent": "codex", "model": "openai/gpt-6-astra", "n": 3}]
 
 
 # ---- the per-model breakdown and 15.36 -----------------------------------------------------------------------

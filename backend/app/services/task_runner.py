@@ -1694,15 +1694,22 @@ async def _retry_infra_agent_failures(
 EVIDENCE_SETS = ("standard", "cheap")
 
 
-def evidence_pairs(which: str, second: bool = False) -> list[dict]:
-    """The agent/model pairs an evidence set runs. Standard: 3 trials of HARBOR_AGENT with its .env model, plus
-    3 of SECOND_AGENT/SECOND_AGENT_MODEL only when `second` (a pass rate from one model family says little, but
-    the second family is optional). Cheap: 2 trials of CHEAP_AGENT/CHEAP_AGENT_MODEL (a pass warns 15.36)."""
+def evidence_pairs(which: str, second: bool = False, agent: str | None = None, model: str | None = None,
+                   second_agent: str | None = None, second_model: str | None = None) -> list[dict]:
+    """The agent/model pairs an evidence set runs. Standard: 3 trials of `agent`/`model` (the Agent Trials card's
+    pickers; default HARBOR_AGENT with its .env model), plus 3 of the second model family only when `second`
+    (optional). The second family is `second_agent`/`second_model` (its own pickers), default
+    SECOND_AGENT/SECOND_AGENT_MODEL; a second agent picked without a model uses that agent's own .env model,
+    since SECOND_AGENT_MODEL belongs to SECOND_AGENT. Model None = the agent's .env model. Cheap: 2 trials of
+    CHEAP_AGENT/CHEAP_AGENT_MODEL, whatever is picked (a pass warns 15.36)."""
     if which == "cheap":
         return [{"agent": settings.cheap_agent, "model": settings.cheap_agent_model or None, "n": 2}]
-    pairs = [{"agent": settings.harbor_agent, "model": None, "n": 3}]
-    if second and settings.second_agent:
-        pairs.append({"agent": settings.second_agent, "model": settings.second_agent_model or None, "n": 3})
+    pairs = [{"agent": agent or settings.harbor_agent, "model": model or None, "n": 3}]
+    if second:
+        other = second_agent or settings.second_agent
+        if other:
+            default = settings.second_agent_model if other == settings.second_agent else None
+            pairs.append({"agent": other, "model": second_model or default or None, "n": 3})
     return pairs
 
 
@@ -1716,12 +1723,13 @@ def add_pending_agent_rows(db, submission_id: str, n: int) -> None:
 
 
 async def run_evidence_set(submission_id: str, which: str, max_cost_usd: float | None = None,
-                           second: bool = False) -> None:
+                           second: bool = False, agent: str | None = None, model: str | None = None,
+                           second_agent: str | None = None, second_model: str | None = None) -> None:
     """Runs an evidence set pair by pair, appending to the agent trials, then Failure Analysis (TB rubric) for
     the standard set. Each pair gets an equal share of the optional cap. A pair whose agent is not set up is
     skipped ("not run: ...") and makes the set failed. Progress and result in the `evidence_runs` row:
     {set, second, cost_cap, pairs: [{agent, model, n, status}]}."""
-    pairs = evidence_pairs(which, second)
+    pairs = evidence_pairs(which, second, agent, model, second_agent, second_model)
     share = max_cost_usd / len(pairs) if max_cost_usd else None
     db = SessionLocal()
     try:

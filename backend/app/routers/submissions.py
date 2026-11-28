@@ -805,23 +805,37 @@ async def trigger_evidence_set(
     which: str = "standard",
     max_cost_usd: float | None = None,
     second: bool = False,
+    agent: str | None = None,
+    model: str | None = None,
+    second_agent: str | None = None,
+    second_model: str | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
-    """An evidence set, appended to the agent trials. standard: 3 trials of HARBOR_AGENT, then Failure Analysis
-    on the TB rubric; second=true adds 3 trials of SECOND_AGENT/SECOND_AGENT_MODEL (optional, off by default).
+    """An evidence set, appended to the agent trials. standard: 3 trials of `agent`/`model` (default HARBOR_AGENT
+    and its .env model), then Failure Analysis on the TB rubric; second=true adds 3 trials of the second model
+    family, `second_agent`/`second_model` (default SECOND_AGENT/SECOND_AGENT_MODEL; optional, off by default).
     cheap: 2 trials of CHEAP_AGENT/CHEAP_AGENT_MODEL (a pass warns 15.36). max_cost_usd caps the whole set, split
     evenly between the pairs; leave it out for no set-wide cap. Costs real credits."""
     if which not in task_runner.EVIDENCE_SETS:
         raise HTTPException(status_code=400, detail=f"which must be one of {', '.join(task_runner.EVIDENCE_SETS)}")
     if max_cost_usd is not None and not 0 < max_cost_usd <= 10_000:
         raise HTTPException(status_code=400, detail="max_cost_usd must be between 0 and 10000")
+    for name, chosen in (("agent", agent), ("second_agent", second_agent)):
+        if chosen is not None and chosen not in task_runner.AGENTS:
+            raise HTTPException(status_code=400, detail=f"{name} must be one of {', '.join(task_runner.AGENTS)}")
+    for chosen_agent, chosen_model in ((agent or settings.harbor_agent, model),
+                                       (second_agent or settings.second_agent, second_model)):
+        error = task_runner.valid_model_override(chosen_agent, chosen_model) if chosen_model else None
+        if error:
+            raise HTTPException(status_code=400, detail=error)
+    pairs = task_runner.evidence_pairs(which, second, agent, model, second_agent, second_model)
     _require_built_submission(submission_id, db)
     _require_oracle_passed(submission_id, db)
     _require_grader_isolation(submission_id, db)
     _raise_if_over_budget(db, budget.exceeded_message(db))
-    pairs = task_runner.evidence_pairs(which, second)
     await task_queue.submit(
-        f"{submission_id}:agent", task_runner.run_evidence_set(submission_id, which, max_cost_usd, second)
+        f"{submission_id}:agent",
+        task_runner.run_evidence_set(submission_id, which, max_cost_usd, second, agent, model, second_agent, second_model),
     )
     return {"status": "started", "pairs": json.dumps(pairs)}
 

@@ -1668,6 +1668,10 @@ function SubmissionDetail() {
             ready={buildReady && data.oracle.all_passed === true}
             notReadyReason="The Oracle must pass first: every solution, 3 times"
             onChange={invalidate}
+            mainAgent={agentChoice}
+            mainModel={agentModel}
+            agentModels={agentModels}
+            modelChoices={modelChoices}
           />
 
           {data.agent_trials.trials && data.agent_trials.trials.length > 0 && (

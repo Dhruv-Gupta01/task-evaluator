@@ -1234,14 +1234,36 @@ export const api = {
     fetch(`${API_BASE_URL}/submissions/${id}/image-inventory`, { method: "POST" }).then(
       handle<unknown>,
     ),
-  // An evidence set, appended to the agent trials. second = also the second model family (standard set only).
-  evidenceSet: (id: string, which: "standard" | "cheap", maxCost?: number, second?: boolean) =>
-    fetch(
-      `${API_BASE_URL}/submissions/${id}/evidence-set?which=${which}` +
-        (maxCost ? `&max_cost_usd=${maxCost}` : "") +
-        (second && which === "standard" ? "&second=true" : ""),
-      { method: "POST" },
-    ).then(handle<unknown>),
+  // An evidence set, appended to the agent trials. Standard set: agent/model are the first family (the Agent
+  // Trials pickers; undefined = HARBOR_AGENT and its .env model), second = also the second model family with
+  // its own secondAgent/secondModel (undefined model = that agent's default). The cheap set ignores them all.
+  evidenceSet: (
+    id: string,
+    which: "standard" | "cheap",
+    maxCost?: number,
+    opts?: {
+      second?: boolean;
+      agent?: string;
+      model?: string;
+      secondAgent?: string;
+      secondModel?: string;
+    },
+  ) => {
+    const q = new URLSearchParams({ which });
+    if (maxCost) q.set("max_cost_usd", String(maxCost));
+    if (which === "standard") {
+      if (opts?.agent) q.set("agent", opts.agent);
+      if (opts?.model) q.set("model", opts.model);
+      if (opts?.second) {
+        q.set("second", "true");
+        if (opts.secondAgent) q.set("second_agent", opts.secondAgent);
+        if (opts.secondModel) q.set("second_model", opts.secondModel);
+      }
+    }
+    return fetch(`${API_BASE_URL}/submissions/${id}/evidence-set?${q}`, { method: "POST" }).then(
+      handle<unknown>,
+    );
+  },
   freshBuild: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/fresh-build`, { method: "POST" }).then(
       handle<unknown>,
