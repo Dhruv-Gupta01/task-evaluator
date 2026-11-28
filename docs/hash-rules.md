@@ -174,6 +174,9 @@ One entry at a time, on a temporary copy, running the reference solution:
 
 A list is damaged as a whole, because the reference solution uses only one of the accepted values.
 
+Every solution the task declares (`oracle_solutions`) runs on each damaged copy, and the score has fallen only when
+it has fallen for all of them: one solution that still scores 1 shows its path does not use that entry.
+
 ## What these rules do not guarantee
 
 - **That every answer is hashed.** No automatic check can tell a plain answer from a test input. No check settles this.

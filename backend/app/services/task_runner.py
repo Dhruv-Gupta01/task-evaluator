@@ -1249,8 +1249,11 @@ async def run_fresh_build(submission_id: str) -> None:
     Dockerfiles get a one-off ENV after each FROM, so every RUN step fetches
     again (harbor_runner._bust_build_cache). The copy's checksum differs by
     design, so this run is never compared with the canonical task version.
-    logs is JSON: {build: {ok, log_tail}, oracle: {reward, failed_tests, flags,
-    log_tail} | null}."""
+    The Oracle runs once per declared solution (`[metadata] oracle_solutions`,
+    SOLUTION=<value>), and the stage passes only when every one scores 1.
+    logs is JSON: {build: {ok, log_tail}, oracle: {solution, reward,
+    failed_tests, flags, log_tail} | null (the first solution that did not
+    score 1, else the first), oracles: [the same, one per solution]}."""
     db = SessionLocal()
     try:
         submission = db.get(Submission, submission_id)
@@ -1278,23 +1281,30 @@ async def run_fresh_build(submission_id: str) -> None:
         except docker_orchestrator.DockerBuildError as exc:
             build_ok, build_log = False, exc.log_text
         oracle = None
+        oracles: list[dict] = []
         if build_ok:
             jobs_dir = settings.storage_dir / "submissions" / submission_id / "runs" / "fresh_build" / "harbor"
             if jobs_dir.exists():
                 shutil.rmtree(jobs_dir)
-            outcome = await harbor_runner.run_single(
-                task_root, "oracle", jobs_dir, f"fresh-{uuid.uuid4().hex[:8]}",
-                _oracle_timeout_sec(config), fresh_build=True,
-            )
-            report = outcome.report or {}
-            oracle = {
-                "reward": outcome.reward,
-                "failed_tests": ((report.get("ctrf") or {}).get("failed_names") or [])[:10],
-                "flags": report.get("flags") or [],
-                "log_tail": (outcome.logs or "")[-6000:],
-            }
-        passed = build_ok and oracle is not None and (oracle["reward"] or 0) >= 1.0
-        run.logs = json.dumps({"build": {"ok": build_ok, "log_tail": build_log[-6000:]}, "oracle": oracle})
+            for value in _probe_solutions(task_root):  # every declared solution, one Harbor job at a time
+                outcome = await harbor_runner.run_single(
+                    task_root, "oracle", jobs_dir, f"fresh-{uuid.uuid4().hex[:8]}",
+                    _oracle_timeout_sec(config), fresh_build=True,
+                    agent_env={solution_variants.ENV: value} if value else None,
+                )
+                report = outcome.report or {}
+                oracles.append({
+                    "solution": value,
+                    "reward": outcome.reward,
+                    "failed_tests": ((report.get("ctrf") or {}).get("failed_names") or [])[:10],
+                    "flags": report.get("flags") or [],
+                    "log_tail": (outcome.logs or "")[-6000:],
+                })
+            oracle = next((o for o in oracles if (o["reward"] or 0) < 1.0), oracles[0] if oracles else None)
+        passed = build_ok and bool(oracles) and all((o["reward"] or 0) >= 1.0 for o in oracles)
+        run.logs = json.dumps(
+            {"build": {"ok": build_ok, "log_tail": build_log[-6000:]}, "oracle": oracle, "oracles": oracles}
+        )
         run.status = "passed" if passed else "failed"
         run.reward = 1 if passed else 0
         run.finished_at = datetime.now(UTC)
@@ -3562,7 +3572,9 @@ async def run_worker_probe_stage(submission_id: str) -> None:
 async def run_hash_proof_stage(submission_id: str) -> None:
     """The proof run for hashed answers (services/hash_checks.py, docs/hash-rules.md): damage one `_sha256`
     entry at a time on a temporary copy and run the reference solution; an entry that does not change the
-    score is not used by the grader. Oracle trials one at a time, no LLM. Run kind "hash_proof"."""
+    score is not used by the grader. Every declared solution runs on each damaged copy, and the copy scores 1
+    if any of them still does (that solution's path does not use the digest), no reward if one gave none,
+    else the lowest. Oracle trials one at a time, no LLM. Run kind "hash_proof"."""
     from app.services import hash_checks
 
     db = SessionLocal()
@@ -3584,10 +3596,18 @@ async def run_hash_proof_stage(submission_id: str) -> None:
         timeout_sec = _oracle_timeout_sec(_get_task_config(submission))
 
         async def run_oracle(copy_root: Path, index: int) -> float | None:
-            outcome = await harbor_runner.run_single(
-                copy_root, "oracle", work / f"p{index}", f"hash-{uuid.uuid4().hex[:8]}", timeout_sec
-            )
-            return outcome.reward
+            rewards = []
+            for value in _probe_solutions(task_root):
+                outcome = await harbor_runner.run_single(
+                    copy_root, "oracle", work / f"p{index}", f"hash-{uuid.uuid4().hex[:8]}", timeout_sec,
+                    agent_env={solution_variants.ENV: value} if value else None,
+                )
+                rewards.append(outcome.reward)
+            if any(r is not None and r >= 1.0 for r in rewards):
+                return 1.0
+            if any(r is None for r in rewards):
+                return None
+            return min(rewards)
 
         def progress(state: dict) -> None:
             run.logs = json.dumps(state)

@@ -66,6 +66,9 @@ Tier 0 also runs each declared solution: the control G13 and the probes that gra
 directory in place of the output) and G30 (a 4 GB file in place of the output) run the real solution once per
 value through Harbor. A solution that never scored 1 in the Oracle gate makes its probe results "unproven".
 
+The fresh build (no cache) runs every declared solution and passes only when each scores 1, and the hash proof runs
+every declared solution on each damaged copy (a digest counts as used only when no solution still scores 1).
+
 ## What "different" means
 
 Two different approaches: another algorithm, library, order of steps, or an equally valid output form that the

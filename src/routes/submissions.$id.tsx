@@ -2780,18 +2780,20 @@ function FreshBuildView({ logs }: { logs?: string }) {
             : "The build fails today with no cache: a dependency or base image changed."}
         </div>
       )}
-      {oracle && (
-        <div
-          className={
-            (oracle.reward ?? 0) >= 1 ? "text-emerald-600" : "text-red-600 dark:text-red-400"
-          }
-        >
-          {(oracle.reward ?? 0) >= 1
-            ? "The Oracle still passes with every RUN step rebuilt."
-            : `The Oracle ${oracle.reward == null ? "produced no reward" : `scored ${oracle.reward}`} after a fresh rebuild${
-                oracle.failed_tests.length ? `; failed: ${oracle.failed_tests.join(", ")}` : ""
-              }.`}
-        </div>
+      {(parsed.oracles && parsed.oracles.length > 0 ? parsed.oracles : oracle ? [oracle] : []).map(
+        (o, i) => (
+          <div
+            key={o.solution ?? i}
+            className={(o.reward ?? 0) >= 1 ? "text-emerald-600" : "text-red-600 dark:text-red-400"}
+          >
+            {o.solution ? `SOLUTION=${o.solution}: ` : ""}
+            {(o.reward ?? 0) >= 1
+              ? "The Oracle still passes with every RUN step rebuilt."
+              : `The Oracle ${o.reward == null ? "produced no reward" : `scored ${o.reward}`} after a fresh rebuild${
+                  o.failed_tests.length ? `; failed: ${o.failed_tests.join(", ")}` : ""
+                }.`}
+          </div>
+        ),
       )}
       {parsed.build && <LogPanel logs={parsed.build.log_tail} title="No-cache build log (tail)" />}
       {oracle && <LogPanel logs={oracle.log_tail} title="Oracle log (tail)" />}

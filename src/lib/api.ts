@@ -736,14 +736,20 @@ export interface FreshBuildResult {
   status: StageStatus;
   logs?: string;
 }
+export interface FreshBuildOracle {
+  // The declared solution this run used (SOLUTION=<value>); null when the task declares none.
+  solution?: string | null;
+  reward: number | null;
+  failed_tests: string[];
+  flags: string[];
+  log_tail: string;
+}
 export interface FreshBuild {
   build: { ok: boolean; log_tail: string } | null;
-  oracle: {
-    reward: number | null;
-    failed_tests: string[];
-    flags: string[];
-    log_tail: string;
-  } | null;
+  // The first solution that did not score 1 after the rebuild, else the first one.
+  oracle: FreshBuildOracle | null;
+  // One entry per declared solution; the stage passes only when every one scored 1.
+  oracles?: FreshBuildOracle[];
   error?: string;
 }
 
