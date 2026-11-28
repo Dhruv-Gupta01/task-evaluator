@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.models import LlmSpend, Run, Submission
 from app.schemas import SubmissionListItem, SubmissionSchema, UploadResponse
-from app.services import ai_audit, budget, redaction, grader_isolation, solution_variants, submission_diff, submission_service, task_runner, versions
+from app.services import ai_audit, budget, redaction, grader_isolation, solution_variants, submission_diff, submission_service, task_runner, versioning, versions
 from app.workers import task_queue
 
 router = APIRouter()
@@ -818,24 +818,36 @@ def get_changes(submission_id: str, against: str | None = None, db: Session = De
     current = db.get(Submission, submission_id)
     if current is None or current.extracted_path is None:
         raise HTTPException(status_code=404, detail="submission not found or not extracted")
-    if against:
-        earlier = db.get(Submission, against)
-    else:
-        earlier = (
-            db.query(Submission)
-            .filter(
-                Submission.task_name == current.task_name,
-                Submission.id != current.id,
-                Submission.uploaded_at < current.uploaded_at,
-                Submission.extracted_path.is_not(None),
-            )
-            .order_by(Submission.uploaded_at.desc())
-            .first()
-        )
+    earlier = db.get(Submission, against) if against else _earlier_upload(db, current)
     if earlier is None or earlier.extracted_path is None:
         return {"against": None}
     result = submission_diff.diff_tasks(Path(earlier.extracted_path), Path(current.extracted_path))
-    return {"against": earlier.id, "against_uploaded_at": earlier.uploaded_at.isoformat(), **result}
+    return {
+        "against": earlier.id, "against_uploaded_at": earlier.uploaded_at.isoformat(), **result,
+        "version": _version_info(earlier, current),
+    }
+
+
+def _earlier_upload(db: Session, current: Submission) -> Submission | None:
+    """The latest earlier upload of the same task (matched on task_name, i.e. `[task] name`)."""
+    return (
+        db.query(Submission)
+        .filter(
+            Submission.task_name == current.task_name,
+            Submission.id != current.id,
+            Submission.uploaded_at < current.uploaded_at,
+            Submission.extracted_path.is_not(None),
+        )
+        .order_by(Submission.uploaded_at.desc())
+        .first()
+    )
+
+
+def _version_info(earlier: Submission, current: Submission) -> dict:
+    """services/versioning.py between two uploads: the change class, the declared bump, what to redo, the locked
+    items that changed and the warnings. Advisory: nothing waits on it and there is no ruling."""
+    cmp = versioning.compare(Path(earlier.extracted_path), Path(current.extracted_path))
+    return {**cmp, "warnings": versioning.warnings(cmp)}
 
 
 # ---- Grader Isolation gate (way 2 of the Worker flag) ----------------------------------------
@@ -1121,6 +1133,11 @@ def get_evidence_bundle(submission_id: str, db: Session = Depends(get_db)) -> Re
             schema, total_cost_usd, cost_report
         ),
     }
+    earlier = _earlier_upload(db, submission) if submission.extracted_path else None
+    if earlier is not None and earlier.extracted_path:
+        version = _version_info(earlier, submission)
+        bundle["changes"] = {"against": earlier.id, "version": version}
+        bundle["summary_markdown"] += submission_service.version_summary_lines(earlier.id, version)
     # Before this leaves the platform: strip host usernames from absolute paths (C10) and every secret
     # (services/redaction.py: keys this machine holds, key-shaped strings, NAME_API_KEY=value). Codex and
     # Claude Code get the provider key inside the container, so an agent that dumps its environment puts

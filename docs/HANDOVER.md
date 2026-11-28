@@ -112,7 +112,10 @@ There are no exemptions: a task that fails is revised and uploaded again. `examp
 ### Around the stages
 
 - **Changes banner**: compares an upload with the latest earlier upload of the same task name
-  (amber when tests were removed). The name is `task.toml`'s `[task] name` without the
+  (amber when tests were removed or a version warning applies). It also says what kind of change it is
+  (major: instruction.md or environment/, run the agents again; minor: tests/, regrade; patch: anything
+  else), whether `[task] version` was bumped enough, and which locked items changed (canary, artifacts,
+  timeouts, expected values, instruction.md), as warnings with no ruling. The name is `task.toml`'s `[task] name` without the
   `terminal-bench/` prefix, not the zip's file name, so a renamed zip still finds its earlier upload.
 - **Task version check**: every Oracle, Nop and agent run records the task checksum Harbor
   reports. A red banner appears if runs on one submission used different task copies.
@@ -131,12 +134,13 @@ Built from `harbor-5.0`: Reward Kit, the three cheat-trial tiers, Harbor 0.26.0 
 **Not on this branch yet** (they live on `merge-reward-kit-into-post-fixes` and are being brought over one at a
 time since 2026-11-28): the Flags system and its panels,
 session-log integrity (deferred for review),
-versioning, evidence-set runs and generators. Solution variants are replaced
+evidence-set runs and generators. Solution variants are replaced
 here by `oracle_solutions`. A section here that mentions one of them would be wrong for this branch. Already
 brought over: the vendored checks at `bdf6034`, the task name from `[task] name`, Harbor's error policy, four
 Static Checks (printed success words, Lean output, one-sample timing, timed repeats), the prompt guards, the
 Tier 0 probes G17 to G27, the regrade classifier, secret redaction on export, the output scan, Failure
-Analysis per trial, `.harborignore` handling, web-use counting and the network policy report.
+Analysis per trial, `.harborignore` handling, web-use counting, the network policy report and versioning (as warnings on the
+Changes banner).
 
 - **Tier cycle ("Run all tiers")**: Tier 0 (static probes), Tier 1 (hinted agent plus fixer) and
   Tier 2 (unhinted agent) repeat on the patched task until a round needs no patch (no round

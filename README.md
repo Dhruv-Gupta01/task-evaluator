@@ -203,7 +203,8 @@ tokens and cost, and flags where the reward and the tests disagree.
 ### Other things on the page
 
 - **Changes banner**: compares an upload with the latest earlier upload of the same task name
-  (amber when tests were removed).
+  (amber when tests were removed or a version warning applies): the kind of change (major, minor or patch),
+  whether `[task] version` was bumped enough, what to redo, and locked items that changed.
 - **Download Evidence**: one JSON with the build log, Static Checks, Rubric Check, per-stage
   results, cost per stage and a summary. **(4.1)** Adds run limits, Oracle notes, Cheat Trial,
   Answer Exposure, Fresh Build, Image Contents and the verifier reports.

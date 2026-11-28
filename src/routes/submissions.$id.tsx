@@ -1879,10 +1879,12 @@ function SubmissionDetail() {
 function ChangesBanner({ changes }: { changes: SubmissionChanges }) {
   const c = changes.counts!;
   const testsRemoved = changes.tests_removed_count ?? 0;
+  const v = changes.version;
+  const warned = (v?.warnings.length ?? 0) > 0;
   return (
     <details
       className={`rounded-md border p-3 text-sm ${
-        testsRemoved > 0
+        testsRemoved > 0 || warned
           ? "border-amber-500/30 bg-amber-500/10"
           : "border-border bg-muted/40"
       }`}
@@ -1893,7 +1895,29 @@ function ChangesBanner({ changes }: { changes: SubmissionChanges }) {
         {changes.tests_added_count ?? 0}
         {changes.instruction_words &&
           ` · instruction ${changes.instruction_words.before ?? "?"} → ${changes.instruction_words.after ?? "?"} words`}
+        {v?.suggested_class && (
+          <>
+            {" "}
+            · <strong>{v.suggested_class}</strong> change (version {v.old_version ?? "?"} →{" "}
+            {v.new_version ?? "?"}, declared {v.declared_class ?? "not comparable"})
+          </>
+        )}
       </summary>
+      {v?.suggested_class && (
+        <div className="mt-2 space-y-1 text-xs">
+          <div>To redo: {v.redo}</div>
+          {v.warnings.map((w) => (
+            <div key={w} className="text-amber-700 dark:text-amber-400">
+              {w}
+            </div>
+          ))}
+          {v.instruction_diff.length > 0 && (
+            <pre className="whitespace-pre-wrap rounded bg-muted p-2 font-mono">
+              {v.instruction_diff.join("\n")}
+            </pre>
+          )}
+        </div>
+      )}
       <div className="mt-2 space-y-1 font-mono text-xs">
         {testsRemoved > 0 && <div>tests removed: {changes.tests_removed?.join(", ")}</div>}
         {!!changes.changed?.length && <div>changed: {changes.changed.join(", ")}</div>}

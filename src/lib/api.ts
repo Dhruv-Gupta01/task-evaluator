@@ -781,6 +781,24 @@ export interface SubmissionChanges {
   tests_removed_count?: number;
   tests_added_count?: number;
   instruction_words?: { before: number | null; after: number | null };
+  // services/versioning.py: the change class the files call for, the bump the version declares, what to redo,
+  // locked items that changed and plain warnings. Advisory, no ruling.
+  version?: VersionChange;
+}
+
+export type VersionClass = "patch" | "minor" | "major";
+export interface VersionChange {
+  changed: string[];
+  by_class: Record<VersionClass, string[]>;
+  suggested_class: VersionClass | null;
+  old_version: string | null;
+  new_version: string | null;
+  // "none" when the version did not go up; null when either is missing or not X.Y.Z
+  declared_class: VersionClass | "none" | null;
+  redo: string;
+  locked_changes: string[];
+  instruction_diff: string[];
+  warnings: string[];
 }
 
 // `logs` is JSON (see RubricCheck below) once the stage has run.

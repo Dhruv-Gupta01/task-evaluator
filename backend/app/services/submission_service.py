@@ -1058,6 +1058,23 @@ def image_system_facts(submission: Submission) -> dict | None:
     }
 
 
+def version_summary_lines(against: str, version: dict) -> str:
+    """The evidence summary's section on what changed since the earlier upload (services/versioning.py)."""
+    if not version.get("changed"):
+        return f"\n\n## Changes since the earlier upload\n- Compared with `{against[:8]}`: no file changed.\n"
+    lines = [
+        "",
+        "",
+        "## Changes since the earlier upload",
+        f"- Compared with `{against[:8]}`: {len(version['changed'])} file(s) changed; the files call for a "
+        f"**{version['suggested_class']}** bump, the version says "
+        f"{version.get('old_version')} -> {version.get('new_version')} ({version.get('declared_class') or 'not comparable'}).",
+        f"- To redo: {version['redo']}",
+    ]
+    lines += [f"- Warning: {w}" for w in version.get("warnings") or []]
+    return "\n".join(lines) + "\n"
+
+
 def run_limits(submission: Submission, schema: SubmissionSchema) -> dict:
     """4.0 E.1: the limits trials ran with, as applied (AGENT_TIMEOUT_SEC
     overrides the task's own timeout), and how the latest recorded trial
