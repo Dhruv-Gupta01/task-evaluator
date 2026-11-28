@@ -1041,6 +1041,8 @@ export interface HashProofResult {
 export interface Submission {
   id: string;
   task_name: string;
+  // The zip has been unpacked (Validate & Build has started at least once): file-based buttons can run.
+  files_ready?: boolean;
   uploaded_at: string;
   build: BuildResult;
   oracle: OracleRunsResult;

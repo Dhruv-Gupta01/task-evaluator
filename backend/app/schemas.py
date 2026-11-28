@@ -501,6 +501,8 @@ class RegradeResult(BaseModel):
 class SubmissionSchema(BaseModel):
     id: str
     task_name: str
+    # The zip has been unpacked (Validate & Build has started at least once), so file-based stages work.
+    files_ready: bool = False
     uploaded_at: datetime
     build: BuildResult
     oracle: OracleRunsResult
