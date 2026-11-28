@@ -1910,6 +1910,9 @@ const TIER0_ATTENTION = [
   "control_failed",
   "infra_failed",
   "relies_on_harbor",
+  "crashed_on_bad_input",
+  "artifact_not_checked",
+  "env_sensitive",
 ];
 
 function tier0VerdictLabel(v: string): string {
@@ -1920,6 +1923,9 @@ function tier0VerdictLabel(v: string): string {
         exploited: "EXPLOITED",
         fail_open: "FAILS OPEN",
         false_zero: "VALID SOLUTION GRADED 0",
+        crashed_on_bad_input: "GRADER CRASHED ON A BROKEN FILE",
+        artifact_not_checked: "OUTPUT FILE NEVER CHECKED",
+        env_sensitive: "VERDICT DEPENDS ON THE ENVIRONMENT",
         relies_on_harbor: "RELIES ON HARBOR",
         valid_accepted: "valid solution accepted",
         control_ok: "control ok",
@@ -2471,6 +2477,11 @@ function Tier0View({
           {s.probes_run} probes: {s.held} held, {s.exploited} exploited
           {s.fail_open > 0 && `, ${s.fail_open} fail open`}
           {s.false_zero > 0 && `, ${s.false_zero} valid solution graded 0`}
+          {(s.crashed_on_bad_input ?? 0) > 0 &&
+            `, ${s.crashed_on_bad_input} grader crash on a broken file`}
+          {(s.artifact_not_checked ?? 0) > 0 &&
+            `, ${s.artifact_not_checked} output file the grader never checks`}
+          {(s.env_sensitive ?? 0) > 0 && `, verdict depends on the environment`}
           {(s.relies_on_harbor ?? 0) > 0 && `, ${s.relies_on_harbor} rely on Harbor`}
           {s.held_but_positive_control_failed.length > 0 &&
             `, ${s.held_but_positive_control_failed.length} unproven`}

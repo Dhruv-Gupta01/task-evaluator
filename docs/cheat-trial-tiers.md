@@ -49,14 +49,14 @@ What makes a result trustworthy is the **positive control**. A probe that scores
 
 What it contains today:
 
-- Generic probes that need no per-task work: empty artifacts (G0, with generated mutants that remove each data folder or large constant in `tests/`), planted files and symlinks/FIFOs (G2 to G9), the real solution as a control (G13), and a null-agent ladder of placeholder, boundary and half-solution outputs (G14 to G16).
+- Generic probes that need no per-task work: empty artifacts (G0, with generated mutants that remove each data folder or large constant in `tests/`), planted files and symlinks/FIFOs (G2 to G9), the real solution as a control (G13), a null-agent ladder of placeholder, boundary and half-solution outputs (G14 to G16), broken files the grader must score 0 (G17 not UTF-8, G18 a 200,000-character field, G19 JSON nested 100,000 deep, G20 a bare `NaN`, G21 a zip that is not a workbook), the reference output with every digit shifted (G22), the reference output with one declared artifact removed, one probe per artifact (G23), and the reference output graded under 7 time-zone, locale and hash-seed settings (G24).
 - A Harbor probe (G1) that lets Harbor's own reward-file handling decide the result.
 - Task-specific probes for int8 (fixtures missing, copying from `/tests`, valid multi-file solution, tampering with the grader's files).
 - Replay: stored Oracle and agent outputs from this and the previous upload are re-graded through the replica, to catch a verifier change that loosened grading.
 - Comparison with the previous upload of the same task (`regression`, `fixed`, `changed`, `new`, `gone`).
 - A self-test that checks probe ids, controls and mutant anchors before anything runs.
 
-Verdicts: `exploited` (the only one that counts as an attack), `held`, `fail_open`, `false_zero`, `valid_accepted`, `relies_on_harbor`, `flaky`, `inconclusive`, `infra_failed`.
+Verdicts: `exploited` (the only one that counts as an attack), `held`, `fail_open`, `false_zero`, `crashed_on_bad_input` (the grader wrote no reward for a broken file, so Harbor records a grader error, not a 0), `artifact_not_checked` (still reward 1 with one output removed; it may be optional, a person decides), `env_sensitive` (the same correct output graded differently under another setting), `valid_accepted`, `relies_on_harbor`, `flaky`, `inconclusive`, `infra_failed`. The three new ones are findings for a person, never attacks, and stay out of the attack success rate. A typed probe prints `RESULT planted:N`; a zero from a probe that planted nothing is `inconclusive`, not `held`.
 
 ### Tier 1: hinted agent and fixer
 

@@ -339,6 +339,9 @@ export type Tier0Verdict =
   | "exploited"
   | "fail_open"
   | "false_zero"
+  | "crashed_on_bad_input"
+  | "artifact_not_checked"
+  | "env_sensitive"
   | "relies_on_harbor"
   | "valid_accepted"
   | "control_ok"
@@ -624,6 +627,12 @@ export interface Tier0 {
     exploited: number;
     fail_open: number;
     false_zero: number;
+    // the verifier wrote no reward for a broken file (Tier 0 malformed-file probes)
+    crashed_on_bad_input?: number;
+    // the grader scored 1 with one declared output removed (Tier 0 G23)
+    artifact_not_checked?: number;
+    // the same correct output graded differently under another time zone, locale or hash seed (G24)
+    env_sensitive?: number;
     relies_on_harbor?: number;
     // null = no control probe ran; false = the task's own solution did not score 1 here
     control_ok: boolean | null;

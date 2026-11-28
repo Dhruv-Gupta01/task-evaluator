@@ -502,6 +502,7 @@ async def run_answer_exposure_stage(submission_id: str) -> None:
 # positive control is listed too: that probe never reached its defence, so it proves nothing.
 _TIER0_ATTENTION = (
     "exploited", "fail_open", "false_zero", "control_failed", "infra_failed", "relies_on_harbor",
+    "crashed_on_bad_input", "artifact_not_checked", "env_sensitive",
 )
 _TIER0_BAD = set(_TIER0_ATTENTION) - {"infra_failed"}
 
@@ -2857,7 +2858,7 @@ def _stage_snapshot(submission_id: str, kind: str) -> dict:
                      "error": (logs.get("error") or "")[-300:] or None, "skipped": logs.get("skipped")}
         if kind == "tier0_probes":
             summary = logs.get("summary") or {}
-            out["summary"] = {k: summary.get(k) for k in ("probes_run", "exploited", "fail_open", "false_zero", "relies_on_harbor")}
+            out["summary"] = {k: summary.get(k) for k in ("probes_run", "exploited", "fail_open", "false_zero", "relies_on_harbor", "crashed_on_bad_input", "artifact_not_checked", "env_sensitive")}
         else:
             attempts = logs.get("attempts") or []
             counts: dict[str, int] = {}
