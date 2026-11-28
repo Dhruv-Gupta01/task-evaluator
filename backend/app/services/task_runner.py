@@ -645,6 +645,90 @@ async def _tier0_harbor_probe(submission: Submission, spec, probe, config) -> di
     return asdict(res)
 
 
+def _gate_controls(db, submission: Submission) -> dict:
+    """Per declared solution (None = SOLUTION unset), from its finished Oracle-gate runs: how many scored 1 and
+    the most common test count among those, the control for Tier 0's Oracle probes (G28 to G30)."""
+    from collections import Counter
+
+    out: dict = {}
+    for r in db.query(Run).filter_by(submission_id=submission.id, kind="oracle").all():
+        if r.status not in ("passed", "failed"):
+            continue
+        entry = out.setdefault(r.solution, {"passed": 0, "_tests": Counter()})
+        if r.reward == 1:
+            entry["passed"] += 1
+            try:
+                tests = ((json.loads(r.verifier_json or "{}") or {}).get("ctrf") or {}).get("tests")
+            except ValueError:
+                tests = None
+            if tests:
+                entry["_tests"][tests] += 1
+    return {k: {"passed": v["passed"], "tests": v["_tests"].most_common(1)[0][0] if v["_tests"] else None}
+            for k, v in out.items()}
+
+
+async def _tier0_oracle_probe(submission: Submission, root: Path, slug: str, entry: dict, controls: dict,
+                              timeout_sec: float) -> dict:
+    """One Oracle probe (tier0/oracle_probes.py: G28 data removed, G29 directory, G30 4 GB file): the task copy
+    is changed and a real Harbor Oracle trial runs the author's own solution with SOLUTION=<value>."""
+    from dataclasses import asdict
+
+    from app.services.tier0 import oracle_probes
+    from app.services.tier0 import record as rec
+
+    res = rec.ProbeResult(
+        probe_id=entry["pid"], task=slug, flaw_class="-", title=entry["title"], tier=0,
+        verdict="inconclusive", expected_reward=0.0, needs_harbor=False,
+    )
+    base = settings.storage_dir / "submissions" / submission.id / "runs" / "tier0_oracle"
+    started = datetime.now(UTC)
+    name = entry["pid"].lower().replace("@", "-")
+    try:
+        copy_root = base / f"{name}-src"
+        if copy_root.exists():
+            shutil.rmtree(copy_root)
+        shutil.copytree(root, copy_root, symlinks=True)
+        oracle_probes.apply(copy_root, entry)
+        value = entry.get("solution")
+        outcome = await harbor_runner.run_single(
+            copy_root, "oracle", base / name, f"tier0-{name}-{uuid.uuid4().hex[:8]}", timeout_sec,
+            agent_env={solution_variants.ENV: value} if value else None,
+        )
+        shutil.rmtree(copy_root, ignore_errors=True)
+        tests = ((outcome.report or {}).get("ctrf") or {}).get("tests")
+        res.reward = outcome.reward
+        judged = oracle_probes.judge(entry, outcome.reward, controls.get(value), tests)
+        res.verdict, res.notes = judged["verdict"], judged["notes"]
+        res.positive_control = judged["positive_control"]
+        res.positive_control_reward = judged["positive_control_reward"]
+        res.positive_control_ok = judged["positive_control_ok"]
+        res.diagnostics = {"solution": value, "tests_collected": tests, "control_tests": (controls.get(value) or {}).get("tests")}
+        if outcome.reward is None and entry["kind"] == "data_removal":
+            res.notes.append("Harbor: " + (outcome.logs or "")[-300:])
+    except Exception as exc:
+        res.verdict = "infra_failed"
+        res.notes = [f"{type(exc).__name__}: {exc}"]
+    res.duration_sec = round((datetime.now(UTC) - started).total_seconds(), 1)
+    return asdict(res)
+
+
+async def _run_tier0_oracle_probes(db, submission: Submission, root: Path, slug: str, on_row=None) -> list[dict]:
+    """G28 to G30 for every declared solution, one Harbor Oracle trial at a time."""
+    from app.services.tier0 import oracle_probes
+
+    planned = oracle_probes.plan(Path(root))
+    if not planned:
+        return []
+    controls = _gate_controls(db, submission)
+    timeout_sec = _oracle_timeout_sec(_get_task_config(submission))
+    rows: list[dict] = []
+    for entry in planned:
+        rows.append(await _tier0_oracle_probe(submission, Path(root), slug, entry, controls, timeout_sec))
+        if on_row:
+            on_row(rows, len(planned))
+    return rows
+
+
 async def _run_shared_mode_stage(db, run: Run, submission: Submission, base: dict, root: Path) -> None:
     """Tier 0 for a shared-verifier task: the replica cannot drive it, so each shared-mode probe (G25 to G27)
     is run as the solve.sh of a copy through a real Harbor Oracle trial, one at a time."""
@@ -663,6 +747,7 @@ async def _run_shared_mode_stage(db, run: Run, submission: Submission, base: dic
              "progress": {"done": i, "total": len(probes)}}
         )
         db.commit()
+    rows += await _run_tier0_oracle_probes(db, submission, root, spec.slug)
     results = [rec.ProbeResult(**r) for r in rows]
     summary = rec.summarise(results)
     summary["needs_harbor_to_settle"] = [r["probe_id"] for r in rows if r["verdict"] == "inconclusive"]
@@ -773,6 +858,9 @@ async def run_tier0_stage(
             config = _get_task_config(submission)
             for hp in harbor_probes:
                 rows.append(await _tier0_harbor_probe(submission, spec, hp, config))
+        # G28 to G30: the author's real solution, every declared one, through real Harbor (skipped without Harbor).
+        oracle_rows = await _run_tier0_oracle_probes(db, submission, spec.root, spec.slug) if harbor else []
+        rows += oracle_rows
 
         # Replay: regrade stored rollouts through the replica. This upload's own are a check
         # that the replica agrees with Harbor; an earlier upload's show what a verifier
@@ -790,8 +878,8 @@ async def run_tier0_stage(
             await asyncio.to_thread(tier0_runner.run_replays, spec, items, opts, stop.is_set) if items else []
         )
 
-        summary = tier0_record.summarise(results)
-        # The summary counts come from the Docker results; fold the Harbor probes in.
+        summary = tier0_record.summarise(results + [tier0_record.ProbeResult(**r) for r in oracle_rows])
+        # The summary counts come from the Docker results (and G28 to G30); fold the Harbor probes in.
         for r in rows:
             if r["probe_id"] in {p.pid for p in harbor_probes} and r["verdict"] == "exploited":
                 summary["exploited"] += 1

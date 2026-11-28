@@ -483,7 +483,7 @@ done
     ),
 
     Probe(
-        pid="G13", flaw="-",
+        pid="G13", uses_solution=True, flaw="-",
         title="control: the task's own solution scores 1 through this harness",
         applies_to=("*",),
         kind="control",
@@ -574,7 +574,7 @@ done
     ),
 
     Probe(
-        pid="G16", flaw="-",
+        pid="G16", uses_solution=True, flaw="-",
         title="null-agent ladder: the reference solution's output, truncated to half",
         applies_to=("*",),
         rationale=(
@@ -757,7 +757,7 @@ say "RESULT planted:$n"
     ),
 
     Probe(
-        pid="G22", flaw="-",
+        pid="G22", uses_solution=True, flaw="-",
         title="null-agent ladder: the reference solution's output with every digit shifted by one",
         applies_to=("*",),
         rationale=(
@@ -795,7 +795,7 @@ say "RESULT planted:$k"
     ),
 
     Probe(
-        pid="G23", flaw="-",
+        pid="G23", uses_solution=True, flaw="-",
         title="the reference output with one declared artifact removed",
         applies_to=("*",),
         per_artifact=True,
@@ -828,7 +828,7 @@ say "RESULT oracle_artifacts:$n"
     ),
 
     Probe(
-        pid="G24", flaw="-",
+        pid="G24", uses_solution=True, flaw="-",
         title="environment sweep: the reference output graded under other time zone, locale and hash-seed settings",
         applies_to=("*",),
         kind="valid_variant",

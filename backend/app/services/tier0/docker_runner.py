@@ -319,6 +319,12 @@ def _ingest_ctrf(run: Run, tests: list) -> None:
         )
 
 
+def _agent_env_args(probe) -> list[str]:
+    """`-e SOLUTION=<value>` for a probe expanded per declared solution (runner.expand_per_solution)."""
+    value = getattr(probe, "solution", None)
+    return ["-e", f"SOLUTION={value}"] if value else []
+
+
 def _exec_env_args(env: dict | None) -> list[str]:
     """`docker exec -e K=V ...` arguments for the verifier process."""
     return [a for k, v in (env or {}).items() for a in ("-e", f"{k}={v}")]
@@ -460,7 +466,7 @@ def run_probe(spec: TaskSpec, probe, platform: str | None = None,
         # ---- agent phase: the probe stands in for the agent -------------------
         user = "root" if probe.AS_ROOT else (spec.agent_user or "root")
         # Artifact paths arrive as "$@" so probe scripts stay task-agnostic.
-        exec_cmd = ["docker", "exec", "-u", user, "-i", env_cid, "bash", "-s",
+        exec_cmd = ["docker", "exec", "-u", user, *_agent_env_args(probe), "-i", env_cid, "bash", "-s",
                     "--", *spec.artifacts]
         agent = _run(exec_cmd, timeout=getattr(probe, "AGENT_TIMEOUT_SEC", 900),
                      check=False, stdin=probe.AGENT_SCRIPT)

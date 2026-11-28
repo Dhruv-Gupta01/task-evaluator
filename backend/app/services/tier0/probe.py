@@ -44,6 +44,10 @@ Fields that decide the verdict:
   env_sweep          Grade the same output under each setting in probes.generic.ENV_SETTINGS (time zone,
                      locale, hash seed). A verdict that follows a setting is `env_sensitive`; one that
                      changes between two identical runs is `flaky`.
+  uses_solution      The script runs the task's own solution/solve.sh. The runner expands it into one probe per
+                     value of `[metadata] oracle_solutions` (runner.expand_per_solution), each with `solution` set,
+                     and the replica passes SOLUTION=<value> into the agent container, so every declared
+                     solution is checked, not only whatever solve.sh does with SOLUTION unset.
   harbor_probe       Judged by a real Harbor Oracle run on a task copy whose solve.sh is
                      this script, because the answer depends on Harbor's own behaviour.
   needs_harbor       The answer depends on Harbor's own behaviour, not the task's. The
@@ -94,6 +98,8 @@ class Probe:
     per_artifact: bool = False
     drops_artifact: str | None = None
     env_sweep: bool = False
+    uses_solution: bool = False
+    solution: str | None = None
 
     # attribute names docker_runner expects
     @property

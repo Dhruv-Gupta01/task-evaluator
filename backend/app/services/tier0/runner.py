@@ -63,6 +63,26 @@ def expand_per_artifact(probes: list[Probe], spec) -> list[Probe]:
     return out
 
 
+def expand_per_solution(probes: list[Probe], spec) -> list[Probe]:
+    """Turn each probe that runs the author's solution into one probe per declared solution
+    (`[metadata] oracle_solutions`), so every correct solution the author gives is checked. A task that declares
+    none keeps one probe, run with SOLUTION unset as before."""
+    from app.services import solution_variants
+
+    root = getattr(spec, "root", None)
+    values = solution_variants.declared_values(root) if root is not None else []
+    out: list[Probe] = []
+    for probe in probes:
+        if not (probe.uses_solution and values):
+            out.append(probe)
+            continue
+        out += [
+            dataclasses.replace(probe, pid=f"{probe.pid}@{v}", solution=v, title=f"{probe.title} (SOLUTION={v})")
+            for v in values
+        ]
+    return out
+
+
 def _judge_env_sweep(run: docker_runner.Run, notes: list[str]) -> tuple[str, list[str]]:
     """The reference output graded under several settings. The first two are identical (no setting changed),
     so a difference between them is flakiness, not the environment."""
@@ -393,7 +413,7 @@ def run_suite(
     should_stop: Callable[[], bool] | None = None,
 ) -> list[record.ProbeResult]:
     results: list[record.ProbeResult] = []
-    probes = expand_per_artifact(probes, spec)
+    probes = expand_per_solution(expand_per_artifact(probes, spec), spec)
     # Controls first: if the task's own solution does not score 1 here, say so up front.
     probes = sorted(probes, key=lambda p: p.kind != "control")
     for i, probe in enumerate(probes, 1):

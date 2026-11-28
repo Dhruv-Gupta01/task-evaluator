@@ -61,6 +61,11 @@ so the platform can tell which code belongs to which.
 
 When Tier 1 patches a task, every declared solution must still score 1 on the patched copy.
 
+Tier 0 also runs each declared solution: the control G13 and the probes that grade the solution's own output
+(G16, G22, G23, G24) run once per value, and the Oracle probes G28 (a `tests/` data folder removed), G29 (a
+directory in place of the output) and G30 (a 4 GB file in place of the output) run the real solution once per
+value through Harbor. A solution that never scored 1 in the Oracle gate makes its probe results "unproven".
+
 ## What "different" means
 
 Two different approaches: another algorithm, library, order of steps, or an equally valid output form that the
