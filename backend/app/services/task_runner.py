@@ -1386,6 +1386,39 @@ async def _run_harbor_gate(submission_id: str, kind: str) -> None:
 _INFRA_RETRY_MARKER = "[C11: auto-retried once for infra noise]"
 
 
+def infra_retry_reason(run: Run) -> str | None:
+    """Why this agent trial should be rerun once automatically, or None. Harbor's own classification of the failure
+    (services/error_policy.py) decides first, then the text markers (services/infra_marker_scan.py):
+
+      no reward                 Harbor says never retry it (cancelled, an authentication error, a missing reward file):
+                                no. Harbor says it is retryable (environment start timeout, API errors): yes. Otherwise
+                                the old rule: yes when the log shows infrastructure noise.
+      graded, reward below 1    only an agent that exited non-zero (NonZeroAgentExitCodeError), which Harbor 0.26 now
+                                grades as a real result, and only while the log shows infrastructure noise: the agent
+                                died from the machine, not the task. A plain zero with noise in the log is a real zero.
+      reward 1, no log, already retried: never."""
+    if not run.logs or _INFRA_RETRY_MARKER in run.logs or run.reward == 1:
+        return None
+    try:
+        report = json.loads(run.verifier_json) if run.verifier_json else {}
+    except ValueError:
+        report = {}
+    policy = report.get("error_policy") if isinstance(report, dict) else None
+    markers = infra_marker_scan.scan_trial_logs(run.logs)
+    if run.reward is None:
+        if policy and policy.get("known"):
+            if not policy.get("should_retry"):
+                return None
+            return f"Harbor classes {policy['exception_type']} as retryable"
+        return f"the log showed infra noise ({', '.join(markers)})" if markers else None
+    if policy and policy.get("exception_type") == "NonZeroAgentExitCodeError" and markers:
+        return (
+            f"the agent exited non-zero while the log showed infra noise ({', '.join(markers)}); "
+            "Harbor graded it as a real result"
+        )
+    return None
+
+
 async def _retry_infra_agent_failures(
     db,
     submission: Submission,
@@ -1398,32 +1431,24 @@ async def _retry_infra_agent_failures(
     jobs_dir: Path,
 ) -> None:
     """"Keep the current infra-error policy: rerun infrastructure failures
-    and flag them" (C11). A trial that crashed/timed out with no reward
-    (reward is None -- see run's own "no reward" convention) AND whose logs
-    show a known infra-noise marker (services/infra_marker_scan.py: connect/
-    read timeouts, rate limits, DNS failures, Docker orchestration errors --
-    never a genuine task-logic failure) gets exactly one automatic retry,
+    and flag them" (C11). A trial `infra_retry_reason` picks (no reward and
+    Harbor's error policy says retryable, or no reward and the log shows a
+    known infra-noise marker; never a type Harbor says not to retry, such as
+    a cancelled trial; or an agent that exited non-zero while the log showed
+    infra noise) gets exactly one automatic retry,
     sequentially (never two Harbor jobs at once -- that itself has caused
     EnvironmentStartTimeoutError on this machine), before being left for a
     human. The original failure is kept in the retried trial's logs, not
     discarded, and the retry itself is flagged either way so it's always
     clear this reward came from a second attempt."""
-    candidates = [
-        r
-        for r in runs
-        if r.reward is None
-        and r.logs
-        and _INFRA_RETRY_MARKER not in r.logs
-        and infra_marker_scan.scan_trial_logs(r.logs)
-    ]
-    for run in candidates:
+    candidates = [(r, why) for r in runs if (why := infra_retry_reason(r))]
+    for run, retry_reason in candidates:
         reason = budget.exceeded_message(db)
         if reason:
             run.logs = f"{_INFRA_RETRY_MARKER} (not retried: {reason})\n\n{run.logs}"
             db.commit()
             continue
 
-        markers = infra_marker_scan.scan_trial_logs(run.logs)
         original_logs = run.logs
         retry_job_dir = jobs_dir.parent / f"{jobs_dir.name}-infra-retry"
         result = await harbor_runner.run_job(
@@ -1438,7 +1463,7 @@ async def _retry_infra_agent_failures(
             n_concurrent=1,
         )
         header = (
-            f"{_INFRA_RETRY_MARKER} original attempt showed infra noise ({', '.join(markers)}), "
+            f"{_INFRA_RETRY_MARKER} original attempt: {retry_reason}, "
             "so it was rerun once automatically rather than counted as a genuine failure.\n\n"
             f"=== ORIGINAL (infra-failed) ATTEMPT ===\n{original_logs[-4_000:]}\n\n"
             "=== RETRY ==="
@@ -2543,6 +2568,22 @@ async def _tier1_gate(candidate: Path, gate_dir: Path, timeout_sec: float) -> tu
     return True, f"every declared solution scored 1 on the patched task ({len(values)})"
 
 
+def _attempt_note(outcome: "harbor_runner.TrialOutcome") -> str | None:
+    """A Tier 1/2 attempt's note: why there is no reward (a non-finite one is named), else nothing."""
+    non_finite = (outcome.report or {}).get("non_finite_reward")
+    if non_finite:
+        return f"the grader wrote a reward of {non_finite}, which is not a finite number; a person has to look at it"
+    return None if outcome.reward is not None else (outcome.logs or "")[-400:]
+
+
+def _judge_reward(outcome: dict) -> float | None:
+    """The reward a Tier 1/2 judge is shown. A +inf reward (no score for the pass rate) is judged as a reward-1
+    attempt, since +inf used to pass `>= 1.0`; NaN and -inf get no judge call."""
+    if outcome.get("reward") is None and outcome.get("non_finite_reward") == "inf":
+        return float("inf")
+    return outcome.get("reward")
+
+
 async def run_tier1_stage(
     submission_id: str,
     agent: str | None = None,
@@ -2679,11 +2720,12 @@ async def run_tier1_stage(
                 "trial_dir": str(outcome.trial_dir) if outcome.trial_dir else None,
                 "refused": bool((outcome.report or {}).get("refusal")),
                 "refusal": (outcome.report or {}).get("refusal"),
-                "note": None if outcome.reward is not None else (outcome.logs or "")[-400:],
+                "non_finite_reward": (outcome.report or {}).get("non_finite_reward"),
+                "note": _attempt_note(outcome),
             }
 
         async def classify(outcome: dict, mem: str) -> dict | None:
-            reward = outcome.get("reward")
+            reward = _judge_reward(outcome)
             if reward is None or not outcome.get("trial_dir"):
                 return None
             if reward < 1.0 and (outcome.get("refused") or (outcome.get("tool_calls") or 0) < 3):
@@ -3133,18 +3175,20 @@ async def run_tier2_stage(
                 "trial_dir": str(outcome.trial_dir) if outcome.trial_dir else None,
                 "refused": bool((outcome.report or {}).get("refusal")),
                 "refusal": (outcome.report or {}).get("refusal"),
-                "note": None if outcome.reward is not None else (outcome.logs or "")[-400:],
+                "non_finite_reward": (outcome.report or {}).get("non_finite_reward"),
+                "note": _attempt_note(outcome),
             }
 
         async def classify(outcome: dict) -> dict | None:
-            if outcome.get("reward") is None or not outcome.get("trial_dir"):
+            reward = _judge_reward(outcome)
+            if reward is None or not outcome.get("trial_dir"):
                 return None
-            if outcome["reward"] < 1.0 and outcome.get("refused"):
+            if reward < 1.0 and outcome.get("refused"):
                 return None  # a refusal is a miss; nothing to judge
             transcript = tier1_hacker.condense_trajectory(Path(outcome["trial_dir"]))
             calls = llm_usage.start()
             try:
-                judged = await tier2_judge.classify(instruction, transcript, outcome["reward"])
+                judged = await tier2_judge.classify(instruction, transcript, reward)
             finally:
                 budget.record_calls(db, submission_id, "tier2_loop", calls, reasoning_effort=settings.tier2_reasoning_effort)
                 db.commit()

@@ -67,7 +67,10 @@ async def run(hardened: Path, scratch: Path, hooks: Hooks, limits: Limits, earli
         judged = await hooks.classify(outcome, mem)
         by["judge"] += float((judged or {}).get("cost_usd") or 0.0)
         cost = sum(by.values())
-        verdict = memory.derive_verdict(outcome.get("reward"), outcome.get("tool_calls"), bool(outcome.get("refused")), judged)
+        verdict = memory.derive_verdict(
+            outcome.get("reward"), outcome.get("tool_calls"), bool(outcome.get("refused")), judged,
+            non_finite=bool(outcome.get("non_finite_reward")),
+        )
         attempt = {
             "index": index, "verdict": verdict, "reward": outcome.get("reward"), "tool_calls": outcome.get("tool_calls"),
             "cost_usd": outcome.get("cost_usd"), "judge_cost_usd": (judged or {}).get("cost_usd"), "summary": (judged or {}).get("summary") or outcome.get("note") or "",
@@ -75,6 +78,7 @@ async def run(hardened: Path, scratch: Path, hooks: Hooks, limits: Limits, earli
             "techniques": (judged or {}).get("techniques") or [], "defences": (judged or {}).get("defences") or [],
             "judge_label": (judged or {}).get("verdict"), "exploit_kind": (judged or {}).get("exploit_kind"), "judge_reasoning": (judged or {}).get("reasoning"), "judge_confidence": (judged or {}).get("confidence"),
             "trial_dir": outcome.get("trial_dir"), "refusal": outcome.get("refusal"), "note": outcome.get("note"),
+            "non_finite_reward": outcome.get("non_finite_reward"),
             "memory_given": mem,  # the notes this attempt's agent was shown (empty for the first)
             "against_fix": len(fixes),  # how many patches the task had when this attempt ran
         }

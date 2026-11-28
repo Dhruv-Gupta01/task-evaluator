@@ -131,6 +131,9 @@ export interface AgentTrialsResult {
   // Trials where the grader itself broke (no score). Left out of pass_rate, pass_at_k and the
   // refusal rate; rerun them.
   grader_errors?: number;
+  // Trials Harbor says have no valid reward (cancelled, a missing reward file, a verifier timeout, a
+  // non-finite reward). Left out of pass_rate and pass_at_k, never counted twice with grader errors.
+  no_valid_reward?: number;
   // Across the failing trials: which tests they failed and how close the best
   // one came. A single test failed by every failing trial is the typical
   // shape of an over-strict grader or an unstated rule (`notes`).

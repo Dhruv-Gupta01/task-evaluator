@@ -1700,6 +1700,14 @@ function SubmissionDetail() {
                   task if it repeats.
                 </div>
               )}
+              {(data.agent_trials.no_valid_reward ?? 0) > 0 && (
+                <div className="border-b border-border bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+                  {data.agent_trials.no_valid_reward} of {data.agent_trials.n} trial(s) have no
+                  valid reward (Harbor says so: for example a cancelled trial or a missing reward
+                  file, or the grader wrote NaN or infinity). They are left out of the pass rate and
+                  pass@k above, not counted as agent failures.
+                </div>
+              )}
               {data.agent_trials.test_summary && (
                 <TestSummaryBlock summary={data.agent_trials.test_summary} />
               )}

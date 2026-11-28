@@ -6,6 +6,7 @@ container, so every stage matches the real pipeline's verdicts."""
 
 import asyncio
 import json
+import math
 import os
 import re
 import shutil
@@ -21,7 +22,7 @@ from pathlib import Path
 import yaml
 
 from app.config import docker_add_host_pairs, get_settings, host_env_for_subprocess
-from app.services import infra_marker_scan, refusal_detector, reward_kit_checks, verifier_report, versions
+from app.services import error_policy, infra_marker_scan, refusal_detector, reward_kit_checks, verifier_report, versions
 from app.services.llm import pricing
 from app.services.llm.base import Usage
 
@@ -725,9 +726,14 @@ def _parse_trial(
     result = json.loads(result_path.read_text())
 
     reward = None
+    non_finite_reward = None
     rewards = (result.get("verifier_result") or {}).get("rewards") or {}
     if rewards.get("reward") is not None:
         reward = float(rewards["reward"])
+        if not math.isfinite(reward):
+            # NaN fails the `>= 1.0` test by luck, +inf would pass it: neither is a score. The trial keeps
+            # `non_finite_reward` so Tiers 1 and 2 can treat it as suspicious (a hit), not as a miss.
+            non_finite_reward, reward = reward, None
 
     agent_result = result.get("agent_result") or {}
     agent_version = None
@@ -794,6 +800,21 @@ def _parse_trial(
         # E.6: a trial that ended on a model-request timeout, a full disk or a
         # Docker error was not decided by the task.
         exc = result.get("exception_info") or {}
+        # Harbor's own verdict on what kind of failure this was: a trial it says has no valid reward
+        # says nothing about the agent, so it is marked and later left out of the pass rate.
+        policy_info = error_policy.from_exception_info(exc)
+        if policy_info:
+            outcome.report["error_policy"] = policy_info
+        no_valid = error_policy.no_valid_reward_reason(exc)
+        if non_finite_reward is not None:
+            no_valid = f"the reward is {non_finite_reward!r}, which is not a finite number"
+            outcome.report["non_finite_reward"] = repr(non_finite_reward)
+        if no_valid:
+            outcome.report["no_valid_reward"] = no_valid
+            outcome.report["flags"].append(
+                f"no valid reward: {no_valid}. This is not an agent failure, so the trial is left out of "
+                "the pass rate and pass@k; rerun it if it should count."
+            )
         infra = infra_marker_scan.scan_trial_logs(
             f"{exc.get('exception_type', '')} {exc.get('exception_message', '')}\n"
             + _read_text(trial_dir / "trial.log")

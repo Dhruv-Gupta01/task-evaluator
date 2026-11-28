@@ -57,7 +57,10 @@ async def run(task_dir: Path, hooks: Hooks, limits: Limits) -> dict:
         judged = await hooks.classify(outcome)
         by["judge"] += float((judged or {}).get("cost_usd") or 0.0)
         cost = sum(by.values())
-        verdict = memory.derive_verdict(outcome.get("reward"), bool(outcome.get("refused")), judged)
+        verdict = memory.derive_verdict(
+            outcome.get("reward"), bool(outcome.get("refused")), judged,
+            non_finite=bool(outcome.get("non_finite_reward")),
+        )
         attempts.append({
             "index": index, "verdict": verdict, "reward": outcome.get("reward"), "tool_calls": outcome.get("tool_calls"),
             "cost_usd": outcome.get("cost_usd"), "judge_cost_usd": (judged or {}).get("cost_usd"),
@@ -66,6 +69,7 @@ async def run(task_dir: Path, hooks: Hooks, limits: Limits) -> dict:
             "techniques": (judged or {}).get("techniques") or [], "judge_reasoning": (judged or {}).get("reasoning"),
             "judge_confidence": (judged or {}).get("confidence"), "trial_dir": outcome.get("trial_dir"),
             "refusal": outcome.get("refusal"), "note": outcome.get("note"),
+            "non_finite_reward": outcome.get("non_finite_reward"),
         })
         hooks.progress(snapshot())
 
@@ -73,7 +77,13 @@ async def run(task_dir: Path, hooks: Hooks, limits: Limits) -> dict:
             status, reason = "exploited", f"run {index} got reward 1 through a shortcut; a person has to rule on it"
             break
         if verdict == "needs_review":
-            status, reason = "needs_review", f"run {index} scored reward 1 and the judge could not say whether it was a shortcut"
+            if outcome.get("non_finite_reward"):
+                status, reason = "needs_review", (
+                    f"run {index}'s grader wrote a reward of {outcome['non_finite_reward']}, which is not a finite "
+                    "number; a person has to look at it"
+                )
+            else:
+                status, reason = "needs_review", f"run {index} scored reward 1 and the judge could not say whether it was a shortcut"
             break
         if memory.consecutive_misses(attempts) >= memory.MISS_LIMIT:
             status, reason = "robust", f"{memory.MISS_LIMIT} runs in a row did not get reward 1 through a shortcut"
