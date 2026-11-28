@@ -34,6 +34,7 @@ from app.services import (
     vendor_info,
     verifier_report,
 )
+from app.services.judge_guard import EVIDENCE_GUARD
 from app.services.llm import factory as llm_factory
 from app.services.llm import pricing as llm_pricing
 from app.services.llm import usage as llm_usage
@@ -2055,6 +2056,7 @@ Respond with ONLY JSON:
 
 TRIALS:
 """
+_CLASSIFY_PROMPT = EVIDENCE_GUARD + "\n\n" + _CLASSIFY_PROMPT
 
 
 def _trial_evidence(job_dirs: list[Path], results: list[dict]) -> list[dict]:
@@ -2126,6 +2128,7 @@ Respond with ONLY JSON:
  "best_failed": {"trial": "<trial_name>", "misses": [{"test": "...", "ruling": "agent_error|documentation_gap|grader_error", "reason": "..."}]} or null,
  "examples": ["example the tests would reject", ...]}
 """
+_AUDIT_PROMPT = EVIDENCE_GUARD + "\n\n" + _AUDIT_PROMPT
 
 
 async def _audit_trials(
