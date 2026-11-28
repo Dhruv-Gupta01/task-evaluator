@@ -460,11 +460,12 @@ Rules for authors: [`docs/task-toml-format.md`](docs/task-toml-format.md). Stati
 - **Judge file limits**: Sufficiency reads up to `JUDGE_MAX_FILE_CHARS` (150000) per
   file and `JUDGE_MAX_TOTAL_CHARS` (500000) in all; a judge that sees only part of a long dossier
   reports the rest as missing.
-- **Task network policy**: Harbor 0.23+ only enforces `no-network` when Docker's kernel supports
-  its egress-control sidecar (Docker Desktop for Mac doesn't) and otherwise rejects the task, so
-  older tasks with `allow_internet = false` would fail every stage. `HARBOR_NETWORK_MODE` (default
-  `public`) runs a temporary copy of each task with `network_mode = "public"`, and the stage logs
-  say so. Set it empty to respect each task's own setting.
+- **Task network policy: public only.** Every task runs with open internet: `HARBOR_NETWORK_MODE`
+  (default `public`) runs a temporary copy of each task with `network_mode = "public"` and without any
+  `[agent]`/`[verifier]` network override, and the stage logs say so. The evidence's `run_limits.network`
+  shows what the task declared versus what ran, and each trial's web use (web-tool calls, downloads,
+  installs, hosts) is counted from its tool calls. `AGENT_DISABLE_WEB_SEARCH=true` switches off the
+  agents' built-in web tools (not `curl`).
 - **Resetting local state**: submission data lives in `backend/storage/submissions/` (safe to
   delete) and in the `taskeval-pg-data` Docker volume (`docker compose down -v` wipes it).
 - **Docker image buildup**: each submission builds a tagged image (`taskeval/{id}:build`). These accumulate over time — `docker image prune -a` reclaims space from ones no

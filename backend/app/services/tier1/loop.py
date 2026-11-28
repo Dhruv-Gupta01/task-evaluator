@@ -79,6 +79,7 @@ async def run(hardened: Path, scratch: Path, hooks: Hooks, limits: Limits, earli
             "judge_label": (judged or {}).get("verdict"), "exploit_kind": (judged or {}).get("exploit_kind"), "judge_reasoning": (judged or {}).get("reasoning"), "judge_confidence": (judged or {}).get("confidence"),
             "trial_dir": outcome.get("trial_dir"), "refusal": outcome.get("refusal"), "note": outcome.get("note"),
             "non_finite_reward": outcome.get("non_finite_reward"),
+            "web_use": outcome.get("web_use"),
             "memory_given": mem,  # the notes this attempt's agent was shown (empty for the first)
             "against_fix": len(fixes),  # how many patches the task had when this attempt ran
         }

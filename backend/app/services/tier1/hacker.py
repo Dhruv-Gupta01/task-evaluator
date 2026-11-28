@@ -6,7 +6,7 @@ import re
 import shutil
 from pathlib import Path
 
-from app.services import harbor_runner, harborignore
+from app.services import harbor_runner, harborignore, web_use
 
 HINT_DIR = "/hinted-tests"
 _COPY_NAME = "_hinted_tests"  # folder inside environment/ (the Docker build context)
@@ -87,4 +87,9 @@ def condense_trajectory(trial_dir: Path | None, max_chars: int | None = None) ->
         elif msg and i == 1:
             out.append(f"[{i}] TASK PROMPT (clipped): {msg[:600]}")
     text = "\n".join(out)
-    return text if not max_chars or len(text) <= max_chars else "...(earlier steps cut)...\n" + text[-max_chars:]
+    text = text if not max_chars or len(text) <= max_chars else "...(earlier steps cut)...\n" + text[-max_chars:]
+    # Counted from the tool calls, so it survives the cut above and is not the agent's own claim.
+    used = web_use.scan(trial_dir)
+    if used is not None:
+        text = f"WEB USE (counted from the agent's tool calls): {web_use.describe(used)}\n" + text
+    return text

@@ -70,6 +70,7 @@ async def run(task_dir: Path, hooks: Hooks, limits: Limits) -> dict:
             "judge_confidence": (judged or {}).get("confidence"), "trial_dir": outcome.get("trial_dir"),
             "refusal": outcome.get("refusal"), "note": outcome.get("note"),
             "non_finite_reward": outcome.get("non_finite_reward"),
+            "web_use": outcome.get("web_use"),
         })
         hooks.progress(snapshot())
 

@@ -21,6 +21,7 @@ import {
   type StaticCheckReport,
   type TbStaticCheckReport,
   type VendorInfo,
+  type WebUse,
   type AiDetectionReport,
   type AnalysisCheck,
   type AgentTrialsResult,
@@ -2135,6 +2136,21 @@ function TierCycleView({ logs }: { logs?: string }) {
   );
 }
 
+function WebUseLine({ w }: { w?: WebUse | null }) {
+  if (!w || (!w.used_web && !w.installs)) return null;
+  const bits = [
+    w.web_tool_calls ? `${w.web_tool_calls} web-tool call(s)` : "",
+    w.fetches ? `${w.fetches} curl/wget/git clone` : "",
+    w.installs ? `${w.installs} package install(s)` : "",
+  ].filter(Boolean);
+  return (
+    <div className="mt-1 text-muted-foreground">
+      Web use: {bits.join(", ")}
+      {w.hosts.length > 0 && ` (${w.hosts.join(", ")})`}
+    </div>
+  );
+}
+
 const TIER1_VERDICT: Record<string, { label: string; cls: string }> = {
   exploited: { label: "Exploited", cls: "border-red-500/30 bg-red-500/10" },
   attempted_failed: { label: "Tried, failed", cls: "border-emerald-500/30 bg-emerald-500/10" },
@@ -2198,6 +2214,7 @@ function Tier2AttemptRow({
       {a.techniques.length > 0 && (
         <div className="mt-1 text-muted-foreground">Tried: {a.techniques.join("; ")}</div>
       )}
+      <WebUseLine w={a.web_use} />
       {a.note && <div className="mt-1 text-muted-foreground whitespace-pre-wrap">{a.note}</div>}
       {a.judge_error && <div className="mt-1 text-red-600">{a.judge_error}</div>}
       {a.judge_reasoning && (
@@ -2327,6 +2344,7 @@ function Tier1AttemptRow({
       {a.techniques.length > 0 && (
         <div className="mt-1 text-muted-foreground">Tried: {a.techniques.join("; ")}</div>
       )}
+      <WebUseLine w={a.web_use} />
       {a.defences.length > 0 && (
         <div className="text-muted-foreground">Stopped by: {a.defences.join("; ")}</div>
       )}

@@ -22,7 +22,7 @@ from pathlib import Path
 import yaml
 
 from app.config import docker_add_host_pairs, get_settings, host_env_for_subprocess
-from app.services import error_policy, infra_marker_scan, output_scan, refusal_detector, reward_kit_checks, verifier_report, versions
+from app.services import error_policy, infra_marker_scan, output_scan, refusal_detector, reward_kit_checks, verifier_report, versions, web_use
 from app.services.llm import pricing
 from app.services.llm.base import Usage
 
@@ -425,6 +425,21 @@ def _prepare_task(
             f"{'this stage' if agent_timeout_override else 'the platform setting AGENT_TIMEOUT_SEC'}; "
             f"the task file had {agent_section.get('timeout_sec', 'no timeout')})"
         )
+    # Public network only (2026-11-28): a phase's own network setting would otherwise beat the forced
+    # [environment] value for that phase, so it is removed from the copy and the forced mode applies everywhere.
+    if mode:
+        for phase in ("agent", "verifier"):
+            section = original.get(phase) or {}
+            present = {k: section[k] for k in _NETWORK_KEYS if k in section}
+            if not present or present == {"network_mode": mode}:
+                continue
+            header = f"[{phase}]"
+            keys, line = edits.get(header, ((), ""))
+            edits[header] = (tuple(dict.fromkeys(keys + _NETWORK_KEYS)), line)
+            notes.append(
+                f"({phase}-phase network setting {present} removed by the platform, so the {phase} also runs with "
+                f"network_mode '{mode}' (HARBOR_NETWORK_MODE; tasks run on the public network only))"
+            )
     bake = (
         agent == "codex"
         and settings.codex_bake_into_image
@@ -445,7 +460,13 @@ def _prepare_task(
         or any(k in new_env for k in ("allow_internet", "allowed_hosts"))
     ):
         raise ValueError("could not rewrite task.toml network policy")
-    if "[agent]" in edits and new_agent.get("timeout_sec") != timeout:
+    for phase in ("agent", "verifier"):
+        section = new.get(phase) or {}
+        if f"[{phase}]" in edits and mode and any(k in section for k in _NETWORK_KEYS if k != "network_mode"):
+            raise ValueError(f"could not rewrite task.toml {phase} network policy")
+        if f"[{phase}]" in edits and mode and section.get("network_mode") not in (None, mode):
+            raise ValueError(f"could not rewrite task.toml {phase} network policy")
+    if "[agent]" in edits and timeout and new_agent.get("timeout_sec") != timeout:
         raise ValueError("could not rewrite task.toml agent timeout")
     if bake:
         version = settings.codex_version or "latest"
@@ -821,6 +842,15 @@ def _parse_trial(
                    else "it said it would not help and did almost no work")
                 + f"): \"{refusal['evidence']}\". A refusal scores 0 like a failure but says nothing about the "
                 "task's difficulty."
+            )
+        # What the agent did with the web, counted from its own tool calls. Terminal-Bench runs agents with
+        # open internet and web tools on, so this is evidence for a reader, not a failure.
+        web = web_use.scan(trial_dir)
+        outcome.report["web_use"] = web
+        if web and web.get("used_web"):
+            outcome.report["flags"].append(
+                "the agent used the web (" + web_use.describe(web) + "). Terminal-Bench runs agents with open internet, "
+                "so this is not a failure; check that it did not look the answer up."
             )
         # E.6: a trial that ended on a model-request timeout, a full disk or a
         # Docker error was not decided by the task.

@@ -40,6 +40,9 @@ class VerifierReport(BaseModel):
     flags: list[str] = []
     facts: dict | None = None  # how the trial ran: limits, time used, resources, users
     refusal: dict | None = None  # {kind, evidence} when the agent refused the task (5.0 J)
+    # What the agent did with the web, from its own tool calls (services/web_use.py): {used_web, web_tool_calls,
+    # fetches, installs, hosts, examples}; None when no trajectory could be read.
+    web_use: dict | None = None
     checks: list[VerifierCheck] | None = None  # Reward Kit's per-check results, when the task writes them
     worker_error: bool = False  # the agent's own code failed while the grader ran it (a fair failure)
     # {reason, evidence} when the grader itself broke: no score, says nothing about the agent.

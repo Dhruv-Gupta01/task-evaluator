@@ -130,13 +130,13 @@ The README has a longer table of the same stages with the extra detail added in 
 Built from `harbor-5.0`: Reward Kit, the three cheat-trial tiers, Harbor 0.26.0 and the Worker work below.
 **Not on this branch yet** (they live on `merge-reward-kit-into-post-fixes` and are being brought over one at a
 time since 2026-11-28): the Flags system and its panels,
-session-log integrity (deferred for review), web-use counting,
+session-log integrity (deferred for review),
 versioning, evidence-set runs and generators. Solution variants are replaced
 here by `oracle_solutions`. A section here that mentions one of them would be wrong for this branch. Already
 brought over: the vendored checks at `bdf6034`, the task name from `[task] name`, Harbor's error policy, four
 Static Checks (printed success words, Lean output, one-sample timing, timed repeats), the prompt guards, the
 Tier 0 probes G17 to G27, the regrade classifier, secret redaction on export, the output scan, Failure
-Analysis per trial and `.harborignore` handling.
+Analysis per trial, `.harborignore` handling, web-use counting and the network policy report.
 
 - **Tier cycle ("Run all tiers")**: Tier 0 (static probes), Tier 1 (hinted agent plus fixer) and
   Tier 2 (unhinted agent) repeat on the patched task until a round needs no patch (no round
@@ -255,7 +255,7 @@ Restart the backend after changing it. The groups that matter:
 | Database | `DATABASE_URL`, `CORS_ORIGINS` | Defaults match `docker-compose.yml` and the Vite dev server. |
 | Judge model | `LLM_PROVIDER`, `LLM_MODEL`, `LLM_REASONING_EFFORT`, the provider key | Example file uses OpenAI `gpt-6-sol`. `gpt-6-luna` is far cheaper but missed one issue in a five-task comparison; a Gemini flash-lite model matched `sol` on Sufficiency (use a paid Google key, since free-tier prompts may be used for training). |
 | Agents | `HARBOR_AGENT`, `AGENT_MODEL`, `CLAUDE_AGENT_MODEL`, `AGENT_REASONING_EFFORT`, `AGENT_TIMEOUT_SEC` | The UI picks agent, model and reasoning per run; these are the defaults. `AGENT_TIMEOUT_SEC=28800` forces Terminal-Bench's 8-hour timeout on every task. |
-| Harbor and Docker | `HARBOR_BIN`, `HARBOR_NETWORK_MODE`, `DOCKER_PLATFORM`, `DOCKER_ADD_HOSTS` | `HARBOR_NETWORK_MODE=public` is needed because Docker Desktop for Mac cannot enforce `no-network`. |
+| Harbor and Docker | `HARBOR_BIN`, `HARBOR_NETWORK_MODE`, `DOCKER_PLATFORM`, `DOCKER_ADD_HOSTS` | Tasks run on the public network only: keep `HARBOR_NETWORK_MODE=public`. The platform also removes a task's own `[agent]`/`[verifier]` network setting from its run copy, and the evidence says what the task declared. `AGENT_DISABLE_WEB_SEARCH` (default false) switches off the agents' built-in web tools. |
 | Codex | `CODEX_BAKE_INTO_IMAGE`, `CODEX_VERSION`, `CODEX_WEB_SEARCH` | Codex is installed into the task image at build time so trials start fast. |
 | Other tools | `ANALYZE_*`, `CHECK_*`, `CHEAT_TRIAL_TIMEOUT_SEC`, `GPTZERO_API_KEY` | Failure Analysis, Rubric Check, Cheat Trial and AI Detection. |
 | Cost | `AGENT_RUN_BUDGET_USD`, `LLM_BUDGET_USD`, `MIN_TRIAL_COST_USD` | See section 5. |
@@ -325,8 +325,10 @@ Read these before relying on the platform.
    so still check before you share, and rotate any key that appears.
 5. **Windows has never been run.** The code has Windows handling and `.gitattributes` keeps shell
    scripts on LF, but no one has tried it.
-6. **Docker Desktop for Mac cannot enforce `no-network`**, so every task is run with network access
-   on (`HARBOR_NETWORK_MODE=public`). A task that relies on being offline is not truly tested.
+6. **Every task runs on the public network** (`HARBOR_NETWORK_MODE=public`, by rule): a task that relies on
+   being offline is not tested that way, and an agent can look things up online. What each agent did with the
+   web is counted from its tool calls and shown in the evidence; the Tier judges treat finding the answer online
+   as a shortcut.
 7. **Two Harbor jobs at once** caused start-up timeouts on the author's Mac, so the platform runs
    one Harbor job at a time. Untested on a larger machine.
 8. **Budget guard covers priced models only** (section 5).

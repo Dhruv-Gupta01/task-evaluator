@@ -6,7 +6,7 @@ from pathlib import Path
 
 from app.config import get_settings
 from app.models import LlmSpend, Run, Submission
-from app.services import ai_audit, grader_isolation, image_inventory, solution_variants, verifier_report, versions
+from app.services import ai_audit, grader_isolation, image_inventory, network_policy, solution_variants, verifier_report, versions, web_use
 from app.services.harbor_runner import CODEX_BAKE_NOTE_MARKER
 from app.services.task_config import TaskConfig
 from app.services.tier2 import memory as tier2_memory
@@ -722,6 +722,49 @@ def _breakdown(counts: dict[str, int]) -> str:
     return ", ".join(f"{n} {_VERDICT_WORDS.get(v, v)}" for v, n in counts.items() if n)
 
 
+def _agent_web_use_lines(schema) -> list[str]:
+    """One line on what the agent trials did with the web (counted from their tool calls)."""
+    uses = [t.verifier.web_use for t in schema.agent_trials.trials if t.verifier and t.verifier.web_use]
+    if not uses:
+        return []
+    totals = web_use.totals([{"web_use": u} for u in uses])
+    hosts = f"; hosts: {', '.join(totals['hosts'])}" if totals["hosts"] else ""
+    if not totals["used_web"] and not totals["installs"]:
+        return [f"- Web use: none in {totals['readable']} of {totals['attempts']} trial(s) with a readable trajectory."]
+    return [
+        f"- Web use: {totals['used_web']} of {totals['readable']} trial(s) looked something up on the web "
+        f"({totals['web_tool_calls']} web-tool call(s), {totals['fetches']} curl/wget/git clone), "
+        f"{totals['installs']} package install(s){hosts}. Open internet is Terminal-Bench's default."
+    ]
+
+
+def attempt_web_use(logs: str | None) -> dict:
+    """Web use across a Tier 1 or Tier 2 result's attempts (see services/web_use.py)."""
+    try:
+        attempts = (json.loads(logs) if logs else {}).get("attempts") or []
+    except ValueError:
+        attempts = []
+    return web_use.totals(attempts)
+
+
+def _web_use_line(used: dict) -> str | None:
+    if not used["attempts"]:
+        return None
+    if not used["readable"]:
+        return "  - Web use: not readable (no trajectory was kept for these attempts)."
+    unreadable = f" ({used['attempts'] - used['readable']} attempt(s) had no readable trajectory)" if used["readable"] < used["attempts"] else ""
+    if not used["used_web"] and not used["installs"]:
+        return f"  - Web use: none in any attempt{unreadable}."
+    parts = []
+    if used["used_web"]:
+        parts.append(f"{used['used_web']} of {used['readable']} attempt(s) looked something up on the web "
+                     f"({used['web_tool_calls']} web-tool call(s), {used['fetches']} curl/wget/git clone)")
+    if used["installs"]:
+        parts.append(f"{used['installs']} package install(s)")
+    hosts = f"; hosts: {', '.join(used['hosts'])}" if used["hosts"] else ""
+    return "  - Web use: " + ", ".join(parts) + hosts + f"{unreadable}. Open internet is Terminal-Bench's default; the judge counts finding the answer online as a shortcut."
+
+
 def _agent_tier_lines(name: str, status: str, logs: str | None) -> list[str]:
     counts = attempt_counts(logs)
     if not counts:
@@ -730,6 +773,9 @@ def _agent_tier_lines(name: str, status: str, logs: str | None) -> list[str]:
     tried = counts.get("exploited", 0) + counts.get("attempted_failed", 0)
     idle = sum(counts.get(v, 0) for v in _NOT_EVIDENCE)
     out = [f"- {name}: {total} attempt(s): {_breakdown(counts)}."]
+    web_line = _web_use_line(attempt_web_use(logs))
+    if web_line:
+        out.append(web_line)
     if not tried:
         out.append("  - No attempt really tried a shortcut, so this tier did not test the grader.")
     elif idle:
@@ -1058,6 +1104,19 @@ def run_limits(submission: Submission, schema: SubmissionSchema) -> dict:
             f"Harbor {harbor['version']} is older than {harbor['min_for_reward_kit_worker']}: a task whose grader "
             "uses Reward Kit's Worker is not graded as designed on this Harbor"
         )
+    network = settings.harbor_network_mode or "the task's own setting"
+    policy = (
+        network_policy.for_task(submission.extracted_path, settings.harbor_network_mode) if submission.extracted_path else None
+    )
+    if policy is not None:
+        warnings += network_policy.warnings(policy, web_tools_off=settings.agent_disable_web_search)
+    elif settings.harbor_network_mode == "public":
+        warnings.append(
+            "trials ran with open internet (public network) and "
+            + ("the agent's built-in web tools switched off" if settings.agent_disable_web_search
+               else "the agent's web tools on, as in Terminal-Bench")
+            + ": an agent could look something up online. Each trial's web use is counted in the evidence"
+        )
     return {
         "harbor_version": harbor["version"],
         "image": image,
@@ -1067,6 +1126,9 @@ def run_limits(submission: Submission, schema: SubmissionSchema) -> dict:
         "cpus": config.environment.cpus,
         "memory_mb": config.environment.memory_mb,
         "docker_platform": settings.docker_platform,
+        "network_mode": network,
+        "network": policy,  # {declared, effective}: what task.toml says and what the run used
+        "web_search_disabled": settings.agent_disable_web_search,
         "latest_recorded_trial": recorded,
         "warnings": warnings,
     }
@@ -1248,6 +1310,7 @@ def build_summary_markdown(
             if schema.agent_trials.no_valid_reward
             else []
         ),
+        *_agent_web_use_lines(schema),
     ]
     if schema.oracle.grader_errors:
         lines.insert(

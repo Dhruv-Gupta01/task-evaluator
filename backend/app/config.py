@@ -47,7 +47,6 @@ class Settings(BaseSettings):
     # Defaults applied when a task.toml omits a section
     default_cpus: float = 1.0
     default_memory_mb: int = 1024
-    default_allow_internet: bool = False
     default_agent_timeout_sec: int = 600
     default_verifier_timeout_sec: int = 120
     max_agent_trials: int = 50
@@ -124,6 +123,12 @@ class Settings(BaseSettings):
     codex_bake_into_image: bool = True
     codex_version: str = ""  # pin the Codex CLI; empty installs the latest each trial
     codex_web_search: str = ""  # disabled | cached | live; empty = Codex default
+    # Switches off the agent's built-in web search and fetch tools (Claude Code: WebSearch and WebFetch;
+    # Codex: web_search=disabled) for agent trials, tier runs and the cheat trial. Off by default so agents
+    # run with web tools on, as in Terminal-Bench; what an agent did with the web is counted instead
+    # (services/web_use.py) and shown in the evidence. It does not stop `curl` in the container: tasks run
+    # on the public network only. An explicit CODEX_WEB_SEARCH wins for Codex.
+    agent_disable_web_search: bool = False
     # "Failure analysis" stage: `harbor analyze` reads each finished trial's
     # trajectory and grades it (reward hacking, task specification). It runs a
     # small evaluator agent, so pick a cheap model. terminus-2 drives the

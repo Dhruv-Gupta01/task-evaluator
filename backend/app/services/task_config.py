@@ -8,7 +8,11 @@ settings = get_settings()
 class EnvironmentConfig(BaseModel):
     cpus: float = settings.default_cpus
     memory_mb: int = settings.default_memory_mb
-    allow_internet: bool = settings.default_allow_internet
+    # What the task file declares about the network; None = not declared. Nothing here is the policy a run
+    # used: tasks run on the public network only (services/network_policy.py, harbor_runner._prepare_task).
+    allow_internet: bool | None = None
+    network_mode: str | None = None
+    allowed_hosts: list[str] | None = None
     build_timeout_sec: float = 600.0
 
 
