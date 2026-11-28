@@ -2299,21 +2299,39 @@ async def run_failure_analysis(submission_id: str, rubric: str = "default") -> N
         analysis_root = settings.storage_dir / "submissions" / submission_id / "runs" / "analysis"
         stamp = uuid.uuid4().hex[:8]
         use_tb = rubric == "tb"
+        # One `harbor analyze` per trial folder, not per job: a single hung evaluator used to run the whole
+        # job to its timeout and throw away the trials that had finished (2026-11-20). Each trial now has its
+        # own (shorter) limit and a failure is recorded against that trial only. Two at a time: Harbor's own
+        # job-folder analysis ran four in parallel, each in a Docker container.
+        trial_limit = min(settings.analyze_trial_timeout_sec, settings.analyze_timeout_sec)
+        gate = asyncio.Semaphore(2)
+
+        async def analyze_one(target: Path, label: str, limit: float):
+            async with gate:
+                return label, await harbor_runner.run_analyze(
+                    target,
+                    analysis_root,
+                    f"analyze-{stamp}-{label}",
+                    settings.analyze_agent,
+                    settings.analyze_model,
+                    limit,
+                    rubric_path=_TB_ANALYZE_RUBRIC if use_tb else None,
+                    prompt_path=_TB_ANALYZE_PROMPT if use_tb else None,
+                    agent_setup_timeout_sec=_agent_setup_timeout_sec(settings.analyze_agent),
+                    agent_kwargs=_evaluator_kwargs(settings.analyze_reasoning_effort),
+                )
+
+        targets: list[tuple[Path, str, float]] = []
         for job_dir in job_dirs:
-            outcome = await harbor_runner.run_analyze(
-                job_dir,
-                analysis_root,
-                f"analyze-{stamp}-{job_dir.name}",
-                settings.analyze_agent,
-                settings.analyze_model,
-                settings.analyze_timeout_sec,
-                rubric_path=_TB_ANALYZE_RUBRIC if use_tb else None,
-                prompt_path=_TB_ANALYZE_PROMPT if use_tb else None,
-                agent_setup_timeout_sec=_agent_setup_timeout_sec(settings.analyze_agent),
-                agent_kwargs=_evaluator_kwargs(settings.analyze_reasoning_effort),
-            )
+            trial_dirs = sorted(d for d in job_dir.iterdir() if d.is_dir() and (d / "result.json").is_file())
+            if trial_dirs:
+                targets.extend((t, f"{job_dir.name}-{t.name}", trial_limit) for t in trial_dirs)
+            else:
+                targets.append((job_dir, job_dir.name, settings.analyze_timeout_sec))
+        finished = await asyncio.gather(*(analyze_one(t, label, limit) for t, label, limit in targets))
+        for label, outcome in finished:
             if outcome.error:
-                errors.append(f"{job_dir.name}: {outcome.error}")
+                errors.append(f"{label}: {outcome.error}")
             if outcome.report:
                 results.extend(outcome.report.get("results") or [])
             if outcome.cost_usd is not None:
@@ -2323,7 +2341,7 @@ async def run_failure_analysis(submission_id: str, rubric: str = "default") -> N
                     outcome.cost_usd, None, None, None,
                     agent=settings.analyze_agent,
                     reasoning_effort=settings.analyze_reasoning_effort,
-                    detail=f"harbor analyze of {job_dir.name}",
+                    detail=f"harbor analyze of {label}",
                 )
 
         job_summary = None
