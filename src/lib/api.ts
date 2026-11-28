@@ -446,6 +446,18 @@ export interface RegradeItem {
   new_grader_error: { reason: string; evidence: string } | null;
   failed_checks: string[];
   flags: string[];
+  // ctrf test counts before and after, and the test names the saved run reported that the regraded run
+  // does not (null = unknown: a run without per-test names)
+  old_tests?: number | null;
+  new_tests?: number | null;
+  tests_missing?: string[] | null;
+  // Present only when the regrade was run with classify: a model's label for a changed trial.
+  classification?: {
+    classification: "expected" | "unexpected" | "unclear";
+    confidence?: "high" | "low";
+    reason?: string;
+    error?: string;
+  };
 }
 export interface RegradeReport {
   kind?: "agent" | "oracle";
@@ -460,10 +472,16 @@ export interface RegradeReport {
     now_no_score: number;
     grader_errors_before: number;
     grader_errors_after: number;
+    // counts of the model's labels, only when classified
+    expected?: number;
+    unexpected?: number;
+    unclear?: number;
   };
   errors: string[];
   error?: string;
   harbor_version?: string;
+  classified?: boolean;
+  classify_note?: string | null;
 }
 
 export interface VersionInfo {
@@ -1166,10 +1184,12 @@ export const api = {
     id: string,
     kind: "agent" | "oracle" = "agent",
     source: "previous" | "self" = "previous",
+    classify = false,
   ) =>
-    fetch(`${API_BASE_URL}/submissions/${id}/regrade?kind=${kind}&source=${source}`, {
-      method: "POST",
-    }).then(handle<unknown>),
+    fetch(
+      `${API_BASE_URL}/submissions/${id}/regrade?kind=${kind}&source=${source}&classify=${classify}`,
+      { method: "POST" },
+    ).then(handle<unknown>),
   versions: () => fetch(`${API_BASE_URL}/versions`).then(handle<VersionInfo>),
   changes: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/changes`).then(handle<SubmissionChanges>),

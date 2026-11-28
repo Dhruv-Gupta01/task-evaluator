@@ -284,7 +284,7 @@ Reward Kit runs inside the task's own grader. The platform only reads what it le
 | No valid reward | Harbor's own error policy (`services/error_policy.py`): a trial Harbor says has no valid reward (cancelled, a verifier timeout) or a NaN/infinite reward is left out of the pass rate and pass@k. The one automatic infra retry follows Harbor's `should_retry` (never a cancelled trial). In Tiers 1 and 2 a non-finite reward is a hit. | Agent Trials card, evidence summary |
 | Suggested verdict | Pre-fills fake, likely genuine, pass or unclear per trial. | Trial cards |
 | Reward Kit checklist | Separate verifier with a `tests/Dockerfile`, exact `harbor-rewardkit==0.2.4` pin, `uv.lock`, a `reward.toml` Reward Kit 0.2.4 would accept (only `[[reward]]` and `[scoring.<file>]` with `aggregation`/`threshold`), setup-error handling, check names, parser errors the grader does not score as 0, and `harbor lint` findings. Nothing here for a task that does not use Reward Kit. | Static Checks |
-| Re-grade | `harbor job regrade` re-scores saved trials with the latest grader, without a new agent run; the originals are kept. | Re-grade Saved Trials card |
+| Re-grade | `harbor job regrade` re-scores saved trials with the latest grader, without a new agent run; the originals are kept. Shows tests that are no longer reported, and optionally ("Ask a model", costs credits) labels each changed reward expected, unexpected or unclear. | Re-grade Saved Trials card |
 
 ### Hashed expected answers
 

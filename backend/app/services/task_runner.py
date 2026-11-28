@@ -25,8 +25,10 @@ from app.services import (
     infra_marker_scan,
     leakage_scan,
     platform_checks,
+    regrade_classifier,
     review_report,
     static_checks,
+    submission_diff,
     sufficiency_judge,
     tb_static_checks,
     validation_service,
@@ -1259,6 +1261,7 @@ def _regrade_item(job: Path, source_dir: Path | None, outcome: "harbor_runner.Tr
     """One saved trial's reward before and after the regrade."""
     old_reward = None
     old_grader_error = False
+    old_ctrf = verifier_report._read_ctrf(source_dir / "verifier" / "ctrf.json") if source_dir is not None else None
     if source_dir is not None and (source_dir / "result.json").is_file():
         try:
             old = json.loads((source_dir / "result.json").read_text())
@@ -1278,9 +1281,17 @@ def _regrade_item(job: Path, source_dir: Path | None, outcome: "harbor_runner.Tr
         change = "loosened"
     else:
         change = "tightened"
+    new_ctrf = report.get("ctrf")
+    # Tests the saved run reported that the regraded run no longer does (None = unknown).
+    tests_missing = None
+    if old_ctrf and new_ctrf and old_ctrf.get("names") and new_ctrf.get("names"):
+        tests_missing = sorted(set(old_ctrf["names"]) - set(new_ctrf["names"]))[:20]
     return {
         "trial": source_dir.name if source_dir else "(unknown)",
         "job": job.name,
+        "old_tests": old_ctrf.get("tests") if old_ctrf else None,
+        "new_tests": new_ctrf.get("tests") if new_ctrf else None,
+        "tests_missing": tests_missing,
         "old_reward": old_reward,
         "new_reward": new_reward,
         "change": change,
@@ -1292,13 +1303,15 @@ def _regrade_item(job: Path, source_dir: Path | None, outcome: "harbor_runner.Tr
     }
 
 
-async def run_regrade(submission_id: str, kind: str = "agent", source: str = "previous") -> None:
+async def run_regrade(submission_id: str, kind: str = "agent", source: str = "previous", classify: bool = False) -> None:
     """Score saved trials again with the current grader, without running the agent
     (`harbor job regrade`). It shows exactly which scores a grader fix changes and never
     edits the original runs: the answer goes in its own `regrade` row. `loosened` (0 became 1)
     means the fix made the grader accept work it rejected before, which a person should look
-    at because the task may have got easier. Advisory; no LLM, so no cost. logs is JSON:
-    {kind, source, items, summary, errors}."""
+    at because the task may have got easier. Advisory. The regrade itself uses no model, so no cost; with
+    `classify` a model also labels each changed trial expected, unexpected or unclear (services/regrade_classifier.py:
+    one call per changed trial, at most 12, recorded in the spend log). logs is JSON:
+    {kind, source, items, summary, errors, classified, classify_note}."""
     db = SessionLocal()
     try:
         submission = db.get(Submission, submission_id)
@@ -1331,6 +1344,26 @@ async def run_regrade(submission_id: str, kind: str = "agent", source: str = "pr
                 errors.append(f"{job.name}: {result.error[:1500]}")
                 continue
             items += [_regrade_item(job, source_dir, outcome) for source_dir, outcome in result.trials]
+        classified = False
+        classify_note = None
+        if classify:
+            if not any(i["change"] != "same" for i in items):
+                classify_note = "no trial's reward changed, so no model call was made"
+            elif (over := budget.judge_exceeded_message(db)):
+                classify_note = f"not classified: {over}"
+            else:
+                try:
+                    # What the task changed between the two uploads; for a re-score of the same upload, nothing.
+                    changes = (
+                        submission_diff.diff_tasks(Path(src.extracted_path), task_root)
+                        if src is not None and src.id != submission_id and src.extracted_path
+                        else None
+                    )
+                    with _track_llm_spend(db, submission_id, "regrade_classify"):
+                        items = await regrade_classifier.classify_changes(items, changes)
+                    classified = True
+                except Exception as exc:  # advisory: a model problem must never lose the regrade itself
+                    classify_note = f"not classified: {type(exc).__name__}: {exc}"
         counts = {c: sum(1 for i in items if i["change"] == c) for c in
                   ("same", "loosened", "tightened", "now_scored", "now_no_score")}
         summary = {
@@ -1339,6 +1372,8 @@ async def run_regrade(submission_id: str, kind: str = "agent", source: str = "pr
             "grader_errors_before": sum(1 for i in items if i["old_grader_error"]),
             "grader_errors_after": sum(1 for i in items if i["new_grader_error"]),
         }
+        if classified:
+            summary.update(regrade_classifier.tally(items))
         clean = bool(items) and not errors and counts["same"] == len(items)
         run.logs = json.dumps(
             {
@@ -1347,6 +1382,8 @@ async def run_regrade(submission_id: str, kind: str = "agent", source: str = "pr
                 "items": items,
                 "summary": summary,
                 "errors": errors,
+                "classified": classified,
+                "classify_note": classify_note,
                 "harbor_version": harbor_runner._harbor_version(),
             }
         )

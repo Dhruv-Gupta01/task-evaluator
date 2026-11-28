@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 MAX_NAMES = 50
+MAX_ALL_NAMES = 2000  # every test name, for comparing two runs (regrade's tests_missing)
 MAX_NAME_CHARS = 200
 MAX_DETAILS_CHARS = 4000
 
@@ -45,6 +46,7 @@ def _read_ctrf(path: Path) -> dict | None:
     except (OSError, ValueError, KeyError, TypeError):
         return None
     tests = results.get("tests") or []
+    names = [str(t.get("name")) for t in tests]
     failed_names = [_short(t.get("name")) for t in tests if t.get("status") == "failed"]
     skipped_names = [_short(t.get("name")) for t in tests if t.get("status") == "skipped"]
     return {
@@ -55,6 +57,7 @@ def _read_ctrf(path: Path) -> dict | None:
         "other": int(summary.get("other") or 0) + int(summary.get("pending") or 0),
         "failed_names": failed_names[:MAX_NAMES],
         "skipped_names": skipped_names[:MAX_NAMES],
+        "names": sorted(set(names))[:MAX_ALL_NAMES],
     }
 
 

@@ -129,8 +129,9 @@ function SubmissionDetail() {
   // Score saved trials again with the current grader, without running the agent.
   const [regradeKind, setRegradeKind] = useState<"agent" | "oracle">("agent");
   const [regradeSource, setRegradeSource] = useState<"previous" | "self">("previous");
+  const [regradeClassify, setRegradeClassify] = useState(false);
   const mRegrade = useMutation({
-    mutationFn: () => api.regrade(id, regradeKind, regradeSource),
+    mutationFn: () => api.regrade(id, regradeKind, regradeSource, regradeClassify),
     onSuccess: () => {
       toast.success("Re-grade started");
       invalidate();
@@ -1783,6 +1784,14 @@ function SubmissionDetail() {
                 <SelectItem value="self">This upload's own trials</SelectItem>
               </SelectContent>
             </Select>
+            <label className="flex items-center gap-1.5 text-sm text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={regradeClassify}
+                onChange={(e) => setRegradeClassify(e.target.checked)}
+              />
+              Ask a model if each change was expected (costs credits)
+            </label>
             <RunButton
               label="Re-grade"
               runningLabel="Re-grading…"
@@ -3452,6 +3461,12 @@ function TrialInsight({
   );
 }
 
+const REGRADE_LABEL: Record<string, string> = {
+  expected: "text-emerald-600",
+  unexpected: "font-medium text-red-600 dark:text-red-400",
+  unclear: "text-muted-foreground",
+};
+
 const REGRADE_CHANGE: Record<string, { label: string; cls: string }> = {
   same: { label: "unchanged", cls: "text-muted-foreground" },
   loosened: { label: "LOOSENED", cls: "font-medium text-amber-700 dark:text-amber-400" },
@@ -3500,6 +3515,13 @@ function RegradeView({ logs }: { logs?: string }) {
               , <b className="text-red-600 dark:text-red-400">{sum.tightened} tightened</b>
             </>
           )}
+          {parsed.classified && (
+            <>
+              ; model says <b className="text-emerald-600">{sum.expected ?? 0} expected</b>,{" "}
+              <b className="text-red-600 dark:text-red-400">{sum.unexpected ?? 0} unexpected</b>,{" "}
+              {sum.unclear ?? 0} unclear
+            </>
+          )}
           {sum.now_scored > 0 && <>, {sum.now_scored} now scored</>}
           {sum.now_no_score > 0 && <>, {sum.now_no_score} now without a score</>}
           {(sum.grader_errors_before > 0 || sum.grader_errors_after > 0) && (
@@ -3540,11 +3562,29 @@ function RegradeView({ logs }: { logs?: string }) {
                 {it.failed_checks.length > 0 && (
                   <div className="text-muted-foreground">failed: {it.failed_checks.join(", ")}</div>
                 )}
+                {it.old_tests != null && it.new_tests != null && it.old_tests !== it.new_tests && (
+                  <div className="text-muted-foreground">
+                    tests reported: {it.old_tests} → {it.new_tests}
+                  </div>
+                )}
+                {(it.tests_missing?.length ?? 0) > 0 && (
+                  <div className="text-amber-700 dark:text-amber-400">
+                    no longer reported: {it.tests_missing!.join(", ")}
+                  </div>
+                )}
+                {it.classification && (
+                  <div className={REGRADE_LABEL[it.classification.classification]}>
+                    model: {it.classification.classification}
+                    {it.classification.confidence === "low" && " (low confidence)"}
+                    {it.classification.reason && <> - {it.classification.reason}</>}
+                  </div>
+                )}
               </li>
             );
           })}
         </ul>
       )}
+      {parsed.classify_note && <div className="text-muted-foreground">{parsed.classify_note}</div>}
       {parsed.errors.length > 0 && (
         <LogPanel logs={parsed.errors.join("\n\n")} title="Re-grade errors" />
       )}

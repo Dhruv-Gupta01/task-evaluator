@@ -129,12 +129,12 @@ The README has a longer table of the same stages with the extra detail added in 
 Built from `harbor-5.0`: Reward Kit, the three cheat-trial tiers, Harbor 0.26.0 and the Worker work below.
 **Not on this branch yet** (they live on `merge-reward-kit-into-post-fixes` and are being brought over one at a
 time since 2026-11-28): the Flags system and its panels,
-session-log integrity, the output scan, the regrade classifier, `.harborignore` handling, web-use counting,
+session-log integrity, the output scan, `.harborignore` handling, web-use counting,
 versioning, evidence-set runs, generators and redaction of the evidence bundle. Solution variants are replaced
 here by `oracle_solutions`. A section here that mentions one of them would be wrong for this branch. Already
 brought over: the vendored checks at `bdf6034`, the task name from `[task] name`, Harbor's error policy, four
-Static Checks (printed success words, Lean output, one-sample timing, timed repeats), the prompt guards and the
-Tier 0 probes G17 to G27.
+Static Checks (printed success words, Lean output, one-sample timing, timed repeats), the prompt guards, the
+Tier 0 probes G17 to G27 and the regrade classifier.
 
 - **Tier cycle ("Run all tiers")**: Tier 0 (static probes), Tier 1 (hinted agent plus fixer) and
   Tier 2 (unhinted agent) repeat on the patched task until a round needs no patch (no round
@@ -148,6 +148,8 @@ Tier 0 probes G17 to G27.
   a `reward.toml` the 0.2.4 model would accept, setup-error handling, check names, submission errors the grader
   does not score as 0, and `harbor lint` findings.
 - **Regrade**: re-scores saved trials with the latest grader (`harbor job regrade`), without a new agent run.
+  It lists tests a saved run reported that the regraded run no longer does, and with "Ask a model" (off by
+  default, up to 12 judge calls, counted in the budget) labels each changed reward expected, unexpected or unclear.
 - **Harbor 0.26.0** is the tested version everywhere; `GET /versions` warns about any other.
 - **Tier logs and cost**: tier logs record the reasoning effort actually sent (none for Haiku 4.5),
   and Haiku 4.5 spend is priced and counted against the budget.

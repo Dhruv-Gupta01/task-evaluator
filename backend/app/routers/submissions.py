@@ -365,13 +365,16 @@ _REGRADE_SOURCES = ("previous", "self")
 
 @router.post("/submissions/{submission_id}/regrade", status_code=202)
 async def trigger_regrade(
-    submission_id: str, kind: str = "agent", source: str = "previous", db: Session = Depends(get_db)
+    submission_id: str, kind: str = "agent", source: str = "previous", classify: bool = False,
+    db: Session = Depends(get_db),
 ) -> dict[str, str]:
     """Score saved trials again with this upload's grader, without running the agent
     (`harbor job regrade`). `source=previous` (default) re-scores the latest earlier upload's
     trials of the same task, which is how a grader fix is checked; `source=self` re-scores
     this upload's own. The original runs are never changed: the result is its own `regrade`
-    stage showing each trial's old and new reward. Advisory; no LLM cost."""
+    stage showing each trial's old and new reward. Advisory. The regrade costs no model; with
+    `classify=true` a model also labels each changed trial expected, unexpected or unclear (one call per changed
+    trial, at most 12, counted in the monthly budget)."""
     if kind not in _REGRADE_KINDS:
         raise HTTPException(status_code=400, detail=f"kind must be one of {', '.join(_REGRADE_KINDS)}")
     if source not in _REGRADE_SOURCES:
@@ -381,6 +384,8 @@ async def trigger_regrade(
         raise HTTPException(status_code=404, detail="submission not found")
     if submission.extracted_path is None:
         raise HTTPException(status_code=400, detail="validate the submission first (files must be extracted)")
+    if classify:
+        _raise_if_over_budget(db, budget.judge_exceeded_message(db))
     if not versions._harbor_has_command("job", "regrade"):
         raise HTTPException(
             status_code=400,
@@ -394,7 +399,7 @@ async def trigger_regrade(
         where = "an earlier upload of this task" if source == "previous" else "this upload"
         raise HTTPException(status_code=400, detail=f"no saved {kind} trials to re-score in {where}")
     _queue_row(db, submission_id, "regrade")
-    await task_queue.submit(f"{submission_id}:regrade", task_runner.run_regrade(submission_id, kind, source))
+    await task_queue.submit(f"{submission_id}:regrade", task_runner.run_regrade(submission_id, kind, source, classify))
     return {"status": "started"}
 
 
