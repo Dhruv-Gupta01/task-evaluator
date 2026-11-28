@@ -12,6 +12,7 @@ from pathlib import Path
 from app.services.hygiene_checks import _own_files, run_hygiene_checks
 from app.services.agent_user_checks import check_agent_user
 from app.services.pinning_checks import check_hf_revisions, check_licences_and_size, check_toolchain_pinning
+from app.services.grader_rules import check_grader_rules
 from app.services.harborignore_checks import check_harborignore
 from app.services.reward_kit_checks import check_harbor_lint, check_reward_kit, uses_reward_kit
 from app.services.platform_checks import check_bundled_binaries, check_resources
@@ -442,7 +443,9 @@ def _toml_format(task_root: Path, report) -> None:
     check_task_toml_format(task_root, report)
 
 
-def run_static_checks(task_root: Path) -> StaticCheckReport:
+def run_static_checks(task_root: Path, other_canaries: dict[str, list[str]] | None = None) -> StaticCheckReport:
+    """`other_canaries` (private canary GUID -> other tasks using it) comes from the database; without it the
+    canary-reuse rule (15.26) stays quiet."""
     report = StaticCheckReport()
     check_instruction(task_root / "instruction.md", report)
     check_test_sh(task_root / "tests" / "test.sh", report, reward_kit=uses_reward_kit(task_root))
@@ -466,6 +469,10 @@ def run_static_checks(task_root: Path) -> StaticCheckReport:
             check(task_root, report)
         except Exception as exc:  # advisory: one odd file must not break the stage
             report.add(check.__name__, "info", f"check could not run: {type(exc).__name__}")
+    try:
+        check_grader_rules(task_root, report, other_canaries)
+    except Exception as exc:  # one odd file must not break the stage
+        report.add("check_grader_rules", "info", f"check could not run: {type(exc).__name__}")
     _hashed_answers(task_root, report)
     _oracle_solutions(task_root, report)
     _toml_format(task_root, report)

@@ -132,15 +132,16 @@ The README has a longer table of the same stages with the extra detail added in 
 
 Built from `harbor-5.0`: Reward Kit, the three cheat-trial tiers, Harbor 0.26.0 and the Worker work below.
 **Not on this branch yet** (they live on `merge-reward-kit-into-post-fixes` and are being brought over one at a
-time since 2026-11-28): the Flags system and its panels,
+time since 2026-11-28): the Flags framework (table, panel, rulings; not planned: it is built on named rulings),
+the Flag rules that read stored results (item 14b),
 session-log integrity (deferred for review),
 evidence-set runs and generators. Solution variants are replaced
 here by `oracle_solutions`. A section here that mentions one of them would be wrong for this branch. Already
 brought over: the vendored checks at `bdf6034`, the task name from `[task] name`, Harbor's error policy, four
 Static Checks (printed success words, Lean output, one-sample timing, timed repeats), the prompt guards, the
 Tier 0 probes G17 to G27, the regrade classifier, secret redaction on export, the output scan, Failure
-Analysis per trial, `.harborignore` handling, web-use counting, the network policy report and versioning (as warnings on the
-Changes banner).
+Analysis per trial, `.harborignore` handling, web-use counting, the network policy report, versioning (as warnings on the
+Changes banner) and 11 of the Flag rules as Static Checks (all warn).
 
 - **Tier cycle ("Run all tiers")**: Tier 0 (static probes), Tier 1 (hinted agent plus fixer) and
   Tier 2 (unhinted agent) repeat on the patched task until a round needs no patch (no round

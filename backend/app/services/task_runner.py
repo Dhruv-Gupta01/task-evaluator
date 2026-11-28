@@ -1850,6 +1850,21 @@ async def run_leakage_scan(submission_id: str) -> None:
         db.close()
 
 
+def _other_canaries(db, submission: Submission) -> dict[str, list[str]]:
+    """Private canary GUID -> other tasks (by name) whose upload carries it, for the canary-reuse rule (15.26)."""
+    from app.services import grader_rules
+
+    out: dict[str, list[str]] = {}
+    others = db.query(Submission).filter(Submission.id != submission.id, Submission.task_name != submission.task_name)
+    for other in others:
+        if not other.extracted_path or not Path(other.extracted_path).is_dir():
+            continue
+        for guid in grader_rules.canaries(Path(other.extracted_path)):
+            if guid != grader_rules.PUBLIC_CANARY:
+                out.setdefault(guid, []).append(other.task_name)
+    return out
+
+
 async def run_static_checks_stage(submission_id: str) -> None:
     """Advisory-only mechanical checks (services/static_checks.py) over
     instruction.md, test.sh, Dockerfile and zip layout -- word counts,
@@ -1873,7 +1888,9 @@ async def run_static_checks_stage(submission_id: str) -> None:
         db.commit()
 
         try:
-            report = static_checks.run_static_checks(Path(submission.extracted_path))
+            report = static_checks.run_static_checks(
+                Path(submission.extracted_path), other_canaries=_other_canaries(db, submission)
+            )
         except Exception:
             run.status = "failed"
             run.reward = None
