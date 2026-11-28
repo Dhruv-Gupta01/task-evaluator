@@ -110,6 +110,9 @@ class Settings(BaseSettings):
     litellm_request_timeout_sec: int = 3600
     # E.7: a per-trial share of the run cost cap below this is warned about on long-timeout tasks.
     min_trial_cost_usd: float = 3.0
+    # Results review (result_rules, 15.11): fewer scored agent trials than this get counts and a 95% interval
+    # instead of a pass rate.
+    min_trials_for_rate: int = 5
     # Stops an agent-trials run once its own cost (finished plus in-flight
     # trials) reaches this many USD; 0 disables it. The run is also capped by
     # whatever is left of LLM_BUDGET_USD this month.

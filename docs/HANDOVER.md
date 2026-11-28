@@ -264,6 +264,7 @@ Restart the backend after changing it. The groups that matter:
 | Codex | `CODEX_BAKE_INTO_IMAGE`, `CODEX_VERSION`, `CODEX_WEB_SEARCH` | Codex is installed into the task image at build time so trials start fast. |
 | Other tools | `ANALYZE_*`, `CHECK_*`, `CHEAT_TRIAL_TIMEOUT_SEC`, `GPTZERO_API_KEY` | Failure Analysis, Rubric Check, Cheat Trial and AI Detection. |
 | Cost | `AGENT_RUN_BUDGET_USD`, `LLM_BUDGET_USD`, `MIN_TRIAL_COST_USD` | See section 5. |
+| Results review | `MIN_TRIALS_FOR_RATE` (5) | Below 5 scored agent trials the page and the evidence give counts and a 95% interval instead of a pass rate. Advisory lines only (`services/result_rules.py`). |
 
 ## 5. Costs and limits
 

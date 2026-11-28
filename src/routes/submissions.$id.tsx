@@ -1669,6 +1669,13 @@ function SubmissionDetail() {
                   {data.agent_trials.pass_rate != null && (
                     <> — {Math.round(data.agent_trials.pass_rate * 100)}%</>
                   )}
+                  {data.agent_trials.pass_interval && (
+                    <span title={data.agent_trials.pass_rate_text ?? undefined}>
+                      {" "}
+                      (95% interval {Math.round(data.agent_trials.pass_interval[0] * 100)}–
+                      {Math.round(data.agent_trials.pass_interval[1] * 100)}%)
+                    </span>
+                  )}
                 </span>
               </div>
               {data.agent_trials.pass_at_k && (
@@ -1871,8 +1878,30 @@ function SubmissionDetail() {
             </div>
           )}
         </StageCard>
+        {data.result_warnings && data.result_warnings.length > 0 && (
+          <ResultsReview warnings={data.result_warnings} />
+        )}
       </div>
     </PageShell>
+  );
+}
+
+// Advisory lines the backend reads from the stored runs (result_rules.py). Never a gate, no ruling.
+function ResultsReview({ warnings }: { warnings: string[] }) {
+  return (
+    <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-800 dark:bg-amber-950/30">
+      <div className="font-medium">Results review</div>
+      <div className="mb-2 text-xs text-muted-foreground">
+        Read from the stored runs. Advisory: nothing here changes a gate.
+      </div>
+      <ul className="space-y-1 text-xs">
+        {warnings.map((w) => (
+          <li key={w} className="text-amber-700 dark:text-amber-400">
+            {w}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

@@ -5,8 +5,10 @@ from collections import Counter
 from pathlib import Path
 
 from app.config import get_settings
+from sqlalchemy.orm import object_session
+
 from app.models import LlmSpend, Run, Submission
-from app.services import ai_audit, grader_isolation, image_inventory, network_policy, solution_variants, verifier_report, versions, web_use
+from app.services import ai_audit, grader_isolation, image_inventory, network_policy, result_rules, solution_variants, verifier_report, versions, web_use
 from app.services.harbor_runner import CODEX_BAKE_NOTE_MARKER
 from app.services.task_config import TaskConfig
 from app.services.tier2 import memory as tier2_memory
@@ -320,6 +322,15 @@ def _pass_at_k_table(n: int, c: int) -> dict[str, float]:
     return {str(k): _pass_at_k(n, c, k) for k in range(1, n + 1)}
 
 
+def _scored_counts(agent_runs) -> tuple[int, int]:
+    """(passed, scored) agent trials as the pass rate counts them: grader errors and trials with no valid
+    reward are left out, a trial that is both only once."""
+    excluded = sum(
+        1 for r in agent_runs if r.status in _TERMINAL and (_is_grader_error(r) or _has_no_valid_reward(r))
+    )
+    return sum(1 for r in agent_runs if r.reward == 1), len(agent_runs) - excluded
+
+
 def _agent_trials_result(submission: Submission) -> AgentTrialsResult:
     agent_runs = sorted(
         (r for r in submission.runs if r.kind == "agent"), key=lambda r: r.run_index
@@ -340,16 +351,16 @@ def _agent_trials_result(submission: Submission) -> AgentTrialsResult:
     # rate, pass@k and the refusal rate, and flagged for a rerun instead.
     grader_errors = sum(1 for r in agent_runs if r.status in _TERMINAL and _is_grader_error(r))
     no_valid_reward = sum(1 for r in agent_runs if r.status in _TERMINAL and _has_no_valid_reward(r))
-    excluded = sum(
-        1 for r in agent_runs if r.status in _TERMINAL and (_is_grader_error(r) or _has_no_valid_reward(r))
-    )  # one trial that is both is removed once
-    scored_n = n - excluded
+    passed, scored_n = _scored_counts(agent_runs)
     pass_rate = None
     pass_at_k = None
+    pass_interval = None
+    pass_rate_text = None
     if all_terminal and scored_n > 0:
-        passed = sum(1 for r in agent_runs if r.reward == 1)
         pass_rate = passed / scored_n
         pass_at_k = _pass_at_k_table(scored_n, passed)
+        pass_interval = list(result_rules.wilson(passed, scored_n))
+        pass_rate_text = result_rules.pass_rate_text(passed, scored_n)
 
     expected = _expected_tests(submission)
     trials = [_trial(r, expected) for r in agent_runs]
@@ -365,7 +376,8 @@ def _agent_trials_result(submission: Submission) -> AgentTrialsResult:
     return AgentTrialsResult(
         status=status, n=n, trials=trials, pass_rate=pass_rate, pass_at_k=pass_at_k,
         test_summary=test_summary, refusals=refused, pass_rate_excluding_refusals=rate_without,
-        grader_errors=grader_errors, no_valid_reward=no_valid_reward,
+        grader_errors=grader_errors, no_valid_reward=no_valid_reward, pass_interval=pass_interval,
+        pass_rate_text=pass_rate_text,
     )
 
 
@@ -622,11 +634,41 @@ def _review_report_result(run: Run | None) -> ReviewReportResult:
     return ReviewReportResult(status=run.status, passed=(run.reward == 1) if run.reward is not None else None, logs=run.logs)  # type: ignore[arg-type]
 
 
+def _overlapping_harbor_runs(submission: Submission) -> list[Run]:
+    """Harbor runs of any submission that overlap one of this submission's timed-out trials (rule 15.31).
+    Queried only when there is such a trial; without a database session only this submission's runs count."""
+    timed = result_rules.timed_out(submission.runs)
+    if not timed:
+        return []
+    own = [r for r in submission.runs if r.kind in result_rules.HARBOR_KINDS]
+    db = object_session(submission)
+    if db is None:
+        return own
+    start = min(t.started_at for t in timed)
+    end = max(t.finished_at for t in timed)
+    others = (
+        db.query(Run)
+        .filter(Run.submission_id != submission.id, Run.kind.in_(result_rules.HARBOR_KINDS),
+                Run.started_at.isnot(None), Run.finished_at.isnot(None),
+                Run.started_at < end, Run.finished_at > start)
+        .all()
+    )
+    return own + others
+
+
+def _result_warnings(submission: Submission, agent_trials: AgentTrialsResult) -> list[str]:
+    """The Results review lines (services/result_rules.py), counting trials the same way as the pass rate."""
+    agent_runs = [r for r in submission.runs if r.kind == "agent"]
+    scored = _scored_counts(agent_runs) if agent_trials.pass_rate is not None else (0, 0)
+    return result_rules.evaluate(list(submission.runs), _overlapping_harbor_runs(submission), scored)
+
+
 def to_schema(submission: Submission) -> SubmissionSchema:
     nop_run = _get_run(submission, "nop")
     sufficiency_run = _get_run(submission, "sufficiency")
     leakage_scan_run = _get_run(submission, "leakage_scan")
     review_report_run = _get_run(submission, "review_report")
+    agent_trials = _agent_trials_result(submission)
     return SubmissionSchema(
         id=submission.id,
         task_name=submission.task_name,
@@ -638,7 +680,7 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         ),
         oracle=_oracle_runs_result(submission),
         nop=_nop_stage_result(nop_run),
-        agent_trials=_agent_trials_result(submission),
+        agent_trials=agent_trials,
         sufficiency=_sufficiency_result(sufficiency_run),
         leakage_scan=_leakage_scan_result(leakage_scan_run),
         review_report=_review_report_result(review_report_run),
@@ -663,6 +705,7 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         image_inventory=_image_inventory_result(_get_run(submission, "image_inventory")),
         fresh_build=_fresh_build_result(_get_run(submission, "fresh_build")),
         checksum=_checksum_info(submission),
+        result_warnings=_result_warnings(submission, agent_trials),
     )
 
 
@@ -1301,7 +1344,8 @@ def build_summary_markdown(
         "",
         "## Agent Trials",
         f"- N: {schema.agent_trials.n}",
-        f"- Pass rate: {_fmt_pct(schema.agent_trials.pass_rate)}",
+        f"- Pass rate: {_fmt_pct(schema.agent_trials.pass_rate)}"
+        + (f" ({schema.agent_trials.pass_rate_text})" if schema.agent_trials.pass_rate_text else ""),
         *(
             [
                 f"- Refused: {schema.agent_trials.refusals} of {schema.agent_trials.n} trials "
@@ -1343,6 +1387,10 @@ def build_summary_markdown(
         lines.append(f"- {pass_k_line}")
     else:
         lines.append("- pass@k: not run yet")
+
+    if schema.result_warnings:
+        lines += ["", "## Results review (advisory, read from the stored runs)",
+                  *(f"- WARNING {w}" for w in schema.result_warnings)]
 
     verifier_lines = _verifier_lines(schema)
     if verifier_lines:

@@ -127,6 +127,10 @@ class AgentTrialsResult(BaseModel):
     # Trials Harbor says have no valid reward (cancelled, a missing reward file, a verifier timeout, or a
     # non-finite reward). Left out of pass_rate and pass_at_k like grader errors, never counted twice.
     no_valid_reward: int = 0
+    # 95% Wilson interval [low, high] for the pass rate, over the same scored trials as pass_rate.
+    pass_interval: list[float] | None = None
+    # The same as text, e.g. "1 of 3 passed (95% interval 6% to 79%)" (rule 15.11 asks for counts, not a bare %).
+    pass_rate_text: str | None = None
 
 
 class OracleSolution(BaseModel):
@@ -510,6 +514,9 @@ class SubmissionSchema(BaseModel):
     image_inventory: ImageInventoryResult
     fresh_build: FreshBuildResult
     checksum: ChecksumInfo
+    # Results review (services/result_rules.py): advisory lines, each starting with its rule id (15.6, 15.11,
+    # 15.12, 15.31). Never a gate, no ruling.
+    result_warnings: list[str] = []
 
 
 class SubmissionListItem(BaseModel):

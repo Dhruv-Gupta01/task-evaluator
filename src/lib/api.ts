@@ -144,6 +144,10 @@ export interface AgentTrialsResult {
   // Trials Harbor says have no valid reward (cancelled, a missing reward file, a verifier timeout, a
   // non-finite reward). Left out of pass_rate and pass_at_k, never counted twice with grader errors.
   no_valid_reward?: number;
+  // 95% Wilson interval [low, high] for pass_rate over the same scored trials, and the same as text
+  // ("1 of 3 passed (95% interval 6% to 79%)"). Null until every trial has finished.
+  pass_interval?: [number, number] | null;
+  pass_rate_text?: string | null;
   // Across the failing trials: which tests they failed and how close the best
   // one came. A single test failed by every failing trial is the typical
   // shape of an over-strict grader or an unstated rule (`notes`).
@@ -1031,6 +1035,9 @@ export interface Submission {
   image_inventory: ImageInventoryResult;
   fresh_build: FreshBuildResult;
   checksum: ChecksumInfo;
+  // Results review (backend services/result_rules.py): advisory lines read from the stored runs, each
+  // starting with its rule id (15.6, 15.11, 15.12, 15.31). Never a gate, no ruling.
+  result_warnings?: string[];
 }
 
 export interface SubmissionListItem {

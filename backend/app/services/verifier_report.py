@@ -9,6 +9,7 @@ and notice a reward that disagrees with the tests behind it.
 Everything here is advisory evidence for a human; nothing gates a stage."""
 
 import json
+from collections import Counter
 import platform
 import re
 import tomllib
@@ -58,6 +59,8 @@ def _read_ctrf(path: Path) -> dict | None:
         "failed_names": failed_names[:MAX_NAMES],
         "skipped_names": skipped_names[:MAX_NAMES],
         "names": sorted(set(names))[:MAX_ALL_NAMES],
+        # 15.6: several cases under one name cannot be told apart in a failure (result_rules.rule_duplicate_names).
+        "duplicate_names": sorted(n for n, c in Counter(names).items() if c > 1)[:MAX_NAMES],
     }
 
 
