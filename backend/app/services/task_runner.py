@@ -9,6 +9,8 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from sqlalchemy import func
+
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models import Run, Submission
@@ -1687,6 +1689,77 @@ async def _retry_infra_agent_failures(
             run.logs = f"{header}\n{result.error or 'harbor produced no result for the retry either'}"
         run.finished_at = datetime.now(UTC)
         db.commit()
+
+
+EVIDENCE_SETS = ("standard", "cheap")
+
+
+def evidence_pairs(which: str, second: bool = False) -> list[dict]:
+    """The agent/model pairs an evidence set runs. Standard: 3 trials of HARBOR_AGENT with its .env model, plus
+    3 of SECOND_AGENT/SECOND_AGENT_MODEL only when `second` (a pass rate from one model family says little, but
+    the second family is optional). Cheap: 2 trials of CHEAP_AGENT/CHEAP_AGENT_MODEL (a pass warns 15.36)."""
+    if which == "cheap":
+        return [{"agent": settings.cheap_agent, "model": settings.cheap_agent_model or None, "n": 2}]
+    pairs = [{"agent": settings.harbor_agent, "model": None, "n": 3}]
+    if second and settings.second_agent:
+        pairs.append({"agent": settings.second_agent, "model": settings.second_agent_model or None, "n": 3})
+    return pairs
+
+
+def add_pending_agent_rows(db, submission_id: str, n: int) -> None:
+    """n new pending agent rows after the last one (appended, like Agent Trials with append=true)."""
+    last = db.query(func.max(Run.run_index)).filter_by(submission_id=submission_id, kind="agent").scalar()
+    first = 0 if last is None else last + 1
+    for run_index in range(first, first + n):
+        db.add(Run(submission_id=submission_id, kind="agent", run_index=run_index, status="pending"))
+    db.commit()
+
+
+async def run_evidence_set(submission_id: str, which: str, max_cost_usd: float | None = None,
+                           second: bool = False) -> None:
+    """Runs an evidence set pair by pair, appending to the agent trials, then Failure Analysis (TB rubric) for
+    the standard set. Each pair gets an equal share of the optional cap. A pair whose agent is not set up is
+    skipped ("not run: ...") and makes the set failed. Progress and result in the `evidence_runs` row:
+    {set, second, cost_cap, pairs: [{agent, model, n, status}]}."""
+    pairs = evidence_pairs(which, second)
+    share = max_cost_usd / len(pairs) if max_cost_usd else None
+    db = SessionLocal()
+    try:
+        row = _get_or_create_run(db, submission_id, "evidence_runs", 0)
+        row.status, row.reward, row.started_at, row.finished_at = "running", None, datetime.now(UTC), None
+        state = {"set": which, "second": second, "cost_cap": max_cost_usd,
+                 "pairs": [{**p, "status": "pending"} for p in pairs]}
+        row.logs = json.dumps(state)
+        db.commit()
+        for i, pair in enumerate(pairs):
+            error = _agent_config_error(pair["agent"], pair["model"])
+            if error:
+                state["pairs"][i]["status"] = f"not run: {error}"
+            else:
+                state["pairs"][i]["status"] = "running"
+                row.logs = json.dumps(state)
+                db.commit()
+                add_pending_agent_rows(db, submission_id, pair["n"])
+                await run_agent_trials(submission_id, pair["n"], append=True, agent=pair["agent"],
+                                       max_cost_usd=share, model=pair["model"])
+                state["pairs"][i]["status"] = "done"
+            row.logs = json.dumps(state)
+            db.commit()
+        if which == "standard" and any(p["status"] == "done" for p in state["pairs"]):
+            await run_failure_analysis(submission_id, "tb")
+        ok = all(p["status"] == "done" for p in state["pairs"])
+        row.status, row.reward, row.finished_at = ("passed" if ok else "failed"), (1 if ok else 0), datetime.now(UTC)
+        row.logs = json.dumps(state)
+        db.commit()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        row = _get_or_create_run(db, submission_id, "evidence_runs", 0)
+        row.status, row.reward, row.finished_at = "failed", None, datetime.now(UTC)
+        row.logs = json.dumps({"set": which, "second": second, "error": traceback.format_exc()})
+        db.commit()
+    finally:
+        db.close()
 
 
 async def run_agent_trials(

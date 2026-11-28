@@ -131,6 +131,22 @@ class AgentTrialsResult(BaseModel):
     pass_interval: list[float] | None = None
     # The same as text, e.g. "1 of 3 passed (95% interval 6% to 79%)" (rule 15.11 asks for counts, not a bare %).
     pass_rate_text: str | None = None
+    # Finished trials per agent and model (read from each trial's harbor command), in first-seen order: an
+    # evidence set appends trials of other models, so one pass rate can mix several.
+    by_model: list["ModelCount"] = []
+
+
+class ModelCount(BaseModel):
+    agent: str | None = None
+    model: str | None = None
+    passed: int
+    n: int
+
+
+class EvidenceSetResult(BaseModel):
+    # logs is JSON: {set: standard|cheap, second, cost_cap, pairs: [{agent, model, n, status}]} or {error}.
+    status: StageStatus
+    logs: str | None = None
 
 
 class OracleSolution(BaseModel):
@@ -517,6 +533,7 @@ class SubmissionSchema(BaseModel):
     # Results review (services/result_rules.py): advisory lines, each starting with its rule id (15.6, 15.11,
     # 15.12, 15.31). Never a gate, no ruling.
     result_warnings: list[str] = []
+    evidence_set: EvidenceSetResult = EvidenceSetResult(status="not-run")
 
 
 class SubmissionListItem(BaseModel):

@@ -48,6 +48,7 @@ import { LogPanel } from "@/components/LogPanel";
 import { GraderIsolationPanel } from "@/components/GraderIsolationPanel";
 import { WorkerProbePanel } from "@/components/WorkerProbePanel";
 import { HashProofPanel } from "@/components/HashProofPanel";
+import { EvidenceSetPanel } from "@/components/EvidenceSetPanel";
 import { AiRulingPanel } from "@/components/AiRulingPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -106,6 +107,7 @@ function SubmissionDetail() {
         isActive(d.answer_exposure.status) ||
         isActive(d.worker_probe?.status ?? "not-run") ||
         isActive(d.hash_proof?.status ?? "not-run") ||
+        isActive(d.evidence_set?.status ?? "not-run") ||
         isActive(d.tier0.status) ||
         isActive(d.tier1.status) ||
         isActive(d.tier2.status) ||
@@ -1660,6 +1662,14 @@ function SubmissionDetail() {
               </div>
             )}
 
+          <EvidenceSetPanel
+            id={id}
+            data={data.evidence_set ?? { status: "not-run" }}
+            ready={buildReady && data.oracle.all_passed === true}
+            notReadyReason="The Oracle must pass first: every solution, 3 times"
+            onChange={invalidate}
+          />
+
           {data.agent_trials.trials && data.agent_trials.trials.length > 0 && (
             <div className="rounded-md border border-border">
               <div className="flex items-center justify-between border-b border-border px-3 py-2 text-sm">
@@ -1678,6 +1688,19 @@ function SubmissionDetail() {
                   )}
                 </span>
               </div>
+              {data.agent_trials.by_model && data.agent_trials.by_model.length > 1 && (
+                <div className="flex flex-wrap gap-x-4 gap-y-1 border-b border-border px-3 py-2 text-xs text-muted-foreground">
+                  <span>By model:</span>
+                  {data.agent_trials.by_model.map((g) => (
+                    <span key={`${g.agent}/${g.model}`}>
+                      {g.agent ?? "?"}/{g.model ?? "default model"}:{" "}
+                      <span className="font-mono">
+                        {g.passed} of {g.n}
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              )}
               {data.agent_trials.pass_at_k && (
                 <div className="flex flex-wrap gap-x-4 gap-y-1 border-b border-border px-3 py-2 text-xs text-muted-foreground">
                   {Object.entries(data.agent_trials.pass_at_k)

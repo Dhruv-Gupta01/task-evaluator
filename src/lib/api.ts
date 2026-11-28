@@ -148,6 +148,8 @@ export interface AgentTrialsResult {
   // ("1 of 3 passed (95% interval 6% to 79%)"). Null until every trial has finished.
   pass_interval?: [number, number] | null;
   pass_rate_text?: string | null;
+  // Finished trials per agent and model, in first-seen order (an evidence set appends other models' trials).
+  by_model?: ModelCount[];
   // Across the failing trials: which tests they failed and how close the best
   // one came. A single test failed by every failing trial is the typical
   // shape of an over-strict grader or an unstated rule (`notes`).
@@ -732,6 +734,20 @@ export interface ImageInventory {
 }
 
 // Still builds and solves today: no-cache build plus one Oracle run.
+export interface ModelCount {
+  agent: string | null;
+  model: string | null;
+  passed: number;
+  n: number;
+}
+
+// Evidence set (backend run_evidence_set). logs is JSON: {set, second, cost_cap, pairs: [{agent, model, n,
+// status}]} or {error}.
+export interface EvidenceSetResult {
+  status: StageStatus;
+  logs?: string | null;
+}
+
 export interface FreshBuildResult {
   status: StageStatus;
   logs?: string;
@@ -1044,6 +1060,7 @@ export interface Submission {
   // Results review (backend services/result_rules.py): advisory lines read from the stored runs, each
   // starting with its rule id (15.6, 15.11, 15.12, 15.31). Never a gate, no ruling.
   result_warnings?: string[];
+  evidence_set?: EvidenceSetResult;
 }
 
 export interface SubmissionListItem {
@@ -1217,6 +1234,14 @@ export const api = {
     fetch(`${API_BASE_URL}/submissions/${id}/image-inventory`, { method: "POST" }).then(
       handle<unknown>,
     ),
+  // An evidence set, appended to the agent trials. second = also the second model family (standard set only).
+  evidenceSet: (id: string, which: "standard" | "cheap", maxCost?: number, second?: boolean) =>
+    fetch(
+      `${API_BASE_URL}/submissions/${id}/evidence-set?which=${which}` +
+        (maxCost ? `&max_cost_usd=${maxCost}` : "") +
+        (second && which === "standard" ? "&second=true" : ""),
+      { method: "POST" },
+    ).then(handle<unknown>),
   freshBuild: (id: string) =>
     fetch(`${API_BASE_URL}/submissions/${id}/fresh-build`, { method: "POST" }).then(
       handle<unknown>,

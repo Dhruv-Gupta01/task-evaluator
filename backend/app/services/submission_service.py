@@ -14,6 +14,8 @@ from app.services.task_config import TaskConfig
 from app.services.tier2 import memory as tier2_memory
 from app.schemas import (
     AgentTrialsResult,
+    EvidenceSetResult,
+    ModelCount,
     AnswerExposureResult,
     RegradeResult,
     SuggestedVerdict,
@@ -378,6 +380,7 @@ def _agent_trials_result(submission: Submission) -> AgentTrialsResult:
         test_summary=test_summary, refusals=refused, pass_rate_excluding_refusals=rate_without,
         grader_errors=grader_errors, no_valid_reward=no_valid_reward, pass_interval=pass_interval,
         pass_rate_text=pass_rate_text,
+        by_model=[ModelCount(**g) for g in result_rules.model_breakdown(agent_runs)],
     )
 
 
@@ -656,6 +659,12 @@ def _overlapping_harbor_runs(submission: Submission) -> list[Run]:
     return own + others
 
 
+def _evidence_set_result(run: Run | None) -> EvidenceSetResult:
+    if run is None:
+        return EvidenceSetResult(status="not-run")
+    return EvidenceSetResult(status=run.status, logs=run.logs)  # type: ignore[arg-type]
+
+
 def _result_warnings(submission: Submission, agent_trials: AgentTrialsResult) -> list[str]:
     """The Results review lines (services/result_rules.py), counting trials the same way as the pass rate."""
     agent_runs = [r for r in submission.runs if r.kind == "agent"]
@@ -706,6 +715,7 @@ def to_schema(submission: Submission) -> SubmissionSchema:
         fresh_build=_fresh_build_result(_get_run(submission, "fresh_build")),
         checksum=_checksum_info(submission),
         result_warnings=_result_warnings(submission, agent_trials),
+        evidence_set=_evidence_set_result(_get_run(submission, "evidence_runs")),
     )
 
 
@@ -1346,6 +1356,19 @@ def build_summary_markdown(
         f"- N: {schema.agent_trials.n}",
         f"- Pass rate: {_fmt_pct(schema.agent_trials.pass_rate)}"
         + (f" ({schema.agent_trials.pass_rate_text})" if schema.agent_trials.pass_rate_text else ""),
+        *(
+            ["- By model: " + "; ".join(
+                f"{g.agent or '?'}/{g.model or 'default model'}: {g.passed} of {g.n}" for g in schema.agent_trials.by_model
+            )]
+            if len(schema.agent_trials.by_model) > 1
+            else []
+        ),
+        *(
+            [f"- Evidence set: {_json_field(schema.evidence_set.logs, 'set') or 'unknown'}, "
+             f"{_fmt_status(schema.evidence_set.status)}"]
+            if schema.evidence_set.status != "not-run"
+            else []
+        ),
         *(
             [
                 f"- Refused: {schema.agent_trials.refusals} of {schema.agent_trials.n} trials "

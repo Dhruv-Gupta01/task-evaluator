@@ -92,6 +92,13 @@ class Settings(BaseSettings):
     # agent and the LLM judges use the same model unless overridden.
     harbor_agent: str = "terminus-2"
     agent_model: str = ""
+    # Evidence sets (task_runner.evidence_pairs). The optional second model family of the standard set
+    # (only when the run asks for it; empty SECOND_AGENT = none), and the cheap set's small model, whose
+    # pass raises Results review rule 15.36.
+    second_agent: str = "codex"
+    second_agent_model: str = "openai/gpt-6-luna"
+    cheap_agent: str = "claude-code"
+    cheap_agent_model: str = "anthropic/claude-haiku-5-5"
     # Model for the Claude Code agent (the UI's "Claude Code" choice, or
     # HARBOR_AGENT=claude-code). Needs ANTHROPIC_API_KEY. Like Codex it runs
     # inside the task container, so the key enters the container.

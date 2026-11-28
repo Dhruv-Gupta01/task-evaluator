@@ -799,6 +799,33 @@ async def trigger_image_inventory(submission_id: str, db: Session = Depends(get_
     return {"status": "started"}
 
 
+@router.post("/submissions/{submission_id}/evidence-set", status_code=202)
+async def trigger_evidence_set(
+    submission_id: str,
+    which: str = "standard",
+    max_cost_usd: float | None = None,
+    second: bool = False,
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    """An evidence set, appended to the agent trials. standard: 3 trials of HARBOR_AGENT, then Failure Analysis
+    on the TB rubric; second=true adds 3 trials of SECOND_AGENT/SECOND_AGENT_MODEL (optional, off by default).
+    cheap: 2 trials of CHEAP_AGENT/CHEAP_AGENT_MODEL (a pass warns 15.36). max_cost_usd caps the whole set, split
+    evenly between the pairs; leave it out for no set-wide cap. Costs real credits."""
+    if which not in task_runner.EVIDENCE_SETS:
+        raise HTTPException(status_code=400, detail=f"which must be one of {', '.join(task_runner.EVIDENCE_SETS)}")
+    if max_cost_usd is not None and not 0 < max_cost_usd <= 10_000:
+        raise HTTPException(status_code=400, detail="max_cost_usd must be between 0 and 10000")
+    _require_built_submission(submission_id, db)
+    _require_oracle_passed(submission_id, db)
+    _require_grader_isolation(submission_id, db)
+    _raise_if_over_budget(db, budget.exceeded_message(db))
+    pairs = task_runner.evidence_pairs(which, second)
+    await task_queue.submit(
+        f"{submission_id}:agent", task_runner.run_evidence_set(submission_id, which, max_cost_usd, second)
+    )
+    return {"status": "started", "pairs": json.dumps(pairs)}
+
+
 @router.post("/submissions/{submission_id}/fresh-build", status_code=202)
 async def trigger_fresh_build(submission_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
     """Advisory: does the task still build and solve today? A no-cache,

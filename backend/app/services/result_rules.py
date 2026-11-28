@@ -1,6 +1,6 @@
-"""Four rules that read stored results and say something a reviewer should know (advisory, never a gate).
+"""Five rules that read stored results and say something a reviewer should know (advisory, never a gate).
 
-Adapted from the post-fixes branch's `flag_results.py`, where they were Flags 15.6, 15.11, 15.12 and 15.31.
+Adapted from the post-fixes branch's `flag_results.py`, where they were Flags 15.6, 15.11, 15.12, 15.31 and 15.36.
 This branch has no Flag framework or rulings, so each rule returns plain warning lines that start with the rule id;
 `submission_service` puts them in `SubmissionSchema.result_warnings` (the page's Results review box) and the
 evidence summary. Left out on purpose: 15.20 (no arm64 run; this platform runs every task on linux/arm64, so it
@@ -15,6 +15,8 @@ from app.config import get_settings
 
 HARBOR_KINDS = ("oracle", "oracle_stress", "nop", "agent", "cheat_trial")
 _TIMEOUT_RE = re.compile(r"TimeoutError|timed out|AgentTimeout")
+_AGENT_RE = re.compile(r"harbor run\b.*?--agent\s+(\S+)")
+_MODEL_RE = re.compile(r"harbor run\b.*?--model\s+(\S+)")
 
 
 def _report(run) -> dict:
@@ -101,6 +103,38 @@ def rule_separating(runs) -> list[str]:
             "is no measure of how close it came."]
 
 
+def trial_agent_model(run) -> tuple[str | None, str | None]:
+    """The agent and model a trial ran with, read from the `harbor run` command its logs record."""
+    text = run.logs or ""
+    agent, model = _AGENT_RE.search(text), _MODEL_RE.search(text)
+    return (agent.group(1) if agent else None), (model.group(1) if model else None)
+
+
+def model_breakdown(runs) -> list[dict]:
+    """Finished agent trials (with a reward) grouped by agent and model, in first-seen order, so a pass rate made
+    of several models (an evidence set appends trials) stays readable."""
+    groups: dict[tuple, dict] = {}
+    for t in sorted(_finished(_of(runs, "agent")), key=lambda r: r.run_index):
+        agent, model = trial_agent_model(t)
+        g = groups.setdefault((agent, model), {"agent": agent, "model": model, "passed": 0, "n": 0})
+        g["n"] += 1
+        g["passed"] += 1 if t.reward >= 1 else 0
+    return list(groups.values())
+
+
+def rule_cheap_model(runs) -> list[str]:
+    """15.36: the cheap small model (CHEAP_AGENT_MODEL) solved the task, the loudest shortcut alarm."""
+    cheap = get_settings().cheap_agent_model
+    if not cheap:
+        return []
+    trials = [t for t in _finished(_of(runs, "agent")) if trial_agent_model(t)[1] == cheap]
+    passed = sum(1 for t in trials if t.reward >= 1)
+    if not passed:
+        return []
+    return [f"15.36: the cheap model {cheap} solved the task ({pass_rate_text(passed, len(trials))}): check for a "
+            "shortcut before trusting the difficulty."]
+
+
 def timed_out(runs) -> list:
     """Oracle and agent trials that ended with no reward because of a timeout, with known start and end."""
     return [t for t in _of(runs, "agent", "oracle")
@@ -128,6 +162,7 @@ def evaluate(runs, other_runs, scored: tuple[int, int]) -> list[str]:
         ("15.11", lambda: rule_interval(*scored)),
         ("15.12", lambda: rule_separating(runs)),
         ("15.31", lambda: rule_timeout_under_load(runs, other_runs)),
+        ("15.36", lambda: rule_cheap_model(runs)),
     )
     out: list[str] = []
     for rule_id, check in checks:
