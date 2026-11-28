@@ -128,13 +128,13 @@ The README has a longer table of the same stages with the extra detail added in 
 
 Built from `harbor-5.0`: Reward Kit, the three cheat-trial tiers, Harbor 0.26.0 and the Worker work below.
 **Not on this branch yet** (they live on `merge-reward-kit-into-post-fixes` and are being brought over one at a
-time since 2026-11-28): the Flags system and its panels, the shared-verifier Tier 0 probes G25 to G27,
+time since 2026-11-28): the Flags system and its panels,
 session-log integrity, the output scan, the regrade classifier, `.harborignore` handling, web-use counting,
 versioning, evidence-set runs, generators and redaction of the evidence bundle. Solution variants are replaced
 here by `oracle_solutions`. A section here that mentions one of them would be wrong for this branch. Already
 brought over: the vendored checks at `bdf6034`, the task name from `[task] name`, Harbor's error policy, four
 Static Checks (printed success words, Lean output, one-sample timing, timed repeats), the prompt guards and the
-Tier 0 probes G17 to G24.
+Tier 0 probes G17 to G27.
 
 - **Tier cycle ("Run all tiers")**: Tier 0 (static probes), Tier 1 (hinted agent plus fixer) and
   Tier 2 (unhinted agent) repeat on the patched task until a round needs no patch (no round
@@ -176,8 +176,8 @@ Tier 0 probes G17 to G24.
   - `verifier_worker_unused` (info, Static Checks): a Worker that is imported and never called, or called with no
     agent-writable path in `Worker(...)` or its chained `.run(SCRIPT, files=[...])`.
   - `verifier_shared_mode_routes` (warn, Static Checks): a task graded inside the agent's own container leaves a
-    program left running, a swapped program on PATH, a planted `conftest.py` and visible files open, and Tier 0
-    cannot probe it.
+    program left running, a swapped program on PATH, a planted `conftest.py` and visible files open. Tier 0
+    probes the program, PATH and conftest routes through real Harbor trials (G25 to G27).
   - `verifier_queries_agent_service` (warn, shared mode only): the grader queries `localhost:PORT` and nothing in the
     task starts that port, so only a server the agent left running can answer, outside any Worker. Tried on fixtures
     only; none of the stored real tasks queries localhost.

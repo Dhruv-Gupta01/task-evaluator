@@ -44,6 +44,7 @@ from app.services.tier0 import docker_runner as tier0_docker
 from app.services.tier0 import probes as tier0_probes
 from app.services.tier0 import record as tier0_record
 from app.services.tier0 import runner as tier0_runner
+from app.services.tier0 import shared_mode as tier0_shared_mode
 from app.services.tier0 import taskspec as tier0_taskspec
 from app.services.tier1 import fixer as tier1_fixer
 from app.services.tier1 import hacker as tier1_hacker
@@ -608,7 +609,12 @@ async def _tier0_harbor_probe(submission: Submission, spec, probe, config) -> di
         )
         shutil.rmtree(copy_root, ignore_errors=True)
         res.reward = outcome.reward
-        if outcome.reward is None:
+        if tier0_shared_mode.is_shared_probe(probe):
+            planted = tier0_shared_mode.planted_count(tier0_shared_mode.oracle_output(outcome.trial_dir))
+            alive = tier0_shared_mode.daemon_survived(outcome.trial_dir) if probe.pid == "G25" else None
+            res.verdict, res.notes = tier0_shared_mode.judge(probe, outcome.reward, planted, alive)
+            res.diagnostics = {"planted": planted, "program_running_during_grading": alive}
+        elif outcome.reward is None:
             res.verdict = "inconclusive"
             res.notes = ["Harbor produced no reward for this trial: " + (outcome.logs or "")[-300:]]
         elif outcome.reward >= 1.0:
@@ -625,6 +631,41 @@ async def _tier0_harbor_probe(submission: Submission, spec, probe, config) -> di
         res.notes = [f"{type(exc).__name__}: {exc}"]
     res.duration_sec = round((datetime.now(UTC) - started).total_seconds(), 1)
     return asdict(res)
+
+
+async def _run_shared_mode_stage(db, run: Run, submission: Submission, base: dict, root: Path) -> None:
+    """Tier 0 for a shared-verifier task: the replica cannot drive it, so each shared-mode probe (G25 to G27)
+    is run as the solve.sh of a copy through a real Harbor Oracle trial, one at a time."""
+    from types import SimpleNamespace
+
+    from app.services.tier0 import record as rec
+
+    spec = SimpleNamespace(root=root, artifacts=[], slug=tier0_shared_mode.slug_of(root))
+    config = _get_task_config(submission)
+    probes = tier0_shared_mode.PROBES
+    rows: list[dict] = []
+    for i, probe in enumerate(probes, 1):
+        rows.append(await _tier0_harbor_probe(submission, spec, probe, config))
+        run.logs = json.dumps(
+            {**base, "task": spec.slug, "shared_mode": True, "results": rows,
+             "progress": {"done": i, "total": len(probes)}}
+        )
+        db.commit()
+    results = [rec.ProbeResult(**r) for r in rows]
+    summary = rec.summarise(results)
+    summary["needs_harbor_to_settle"] = [r["probe_id"] for r in rows if r["verdict"] == "inconclusive"]
+    attention = [r for r in rows if r["verdict"] in _TIER0_ATTENTION]
+    run.logs = json.dumps(
+        {
+            **base, "task": spec.slug, "shared_mode": True, "skipped": None, "summary": summary, "results": rows,
+            "progress": {"done": len(rows), "total": len(rows)}, "images_removed": 0, "selftest": [],
+            "replay": [], "comparison": None, "verifier_fingerprint": None,
+        }
+    )
+    run.status = "failed" if attention else "passed"
+    run.reward = 0 if attention else 1
+    run.finished_at = datetime.now(UTC)
+    db.commit()
 
 
 async def run_tier0_stage(
@@ -665,7 +706,18 @@ async def run_tier0_stage(
         try:
             spec = tier0_taskspec.load(task_root or submission.extracted_path)  # task_root: a hardened copy
         except (ValueError, FileNotFoundError) as exc:
-            run.logs = json.dumps({**base, "task": None, "skipped": str(exc), "summary": None, "results": []})
+            shared_root = task_root or submission.extracted_path
+            if harbor and tier0_shared_mode.is_shared_mode(shared_root):
+                await _run_shared_mode_stage(db, run, submission, base, Path(shared_root))
+                return
+            reason = str(exc)
+            if tier0_shared_mode.is_shared_mode(shared_root):
+                reason = (
+                    "shared-verifier task: Tier 0's replica only models separate verifiers, and the shared-mode "
+                    "Harbor probes (G25 to G27) were switched off for this run. "
+                    f"({reason})"
+                )
+            run.logs = json.dumps({**base, "task": None, "skipped": reason, "summary": None, "results": []})
             run.status, run.reward = "passed", 1
             run.finished_at = datetime.now(UTC)
             db.commit()

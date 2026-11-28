@@ -173,8 +173,9 @@ def check_reward_reset(t: _Task, report) -> None:
 
 
 def check_shared_mode_routes(t: _Task, report) -> None:
-    """A shared verifier grades inside the container the agent worked in. Tier 0 skips such tasks, so these
-    routes (all seen in Singularity-Bench's attacks on plain Harbor) are not probed for them."""
+    """A shared verifier grades inside the container the agent worked in. Tier 0's replica cannot drive such tasks;
+    three of these routes (all seen in Singularity-Bench's attacks on plain Harbor) are probed through real Harbor
+    trials instead (tier0/shared_mode.py, G25 to G27)."""
     if t.separate or not t.test_sh:
         return
     report.add(
@@ -183,8 +184,9 @@ def check_shared_mode_routes(t: _Task, report) -> None:
         "closes stay open. (1) A program the agent left running can outlive the agent phase and rewrite the "
         "reward or answer the grader's calls. (2) A fake program placed on PATH, a planted conftest.py, or a "
         "sitecustomize.py in the working folder is picked up by the grader's own commands. (3) Files the "
-        "agent writes anywhere in the container are visible to the grader. Tier 0's probes cannot test a "
-        "shared-mode task (it is skipped), so none of this is exercised. Prefer `environment_mode = "
+        "agent writes anywhere in the container are visible to the grader. Tier 0 tries (1) and (2) through real "
+        "Harbor trials (G25 a program left running, G26 swapped pytest/python, G27 a planted conftest.py; see the "
+        "Tier 0 card); (3) is not probed. Prefer `environment_mode = "
         "\"separate\"` with a tests/Dockerfile and a declared artifacts list; if the task has to stay shared, "
         "run the grader with absolute program paths, a cleaned PATH, `python -I`, and check for stray "
         "processes first.",

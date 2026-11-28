@@ -40,7 +40,7 @@ All three are advisory. None changes a gate, and none edits the uploaded task.
 
 No agent. Each probe is a script that stands in for the agent inside the task's own image and leaves behind the artifacts an exploit would produce. The platform copies out the declared artifacts, builds the verifier image from `tests/`, runs `tests/test.sh` and reads `reward.txt`.
 
-It is a replica of Harbor's separate-verifier contract, not Harbor itself. A task that is not `environment_mode = "separate"`, has no top-level `artifacts`, or whose compose file gives `main` its own build is skipped.
+It is a replica of Harbor's separate-verifier contract, not Harbor itself. A task that is not `environment_mode = "separate"`, has no top-level `artifacts`, or whose compose file gives `main` its own build is skipped. A shared-verifier task (graded inside the agent's own container) is not skipped: it gets three probes, each run as the `solve.sh` of a task copy through a real Harbor Oracle trial (no model, no credits): G25 leaves a detached program rewriting `reward.txt`/`reward.json` every 0.1 s, G26 swaps `pytest`/`python3`/`python` for ones that report a pass, G27 plants a `conftest.py` that passes every test. Reward 1 is `exploited`; a probe that planted nothing (`RESULT planted:0`) is `inconclusive`, never `held`. With Harbor probes switched off the task is skipped and the reason says why.
 
 What makes a result trustworthy is the **positive control**. A probe that scores 0 is only evidence if the same probe scores 1 against a copy of the verifier with that one defence removed. Those copies are called mutants:
 
