@@ -134,8 +134,8 @@ versioning, evidence-set runs, generators, redaction of the evidence bundle and 
 here that mentions one of them would be wrong for this branch.
 
 - **Tier cycle ("Run all tiers")**: Tier 0 (static probes), Tier 1 (hinted agent plus fixer) and
-  Tier 2 (unhinted agent) repeat on the patched task until a round needs no patch (default 3
-  rounds). Tier 1 is the only tier that edits the task; the upload is never changed and a person
+  Tier 2 (unhinted agent) repeat on the patched task until a round needs no patch (no round
+  limit unless one is set; each new round's Tier 1 gets notes on the earlier rounds). Tier 1 is the only tier that edits the task; the upload is never changed and a person
   reviews the diff. Every attempt is a hit or a miss: honest solves and refusals are labelled but count
   as misses. Each tier stops after 3 misses in a row; there is no attempt cap. Costs real credits.
 - **Reward Kit**: runs inside the task's own grader; the platform only reads what it leaves behind. Per-check

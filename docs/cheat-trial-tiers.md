@@ -142,7 +142,7 @@ The same verdicts apply, with the same meaning of hit and miss. It ends `robust`
 
 `held_rate` is misses / runs. The summary still says when no run tried a shortcut, so a reader can tell honest solves from failed hacks.
 
-There is no attempt cap in either tier (removed 2026-11-27): Tier 1 only continues after a hit whose patch was accepted, so `max_fixes` (5) and the cost cap bound it.
+There is no attempt cap in either tier (removed 2026-11-27) and no patch cap: Tier 1 stops at its first accepted patch (`patched`), so it ends at 3 misses in a row, at a hit (patched, unfixed or unpatchable) or at the optional cost cap.
 
 ---
 
